@@ -1,87 +1,99 @@
+use std::collections::{HashMap, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
+use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use uuid::Uuid;
+use tokio_tungstenite::tungstenite::Message;
 
-use crate::cdp::{connect_cdp_websocket, CdpSession};
+use crate::cdp::connect_cdp_websocket;
 use crate::routes::{handle_bridge_request, BridgeContext};
 
-#[derive(Debug, Clone)]
-pub struct BridgeServer {
-    port: u16,
-    token: String,
-}
+const BRIDGE_BINDING_NAME: &str = "codexHelperBridgeV1";
+const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
-impl BridgeServer {
-    pub fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
-    }
-}
+type BridgeHandler = Arc<
+    dyn Fn(String, Value) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>>
+        + Send
+        + Sync,
+>;
 
-pub async fn start_bridge_server(ctx: BridgeContext) -> anyhow::Result<BridgeServer> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let port = listener.local_addr()?.port();
-    let token = Uuid::new_v4().to_string();
-    let server = BridgeServer {
-        port,
-        token: token.clone(),
-    };
-    let ctx = Arc::new(ctx);
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let ctx = Arc::clone(&ctx);
-            let token = token.clone();
-            tokio::spawn(async move {
-                let _ = handle_http_connection(stream, ctx, token).await;
-            });
-        }
-    });
-    Ok(server)
-}
+static NEXT_MESSAGE_ID: AtomicU64 = AtomicU64::new(100);
 
-pub fn build_bridge_script(base_url: &str, token: &str) -> String {
+pub fn build_bridge_script(binding_name: &str) -> String {
     format!(
         r#"
 (() => {{
-  const baseUrl = {base_url};
-  const bridgeToken = {token};
-  window.__codexHelperBridge = async (path, payload = {{}}) => {{
-    const response = await fetch(`${{baseUrl}}${{path}}`, {{
-      method: "POST",
-      headers: {{
-        "content-type": "application/json",
-        "x-codex-helper-token": bridgeToken,
-      }},
-      body: JSON.stringify(payload),
-    }});
-    if (!response.ok) {{
-      return {{ status: "failed", message: `Codex Helper bridge HTTP ${{response.status}}` }};
-    }}
-    return response.json();
+  window.__codexHelperCallbacks = new Map();
+  window.__codexHelperSeq = 0;
+  window.__codexHelperResolve = (id, result) => {{
+    const callback = window.__codexHelperCallbacks.get(id);
+    if (!callback) return;
+    window.__codexHelperCallbacks.delete(id);
+    callback.resolve(result);
   }};
+  window.__codexHelperReject = (id, message) => {{
+    const callback = window.__codexHelperCallbacks.get(id);
+    if (!callback) return;
+    window.__codexHelperCallbacks.delete(id);
+    callback.resolve({{ status: "failed", message }});
+  }};
+  window.__codexHelperBridge = (path, payload = {{}}) => new Promise((resolve) => {{
+    const id = String(++window.__codexHelperSeq);
+    window.__codexHelperCallbacks.set(id, {{ resolve }});
+    window.{binding_name}(JSON.stringify({{ id, path, payload }}));
+  }});
 }})();
-"#,
-        base_url = serde_json::to_string(base_url).expect("base url json"),
-        token = serde_json::to_string(token).expect("token json")
+"#
     )
 }
 
 pub async fn install_bridge(
     websocket_url: &str,
-    server: &BridgeServer,
+    ctx: BridgeContext,
     runtime_scripts: Vec<String>,
 ) -> anyhow::Result<()> {
+    let handler = bridge_handler(ctx);
     let socket = connect_cdp_websocket(websocket_url).await?;
-    let mut session = CdpSession::new(socket);
+    let mut session = BindingCdpSession::new(socket).with_handler(handler);
 
     session.send_command(1, "Runtime.enable", json!({})).await?;
+    session
+        .send_command(
+            2,
+            "Runtime.removeBinding",
+            json!({ "name": BRIDGE_BINDING_NAME }),
+        )
+        .await?;
+    session
+        .send_command(
+            3,
+            "Runtime.addBinding",
+            json!({ "name": BRIDGE_BINDING_NAME }),
+        )
+        .await?;
 
-    let mut scripts = vec![build_bridge_script(&server.base_url(), &server.token)];
-    scripts.extend(runtime_scripts);
-    let mut message_id = 2;
-    for script in scripts {
+    let bridge_script = build_bridge_script(BRIDGE_BINDING_NAME);
+    session
+        .send_command(
+            4,
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({ "source": bridge_script }),
+        )
+        .await?;
+    session
+        .send_command(
+            5,
+            "Runtime.evaluate",
+            runtime_evaluate_params(&bridge_script),
+        )
+        .await?;
+
+    for script in runtime_scripts {
+        let message_id = next_message_id();
         session
             .send_command(
                 message_id,
@@ -89,7 +101,7 @@ pub async fn install_bridge(
                 json!({ "source": script }),
             )
             .await?;
-        message_id += 1;
+        let message_id = next_message_id();
         session
             .send_command(
                 message_id,
@@ -97,10 +109,29 @@ pub async fn install_bridge(
                 runtime_evaluate_params(&script),
             )
             .await?;
-        message_id += 1;
     }
 
+    session.drain_binding_queue().await?;
+    tokio::spawn(async move {
+        loop {
+            if session.drain_binding_queue().await.is_err() {
+                break;
+            }
+            match session.next_message().await {
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => break,
+            }
+        }
+    });
+
     Ok(())
+}
+
+fn bridge_handler(ctx: BridgeContext) -> BridgeHandler {
+    Arc::new(move |path, payload| {
+        let ctx = ctx.clone();
+        Box::pin(async move { Ok(handle_bridge_request(ctx, &path, payload).await) })
+    })
 }
 
 fn runtime_evaluate_params(expression: &str) -> Value {
@@ -111,168 +142,262 @@ fn runtime_evaluate_params(expression: &str) -> Value {
     })
 }
 
-async fn handle_http_connection(
-    mut stream: TcpStream,
-    ctx: Arc<BridgeContext>,
-    token: String,
-) -> anyhow::Result<()> {
-    let mut buffer = Vec::new();
-    let mut chunk = [0_u8; 4096];
-    loop {
-        let read = stream.read(&mut chunk).await?;
-        if read == 0 {
-            return Ok(());
+fn resolve_bridge_expression(request_id: &str, result: &Value) -> anyhow::Result<String> {
+    Ok(format!(
+        "window.__codexHelperResolve({}, {})",
+        serde_json::to_string(request_id)?,
+        serde_json::to_string(result)?,
+    ))
+}
+
+fn reject_bridge_expression(request_id: &str, message: &str) -> anyhow::Result<String> {
+    Ok(format!(
+        "window.__codexHelperReject({}, {})",
+        serde_json::to_string(request_id)?,
+        serde_json::to_string(message)?,
+    ))
+}
+
+struct BindingCdpSession<S> {
+    socket: S,
+    responses: HashMap<u64, Value>,
+    binding_calls: VecDeque<Value>,
+    handler: Option<BridgeHandler>,
+}
+
+impl<S> BindingCdpSession<S>
+where
+    S: SinkExt<Message>
+        + StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + Unpin
+        + Send,
+    <S as futures_util::Sink<Message>>::Error: std::error::Error + Send + Sync + 'static,
+{
+    fn new(socket: S) -> Self {
+        Self {
+            socket,
+            responses: HashMap::new(),
+            binding_calls: VecDeque::new(),
+            handler: None,
         }
-        buffer.extend_from_slice(&chunk[..read]);
-        if request_complete(&buffer) {
-            break;
-        }
-        if buffer.len() > 1_048_576 {
-            write_json_response(
-                &mut stream,
-                413,
-                json!({"status": "failed", "message": "Request too large"}),
-            )
+    }
+
+    fn with_handler(mut self, handler: BridgeHandler) -> Self {
+        self.handler = Some(handler);
+        self
+    }
+
+    async fn send_command(
+        &mut self,
+        id: u64,
+        method: &str,
+        params: Value,
+    ) -> anyhow::Result<Value> {
+        self.socket
+            .send(Message::Text(
+                json!({ "id": id, "method": method, "params": params })
+                    .to_string()
+                    .into(),
+            ))
             .await?;
+        tokio::time::timeout(CDP_COMMAND_TIMEOUT, self.wait_for_response(id, method))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "timed out waiting for CDP command {method} after {}s",
+                    CDP_COMMAND_TIMEOUT.as_secs()
+                )
+            })?
+    }
+
+    async fn send_command_without_wait(
+        &mut self,
+        id: u64,
+        method: &str,
+        params: Value,
+    ) -> anyhow::Result<()> {
+        self.socket
+            .send(Message::Text(
+                json!({ "id": id, "method": method, "params": params })
+                    .to_string()
+                    .into(),
+            ))
+            .await?;
+        Ok(())
+    }
+
+    async fn wait_for_response(&mut self, id: u64, method: &str) -> anyhow::Result<Value> {
+        loop {
+            if let Some(response) = self.responses.remove(&id) {
+                if let Some(error) = response.get("error") {
+                    anyhow::bail!("CDP command {method} failed: {error}");
+                }
+                return Ok(response);
+            }
+            let Some(message) = self.next_message().await? else {
+                anyhow::bail!("CDP command {method} closed before response");
+            };
+            if let Some(response_id) = message.get("id").and_then(Value::as_u64) {
+                if response_id == id {
+                    if let Some(error) = message.get("error") {
+                        anyhow::bail!("CDP command {method} failed: {error}");
+                    }
+                    return Ok(message);
+                }
+                self.responses.insert(response_id, message);
+            }
+        }
+    }
+
+    async fn next_message(&mut self) -> anyhow::Result<Option<Value>> {
+        let Some(message) = self.socket.next().await else {
+            return Ok(None);
+        };
+        let message = message?;
+        let value = match message {
+            Message::Text(text) => serde_json::from_str(&text)?,
+            Message::Binary(bytes) => serde_json::from_slice(&bytes)?,
+            _ => json!({}),
+        };
+        if value.get("method").and_then(Value::as_str) == Some("Runtime.bindingCalled") {
+            self.binding_calls.push_back(value.clone());
+        }
+        Ok(Some(value))
+    }
+
+    async fn drain_binding_queue(&mut self) -> anyhow::Result<()> {
+        while let Some(message) = self.binding_calls.pop_front() {
+            self.route_binding_call(message).await?;
+        }
+        Ok(())
+    }
+
+    fn route_binding_call(
+        &mut self,
+        message: Value,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            let Some(handler) = self.handler.clone() else {
+                return Ok(());
+            };
+            let Some(payload_text) = message
+                .get("params")
+                .and_then(|params| params.get("payload"))
+                .and_then(Value::as_str)
+            else {
+                return Ok(());
+            };
+
+            let parsed: Value = match serde_json::from_str(payload_text) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    if let Some(request_id) = extract_string_field(payload_text, "id") {
+                        self.reject_bridge_request(
+                            &request_id,
+                            &format!("failed to parse bridge payload: {error}"),
+                        )
+                        .await?;
+                    }
+                    return Ok(());
+                }
+            };
+            self.route_parsed_binding_call(&handler, parsed).await
+        })
+    }
+
+    async fn route_parsed_binding_call(
+        &mut self,
+        handler: &BridgeHandler,
+        parsed: Value,
+    ) -> anyhow::Result<()> {
+        let Some(request_id) = parsed.get("id").and_then(Value::as_str) else {
             return Ok(());
+        };
+        let path = parsed
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let payload = parsed.get("payload").cloned().unwrap_or_else(|| json!({}));
+
+        match handler(path, payload).await {
+            Ok(result) => self.resolve_bridge_request(request_id, &result).await?,
+            Err(error) => {
+                self.reject_bridge_request(request_id, &error.to_string())
+                    .await?
+            }
         }
+        Ok(())
     }
-    let request = parse_http_request(&buffer)?;
-    if request.method == "OPTIONS" {
-        write_options_response(&mut stream).await?;
-        return Ok(());
-    }
-    if request.method != "POST" {
-        write_json_response(
-            &mut stream,
-            405,
-            json!({"status": "failed", "message": "Method not allowed"}),
+
+    async fn resolve_bridge_request(
+        &mut self,
+        request_id: &str,
+        result: &Value,
+    ) -> anyhow::Result<()> {
+        let expression = resolve_bridge_expression(request_id, result)?;
+        self.send_command_without_wait(
+            next_message_id(),
+            "Runtime.evaluate",
+            runtime_evaluate_params(&expression),
         )
-        .await?;
-        return Ok(());
+        .await
     }
-    if request.token.as_deref() != Some(token.as_str()) {
-        write_json_response(
-            &mut stream,
-            403,
-            json!({"status": "failed", "message": "Invalid Codex Helper bridge token"}),
+
+    async fn reject_bridge_request(
+        &mut self,
+        request_id: &str,
+        message: &str,
+    ) -> anyhow::Result<()> {
+        let expression = reject_bridge_expression(request_id, message)?;
+        self.send_command_without_wait(
+            next_message_id(),
+            "Runtime.evaluate",
+            runtime_evaluate_params(&expression),
         )
-        .await?;
-        return Ok(());
+        .await
     }
-    let payload = if request.body.trim().is_empty() {
-        json!({})
-    } else {
-        serde_json::from_str(&request.body)?
-    };
-    let result = handle_bridge_request((*ctx).clone(), &request.path, payload).await;
-    write_json_response(&mut stream, 200, result).await?;
-    Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct HttpRequest {
-    method: String,
-    path: String,
-    token: Option<String>,
-    body: String,
-}
+fn extract_string_field(input: &str, field: &str) -> Option<String> {
+    let needle = format!("\"{field}\"");
+    let mut index = input.find(&needle)? + needle.len();
+    let bytes = input.as_bytes();
 
-fn request_complete(buffer: &[u8]) -> bool {
-    let Some(header_end) = find_header_end(buffer) else {
-        return false;
-    };
-    let header = String::from_utf8_lossy(&buffer[..header_end]);
-    let content_length = content_length(&header).unwrap_or(0);
-    buffer.len() >= header_end + 4 + content_length
-}
-
-fn parse_http_request(buffer: &[u8]) -> anyhow::Result<HttpRequest> {
-    let header_end = find_header_end(buffer)
-        .ok_or_else(|| anyhow::anyhow!("HTTP header terminator not found"))?;
-    let header = String::from_utf8_lossy(&buffer[..header_end]);
-    let mut lines = header.lines();
-    let request_line = lines
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("HTTP request line missing"))?;
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or_default().to_string();
-    let path = parts.next().unwrap_or_default().to_string();
-    if method.is_empty() || path.is_empty() {
-        anyhow::bail!("Invalid HTTP request line");
+    while matches!(bytes.get(index), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+        index += 1;
     }
-    let token = lines.find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        if name.eq_ignore_ascii_case("x-codex-helper-token") {
-            Some(value.trim().to_string())
-        } else {
-            None
+    if bytes.get(index) != Some(&b':') {
+        return None;
+    }
+    index += 1;
+    while matches!(bytes.get(index), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+        index += 1;
+    }
+    if bytes.get(index) != Some(&b'"') {
+        return None;
+    }
+    index += 1;
+
+    let mut output = String::new();
+    let mut escaped = false;
+    for ch in input[index..].chars() {
+        if escaped {
+            output.push(ch);
+            escaped = false;
+            continue;
         }
-    });
-    let length = content_length(&header).unwrap_or(0);
-    let body_start = header_end + 4;
-    let body_end = body_start + length;
-    let body = String::from_utf8_lossy(&buffer[body_start..body_end]).to_string();
-    Ok(HttpRequest {
-        method,
-        path,
-        token,
-        body,
-    })
-}
-
-fn find_header_end(buffer: &[u8]) -> Option<usize> {
-    buffer.windows(4).position(|window| window == b"\r\n\r\n")
-}
-
-fn content_length(header: &str) -> Option<usize> {
-    header.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        if name.eq_ignore_ascii_case("content-length") {
-            value.trim().parse().ok()
-        } else {
-            None
+        match ch {
+            '\\' => escaped = true,
+            '"' => return Some(output),
+            _ => output.push(ch),
         }
-    })
+    }
+    None
 }
 
-async fn write_options_response(stream: &mut TcpStream) -> anyhow::Result<()> {
-    let response = "HTTP/1.1 204 No Content\r\n\
-Access-Control-Allow-Origin: *\r\n\
-Access-Control-Allow-Methods: POST, OPTIONS\r\n\
-Access-Control-Allow-Headers: content-type, x-codex-helper-token\r\n\
-Access-Control-Allow-Private-Network: true\r\n\
-Content-Length: 0\r\n\r\n";
-    stream.write_all(response.as_bytes()).await?;
-    Ok(())
-}
-
-async fn write_json_response(
-    stream: &mut TcpStream,
-    status: u16,
-    body: Value,
-) -> anyhow::Result<()> {
-    let status_text = match status {
-        200 => "OK",
-        403 => "Forbidden",
-        405 => "Method Not Allowed",
-        413 => "Payload Too Large",
-        _ => "Error",
-    };
-    let body = serde_json::to_string(&body)?;
-    let response = format!(
-        "HTTP/1.1 {status} {status_text}\r\n\
-Access-Control-Allow-Origin: *\r\n\
-Access-Control-Allow-Methods: POST, OPTIONS\r\n\
-Access-Control-Allow-Headers: content-type, x-codex-helper-token\r\n\
-Access-Control-Allow-Private-Network: true\r\n\
-Content-Type: application/json\r\n\
-Content-Length: {}\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    stream.write_all(response.as_bytes()).await?;
-    Ok(())
+fn next_message_id() -> u64 {
+    NEXT_MESSAGE_ID.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 #[cfg(test)]
@@ -280,33 +405,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bridge_script_defines_expected_globals_and_binding() {
-        let script = build_bridge_script("http://127.0.0.1:1234", "secret-token");
+    fn bridge_script_defines_cdp_binding_bridge() {
+        let script = build_bridge_script("codexHelperBridgeV1");
 
         assert!(script.contains("window.__codexHelperBridge"));
-        assert!(script.contains("http://127.0.0.1:1234"));
-        assert!(script.contains("x-codex-helper-token"));
-        assert!(script.contains("secret-token"));
+        assert!(script.contains("window.codexHelperBridgeV1"));
+        assert!(script.contains("window.__codexHelperResolve"));
+        assert!(script.contains("window.__codexHelperReject"));
     }
 
     #[test]
-    fn parse_http_request_reads_path_token_and_body() {
-        let request = b"POST /backend/status HTTP/1.1\r\ncontent-length: 13\r\nx-codex-helper-token: token-1\r\n\r\n{\"ok\": true }";
+    fn resolve_bridge_expression_serializes_result() {
+        let expression =
+            resolve_bridge_expression("request-1", &json!({"status": "ok"})).expect("expression");
 
-        let parsed = parse_http_request(request).expect("request");
-
-        assert_eq!(parsed.method, "POST");
-        assert_eq!(parsed.path, "/backend/status");
-        assert_eq!(parsed.token.as_deref(), Some("token-1"));
-        assert_eq!(parsed.body, "{\"ok\": true }");
+        assert_eq!(
+            expression,
+            "window.__codexHelperResolve(\"request-1\", {\"status\":\"ok\"})"
+        );
     }
 
     #[test]
-    fn request_complete_waits_for_full_body() {
-        let partial = b"POST /x HTTP/1.1\r\ncontent-length: 4\r\n\r\nabc";
-        let complete = b"POST /x HTTP/1.1\r\ncontent-length: 4\r\n\r\nabcd";
+    fn reject_bridge_expression_serializes_message() {
+        let expression = reject_bridge_expression("request-1", "bad value").expect("expression");
 
-        assert!(!request_complete(partial));
-        assert!(request_complete(complete));
+        assert_eq!(
+            expression,
+            "window.__codexHelperReject(\"request-1\", \"bad value\")"
+        );
+    }
+
+    #[test]
+    fn extract_string_field_reads_escaped_value() {
+        let id = extract_string_field(r#"{"id":"request\"1","payload":false}"#, "id");
+
+        assert_eq!(id.as_deref(), Some("request\"1"));
     }
 }

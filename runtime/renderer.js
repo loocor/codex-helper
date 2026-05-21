@@ -162,6 +162,10 @@
       [${helperContentHostAttribute}][data-codex-helper-active="true"] > :not([${helperPageAttribute}]) {
         display: none !important;
       }
+      [${helperContentHostAttribute}][data-codex-helper-active="true"] {
+        min-height: 0 !important;
+        overflow: auto !important;
+      }
       [${helperPageAttribute}] {
         box-sizing: border-box;
         width: min(100%, 900px);
@@ -331,19 +335,36 @@
   }
 
   function findSettingsContentRoot() {
+    if (helperContentHost instanceof HTMLElement && helperContentHost.isConnected) {
+      return helperContentHost;
+    }
+    const sidebar = findSettingsSidebar();
     const heading = Array.from(document.querySelectorAll("h1, h2")).find((node) =>
-      settingsLabels.some((label) => exactText(node, label)),
+      settingsLabels.some((label) => exactText(node, label)) &&
+      !node.closest(`[${helperPageAttribute}]`),
     );
     if (heading instanceof HTMLElement) {
+      const sidebarRect = sidebar?.getBoundingClientRect?.();
+      const candidates = [];
       let node = heading;
-      let selected = null;
       while (node.parentElement && node.parentElement !== document.body) {
         const parent = node.parentElement;
         const rect = parent.getBoundingClientRect();
-        if (rect.left > 340 && rect.width > 360 && rect.height > 420) selected = parent;
+        if (
+          parent instanceof HTMLElement &&
+          !parent.closest(`[${helperEntryAttribute}]`) &&
+          !parent.querySelector(`[${helperEntryAttribute}]`) &&
+          !(sidebar instanceof HTMLElement && parent.contains(sidebar)) &&
+          rect.left >= (sidebarRect?.right || 340) - 24 &&
+          rect.width > 520 &&
+          rect.height > 420
+        ) {
+          candidates.push({ node: parent, area: rect.width * rect.height });
+        }
         node = parent;
       }
-      if (selected) return selected;
+      candidates.sort((a, b) => a.area - b.area);
+      if (candidates[0]?.node) return candidates[0].node;
     }
     return findSettingsContentRootFromSidebar();
   }
@@ -366,6 +387,7 @@
       .filter((item) => {
         if (item.node.closest(`[${helperEntryAttribute}]`)) return false;
         if (item.node.querySelector(`[${helperEntryAttribute}]`)) return false;
+        if (sidebar instanceof HTMLElement && item.node.contains(sidebar)) return false;
         return (
           item.rect.left >= sidebarRect.right - 24 &&
           item.rect.width > 520 &&
@@ -377,7 +399,7 @@
             settingsLabels.some((label) => item.text.startsWith(label)))
         );
       })
-      .sort((a, b) => b.area - a.area);
+      .sort((a, b) => a.area - b.area);
     return candidates[0]?.node || null;
   }
 
@@ -526,10 +548,12 @@
   }
 
   function clearHelperSettingsPage() {
-    helperPageRoot?.remove();
-    if (helperContentHost instanceof HTMLElement) {
-      helperContentHost.removeAttribute("data-codex-helper-active");
-      helperContentHost.removeAttribute(helperContentHostAttribute);
+    for (const node of document.querySelectorAll(`[${helperPageAttribute}]`)) {
+      node.remove();
+    }
+    for (const node of document.querySelectorAll(`[${helperContentHostAttribute}]`)) {
+      node.removeAttribute("data-codex-helper-active");
+      node.removeAttribute(helperContentHostAttribute);
     }
     helperContentHost = null;
     helperPageRoot = null;
@@ -667,11 +691,20 @@
   }
 
   function showHelperSettingsPage() {
+    if (helperPageRoot?.isConnected && helperContentHost?.isConnected) {
+      setEntryActive(true);
+      refreshHelperPage().catch((error) => {
+        setHelperText("[data-codex-helper-backend]", error?.message || String(error));
+        logDiagnostic("settings_refresh_failed", { error: error?.message || String(error) });
+      });
+      return;
+    }
     const root = findSettingsContentRoot();
     if (!root) {
       logDiagnostic("settings_page_root_not_found", {});
       return;
     }
+    clearHelperSettingsPage();
     setEntryActive(true);
     helperContentHost = root;
     helperPageRoot = renderHelperPage(root);

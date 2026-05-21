@@ -1,14 +1,9 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Message;
 
 const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -92,86 +87,6 @@ pub async fn connect_cdp_websocket(
         })?
         .map_err(|error| anyhow::anyhow!("failed to connect CDP websocket: {error}"))?;
     Ok(socket)
-}
-
-pub struct CdpSession<S> {
-    socket: S,
-    responses: HashMap<u64, Value>,
-}
-
-impl<S> CdpSession<S>
-where
-    S: SinkExt<Message>
-        + StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
-        + Unpin
-        + Send,
-    <S as futures_util::Sink<Message>>::Error: std::error::Error + Send + Sync + 'static,
-{
-    pub fn new(socket: S) -> Self {
-        Self {
-            socket,
-            responses: HashMap::new(),
-        }
-    }
-
-    pub async fn send_command(
-        &mut self,
-        id: u64,
-        method: &str,
-        params: Value,
-    ) -> anyhow::Result<Value> {
-        self.socket
-            .send(Message::Text(
-                json!({ "id": id, "method": method, "params": params })
-                    .to_string()
-                    .into(),
-            ))
-            .await?;
-        tokio::time::timeout(CDP_COMMAND_TIMEOUT, self.wait_for_response(id, method))
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "timed out waiting for CDP command {method} after {}s",
-                    CDP_COMMAND_TIMEOUT.as_secs()
-                )
-            })?
-    }
-
-    pub async fn next_message(&mut self) -> anyhow::Result<Option<Value>> {
-        match self.socket.next().await {
-            Some(Ok(Message::Text(text))) => {
-                let value: Value = serde_json::from_str(&text)?;
-                if let Some(id) = value.get("id").and_then(Value::as_u64) {
-                    self.responses.insert(id, value.clone());
-                }
-                Ok(Some(value))
-            }
-            Some(Ok(Message::Binary(bytes))) => {
-                let value: Value = serde_json::from_slice(&bytes)?;
-                if let Some(id) = value.get("id").and_then(Value::as_u64) {
-                    self.responses.insert(id, value.clone());
-                }
-                Ok(Some(value))
-            }
-            Some(Ok(_)) => Ok(Some(json!({}))),
-            Some(Err(error)) => Err(error.into()),
-            None => Ok(None),
-        }
-    }
-
-    async fn wait_for_response(&mut self, id: u64, method: &str) -> anyhow::Result<Value> {
-        loop {
-            if let Some(response) = self.responses.remove(&id) {
-                if let Some(error) = response.get("error") {
-                    anyhow::bail!("CDP command {method} failed: {error}");
-                }
-                return Ok(response);
-            }
-            let Some(_) = self.next_message().await? else {
-                anyhow::bail!("CDP command {method} closed before response");
-            };
-        }
-    }
 }
 
 #[cfg(test)]

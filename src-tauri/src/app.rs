@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::bridge::{install_bridge, start_bridge_server};
+use crate::bridge::install_bridge;
 use crate::cdp::wait_for_codex_target;
 use crate::launcher::{launch_codex, resolve_codex_app_path, DEFAULT_DEBUG_PORT};
 use crate::logging::DiagnosticLogger;
@@ -81,12 +81,7 @@ async fn launch_on_startup() -> anyhow::Result<()> {
         logger: Arc::new(logger.clone()),
         debug_port: DEFAULT_DEBUG_PORT,
     };
-    let bridge_server = start_bridge_server(ctx).await?;
-    logger.append(
-        "bridge.server_started",
-        serde_json::json!({ "baseUrl": bridge_server.base_url() }),
-    )?;
-    install_bridge(websocket_url, &bridge_server, runtime_scripts).await?;
+    install_bridge(websocket_url, ctx, runtime_scripts).await?;
     logger.append("bridge.injected", serde_json::json!({}))?;
     Ok(())
 }
