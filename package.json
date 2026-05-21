@@ -1,0 +1,16 @@
+{
+  "name": "codex-helper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "launch": "bun src/launch.ts",
+    "build": "bun build src/launch.ts --target=bun --outdir=dist",
+    "build:app": "./scripts/build-macos-app.sh"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.4",
+    "typescript": "^5.8.0"
+  }
+}
