@@ -1,0 +1,31 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "CodexHelper",
+  "version": "0.1.0",
+  "identifier": "ai.codexhelper.launcher",
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "frontendDist": "../runtime"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "CodexHelper",
+        "create": false,
+        "visible": false,
+        "width": 360,
+        "height": 220
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": "app",
+    "icon": ["icons/icon.png"]
+  }
+}
