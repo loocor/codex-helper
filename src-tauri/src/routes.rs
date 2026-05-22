@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use crate::cdp::{list_targets, pick_codex_page_target};
+use crate::cdp::{list_targets, pick_codex_page_target, CdpTarget};
 use crate::logging::DiagnosticLogger;
 use crate::ports::{request_from_payload, PortForwardManager};
 use crate::session_actions::{
@@ -143,27 +143,59 @@ async fn open_devtools_response(debug_port: u16) -> Value {
         Ok(target) => target,
         Err(error) => return json!({ "status": "failed", "message": error.to_string() }),
     };
-    let target_id = target.id;
+    let target_id = target.id.clone();
     if target_id.trim().is_empty() {
         return json!({
             "status": "failed",
             "message": "Codex DevTools target id is empty",
         });
     }
-    let url = target
-        .devtools_frontend_url
-        .filter(|url| !url.trim().is_empty())
-        .unwrap_or_else(|| devtools_url(debug_port, &target_id));
+    let url = match devtools_url(debug_port, &target) {
+        Ok(url) => url,
+        Err(error) => return json!({ "status": "failed", "message": error.to_string() }),
+    };
     match std::process::Command::new("open").arg(&url).spawn() {
         Ok(_) => json!({ "status": "ok", "targetId": target_id, "url": url }),
         Err(error) => json!({ "status": "failed", "message": error.to_string() }),
     }
 }
 
-pub fn devtools_url(debug_port: u16, target_id: &str) -> String {
-    format!(
-        "http://127.0.0.1:{debug_port}/devtools/inspector.html?ws=127.0.0.1:{debug_port}/devtools/page/{target_id}"
-    )
+pub fn devtools_url(debug_port: u16, target: &CdpTarget) -> anyhow::Result<String> {
+    if let Some(frontend_url) = target
+        .devtools_frontend_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        return Ok(normalize_devtools_frontend_url(debug_port, frontend_url));
+    }
+
+    let websocket_url = target
+        .web_socket_debugger_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Selected Codex DevTools target has no websocket URL"))?;
+    let websocket_endpoint = websocket_url
+        .strip_prefix("ws://")
+        .ok_or_else(|| anyhow::anyhow!("Codex DevTools websocket URL must start with ws://"))?;
+    Ok(format!(
+        "http://127.0.0.1:{debug_port}/devtools/inspector.html?ws={websocket_endpoint}"
+    ))
+}
+
+fn normalize_devtools_frontend_url(debug_port: u16, frontend_url: &str) -> String {
+    if frontend_url.starts_with("http://")
+        || frontend_url.starts_with("https://")
+        || frontend_url.starts_with("devtools://")
+        || frontend_url.starts_with("chrome-devtools://")
+    {
+        return frontend_url.to_string();
+    }
+    if frontend_url.starts_with('/') {
+        return format!("http://127.0.0.1:{debug_port}{frontend_url}");
+    }
+    format!("http://127.0.0.1:{debug_port}/{frontend_url}")
 }
 
 #[cfg(test)]
@@ -172,9 +204,56 @@ mod tests {
 
     #[test]
     fn devtools_url_targets_selected_page() {
+        let target = CdpTarget {
+            id: "target-1".to_string(),
+            target_type: "page".to_string(),
+            title: Some("Codex".to_string()),
+            url: Some("https://codex.test".to_string()),
+            devtools_frontend_url: None,
+            web_socket_debugger_url: Some("ws://127.0.0.1:9229/devtools/page/target-1".to_string()),
+        };
+
         assert_eq!(
-            devtools_url(9229, "target-1"),
+            devtools_url(9229, &target).expect("devtools url"),
             "http://127.0.0.1:9229/devtools/inspector.html?ws=127.0.0.1:9229/devtools/page/target-1"
+        );
+    }
+
+    #[test]
+    fn devtools_url_uses_reported_websocket_endpoint() {
+        let target = CdpTarget {
+            id: "target-1".to_string(),
+            target_type: "page".to_string(),
+            title: Some("Codex".to_string()),
+            url: Some("https://codex.test".to_string()),
+            devtools_frontend_url: None,
+            web_socket_debugger_url: Some(
+                "ws://localhost:9229/devtools/page/reported-target".to_string(),
+            ),
+        };
+
+        assert_eq!(
+            devtools_url(9229, &target).expect("devtools url"),
+            "http://127.0.0.1:9229/devtools/inspector.html?ws=localhost:9229/devtools/page/reported-target"
+        );
+    }
+
+    #[test]
+    fn devtools_url_expands_relative_frontend_url() {
+        let target = CdpTarget {
+            id: "target-1".to_string(),
+            target_type: "page".to_string(),
+            title: Some("Codex".to_string()),
+            url: Some("https://codex.test".to_string()),
+            devtools_frontend_url: Some(
+                "/devtools/inspector.html?ws=localhost:9229/devtools/page/target-1".to_string(),
+            ),
+            web_socket_debugger_url: Some("ws://localhost:9229/devtools/page/target-1".to_string()),
+        };
+
+        assert_eq!(
+            devtools_url(9229, &target).expect("devtools url"),
+            "http://127.0.0.1:9229/devtools/inspector.html?ws=localhost:9229/devtools/page/target-1"
         );
     }
 }
