@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 
 use crate::cdp::{list_targets, pick_codex_page_target};
 use crate::logging::DiagnosticLogger;
+use crate::ports::{request_from_payload, PortForwardManager};
 use crate::session_actions::{
     delete_session_response, deleted_sessions_response, export_markdown_response,
     move_thread_workspace_response, restore_deleted_session_response, undo_delete_response,
@@ -11,7 +12,8 @@ use crate::session_actions::{
 use crate::settings::{read_settings, update_settings};
 use crate::state_dir::StateDir;
 use crate::zed::{
-    fallback_open_request_response, open_zed_remote, resolve_ssh_target_response, zed_remote_status,
+    fallback_open_request_response, open_zed_remote, resolve_ssh_target_for_host_id,
+    resolve_ssh_target_response, zed_remote_status,
 };
 
 #[derive(Clone)]
@@ -19,6 +21,7 @@ pub struct BridgeContext {
     pub state_dir: StateDir,
     pub logger: Arc<DiagnosticLogger>,
     pub debug_port: u16,
+    pub port_manager: PortForwardManager,
 }
 
 pub async fn handle_bridge_request(ctx: BridgeContext, path: &str, payload: Value) -> Value {
@@ -59,6 +62,18 @@ pub async fn handle_bridge_request(ctx: BridgeContext, path: &str, payload: Valu
         "/backups/restore" => restore_deleted_session_response(&ctx.state_dir, &payload),
         "/export-markdown" => export_markdown_response(&payload),
         "/move-thread-workspace" => move_thread_workspace_response(&ctx.state_dir, &payload),
+        "/ports/list" => ctx.port_manager.list().await,
+        "/ports/forward" => match request_from_payload(&payload) {
+            Ok(request) => match resolve_ssh_target_for_host_id(&request.host_id, None) {
+                Ok(target) => ctx.port_manager.start(request, target).await,
+                Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+            },
+            Err(message) => json!({ "status": "failed", "message": message }),
+        },
+        "/ports/stop" => {
+            let id = payload.get("id").and_then(Value::as_str).unwrap_or("");
+            ctx.port_manager.stop(id).await
+        }
         "/zed-remote/status" => zed_remote_status(),
         "/zed-remote/resolve-host" => resolve_ssh_target_response(&payload),
         "/zed-remote/fallback-request" => fallback_open_request_response(&payload),

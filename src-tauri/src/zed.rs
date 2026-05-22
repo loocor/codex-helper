@@ -378,7 +378,7 @@ pub fn resolve_ssh_target_from_global_state(
     ))
 }
 
-fn resolve_ssh_target_for_host_id(
+pub fn resolve_ssh_target_for_host_id(
     host_id: &str,
     state_path: Option<&Path>,
 ) -> Result<SshTarget, ZedRemoteError> {

@@ -6,11 +6,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 pub struct HelperSettings {
     pub session_delete_enabled: bool,
     pub markdown_export_enabled: bool,
     pub session_move_enabled: bool,
+    pub port_forwarding_enabled: bool,
+    pub port_auto_forward_web: bool,
+    pub port_same_local_port: bool,
 }
 
 impl Default for HelperSettings {
@@ -19,6 +22,9 @@ impl Default for HelperSettings {
             session_delete_enabled: false,
             markdown_export_enabled: false,
             session_move_enabled: false,
+            port_forwarding_enabled: false,
+            port_auto_forward_web: true,
+            port_same_local_port: true,
         }
     }
 }
@@ -52,6 +58,9 @@ pub fn update_settings(path: &Path, payload: &Value) -> anyhow::Result<HelperSet
             "sessionDeleteEnabled" => settings.session_delete_enabled = enabled,
             "markdownExportEnabled" => settings.markdown_export_enabled = enabled,
             "sessionMoveEnabled" => settings.session_move_enabled = enabled,
+            "portForwardingEnabled" => settings.port_forwarding_enabled = enabled,
+            "portAutoForwardWeb" => settings.port_auto_forward_web = enabled,
+            "portSameLocalPort" => settings.port_same_local_port = enabled,
             _ => return Err(anyhow::anyhow!("Unknown settings key: {key}")),
         }
     }
@@ -80,6 +89,34 @@ mod tests {
         assert!(!settings.session_delete_enabled);
         assert!(!settings.markdown_export_enabled);
         assert!(!settings.session_move_enabled);
+        assert!(!settings.port_forwarding_enabled);
+        assert!(settings.port_auto_forward_web);
+        assert!(settings.port_same_local_port);
+    }
+
+    #[test]
+    fn read_settings_accepts_legacy_files_without_port_forwarding_keys() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("config.json");
+        fs::write(
+            &path,
+            r#"{
+  "sessionDeleteEnabled": true,
+  "markdownExportEnabled": false,
+  "sessionMoveEnabled": true
+}
+"#,
+        )
+        .expect("legacy settings");
+
+        let settings = read_settings(&path).expect("legacy settings should load");
+
+        assert!(settings.session_delete_enabled);
+        assert!(!settings.markdown_export_enabled);
+        assert!(settings.session_move_enabled);
+        assert!(!settings.port_forwarding_enabled);
+        assert!(settings.port_auto_forward_web);
+        assert!(settings.port_same_local_port);
     }
 
     #[test]
@@ -93,6 +130,9 @@ mod tests {
             &serde_json::json!({
                 "sessionDeleteEnabled": true,
                 "markdownExportEnabled": true,
+                "portForwardingEnabled": true,
+                "portAutoForwardWeb": false,
+                "portSameLocalPort": true,
             }),
         )
         .expect("updated settings");
@@ -101,6 +141,9 @@ mod tests {
         assert!(settings.session_delete_enabled);
         assert!(settings.markdown_export_enabled);
         assert!(!settings.session_move_enabled);
+        assert!(settings.port_forwarding_enabled);
+        assert!(!settings.port_auto_forward_web);
+        assert!(settings.port_same_local_port);
         assert_eq!(settings, persisted);
     }
 

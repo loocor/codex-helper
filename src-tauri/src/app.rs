@@ -4,17 +4,21 @@ use crate::bridge::install_bridge;
 use crate::cdp::wait_for_codex_target;
 use crate::launcher::{launch_codex, resolve_codex_app_path, DEFAULT_DEBUG_PORT};
 use crate::logging::DiagnosticLogger;
+use crate::ports::PortForwardManager;
 use crate::routes::BridgeContext;
 use crate::runtime::build_runtime_bundle;
 use crate::state_dir::StateDir;
 
 pub fn run() {
+    let port_manager = PortForwardManager::new();
+    let startup_port_manager = port_manager.clone();
+    let shutdown_port_manager = port_manager.clone();
     tauri::Builder::default()
-        .setup(|app| {
+        .setup(move |app| {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-            install_menu_bar_item(app.handle())?;
+            install_menu_bar_item(app.handle(), port_manager.clone())?;
             tauri::async_runtime::spawn(async {
-                if let Err(error) = launch_on_startup().await {
+                if let Err(error) = launch_on_startup(startup_port_manager).await {
                     eprintln!("{error}");
                 }
             });
@@ -22,10 +26,17 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("failed to build CodexHelper")
-        .run(|_app, _event| {});
+        .run(move |_app, event| {
+            if let tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. } = event {
+                shutdown_port_manager.stop_all();
+            }
+        });
 }
 
-fn install_menu_bar_item(app: &tauri::AppHandle) -> anyhow::Result<()> {
+fn install_menu_bar_item(
+    app: &tauri::AppHandle,
+    port_manager: PortForwardManager,
+) -> anyhow::Result<()> {
     use tauri::menu::{Menu, MenuItem};
     use tauri::tray::TrayIconBuilder;
 
@@ -36,8 +47,9 @@ fn install_menu_bar_item(app: &tauri::AppHandle) -> anyhow::Result<()> {
         .tooltip("Codex Helper is running")
         .menu(&menu)
         .show_menu_on_left_click(true)
-        .on_menu_event(|app, event| {
+        .on_menu_event(move |app, event| {
             if event.id().as_ref() == "quit" {
+                port_manager.stop_all();
                 app.exit(0);
             }
         })
@@ -45,7 +57,7 @@ fn install_menu_bar_item(app: &tauri::AppHandle) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn launch_on_startup() -> anyhow::Result<()> {
+async fn launch_on_startup(port_manager: PortForwardManager) -> anyhow::Result<()> {
     let state_dir = StateDir::init()?;
     let logger = DiagnosticLogger::new(state_dir.logs_dir.clone());
     logger.append(
@@ -80,6 +92,7 @@ async fn launch_on_startup() -> anyhow::Result<()> {
         state_dir,
         logger: Arc::new(logger.clone()),
         debug_port: DEFAULT_DEBUG_PORT,
+        port_manager,
     };
     install_bridge(websocket_url, ctx, runtime_scripts).await?;
     logger.append("bridge.injected", serde_json::json!({}))?;

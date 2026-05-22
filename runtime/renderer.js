@@ -9,6 +9,9 @@
   const helperContextMenuAttribute = "data-codex-helper-session-menu";
   const helperToastAttribute = "data-codex-helper-toast";
   const helperZedAttribute = "data-codex-helper-zed-menu-item";
+  const helperPortsEntryAttribute = "data-codex-helper-ports-entry";
+  const helperPortsPanelAttribute = "data-codex-helper-ports-panel";
+  const helperPortCommandAttribute = "data-codex-helper-port-command";
   const settingsLabels = [
     "General",
     "Appearance",
@@ -31,10 +34,15 @@
   let helperContentHost = null;
   let helperPageRoot = null;
   let pendingSessionMenuContext = null;
+  let pendingPortScan = 0;
+  const detectedPorts = new Map();
   let featureSettings = {
     sessionDeleteEnabled: false,
     markdownExportEnabled: false,
     sessionMoveEnabled: false,
+    portForwardingEnabled: false,
+    portAutoForwardWeb: true,
+    portSameLocalPort: true,
   };
 
   function bridge(path, payload = {}) {
@@ -76,24 +84,37 @@
     }
   }
 
+  function isVisibleElement(node) {
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function visibleSettingsLabels(root) {
+    const selector = "button, a, [role='button'], [role='tab'], [role='menuitem']";
+    return settingsLabels.filter((label) =>
+      Array.from(root.querySelectorAll(selector)).some(
+        (node) => node instanceof HTMLElement && exactText(node, label) && isVisibleElement(node),
+      ),
+    );
+  }
+
   function isSettingsSidebar(candidate) {
     if (!(candidate instanceof HTMLElement)) return false;
     if (candidate.querySelector(`[${helperPageAttribute}]`)) return false;
-    const text = textOf(candidate);
-    const matchedLabels = settingsLabels.filter((label) => text.includes(label));
     const rect = candidate.getBoundingClientRect();
-    return matchedLabels.length >= 5 && rect.width > 120 && rect.width < 520;
+    if (rect.width <= 120 || rect.width >= 520) return false;
+    return visibleSettingsLabels(candidate).length >= 5;
   }
 
   function findSettingsSidebar() {
     const candidates = Array.from(
-      document.querySelectorAll("aside, nav, [role='navigation'], [role='tablist'], div"),
+      document.querySelectorAll("aside, nav, [role='navigation'], [role='tablist']"),
     );
     return candidates.find(isSettingsSidebar) || null;
   }
 
   function findClickableSettingsItem(sidebar, label) {
-    const selector = "button, a, [role='button'], [role='tab'], [role='menuitem'], div";
+    const selector = "button, a, [role='button'], [role='tab'], [role='menuitem']";
     return Array.from(sidebar.querySelectorAll(selector)).find((node) => {
       if (!(node instanceof HTMLElement)) return false;
       if (node.closest(`[${helperEntryAttribute}]`)) return false;
@@ -101,6 +122,15 @@
       const rect = node.getBoundingClientRect();
       return rect.width > 80 && rect.height > 18;
     });
+  }
+
+  function isValidSettingsContentRoot(root, sidebar) {
+    if (!(root instanceof HTMLElement)) return false;
+    if (root.closest(`[${helperEntryAttribute}]`)) return false;
+    if (root.querySelector(`[${helperEntryAttribute}]`)) return false;
+    if (sidebar instanceof HTMLElement && (root.contains(sidebar) || sidebar.contains(root))) return false;
+    const rect = root.getBoundingClientRect();
+    return rect.width > 520 && rect.height > 420;
   }
 
   function createFallbackEntry() {
@@ -308,6 +338,47 @@
         font: inherit;
         cursor: pointer;
       }
+      [${helperPortsPanelAttribute}] {
+        margin: 10px;
+        padding: 10px;
+        border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+        border-radius: 8px;
+        background: color-mix(in srgb, Canvas 96%, currentColor 4%);
+        color: CanvasText;
+        font-size: 13px;
+      }
+      [${helperPortsPanelAttribute}] .codex-helper-port-toolbar {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 8px;
+      }
+      [${helperPortsPanelAttribute}] .codex-helper-port-row {
+        display: grid;
+        grid-template-columns: 86px minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+        min-height: 34px;
+        border-top: 1px solid color-mix(in srgb, currentColor 9%, transparent);
+        padding: 7px 0;
+      }
+      [${helperPortsPanelAttribute}] .codex-helper-port-row:first-of-type {
+        border-top: 0;
+      }
+      [${helperPortsPanelAttribute}] .codex-helper-port-actions {
+        display: inline-flex;
+        gap: 6px;
+      }
+      [${helperPortsPanelAttribute}] button {
+        border: 0;
+        border-radius: 7px;
+        padding: 5px 8px;
+        background: color-mix(in srgb, currentColor 10%, transparent);
+        color: inherit;
+        font: inherit;
+        cursor: pointer;
+      }
     `;
     document.head.appendChild(style);
   }
@@ -319,7 +390,7 @@
     if (!sidebar) {
       if (!settingsFailureLogged) {
         settingsFailureLogged = true;
-        logDiagnostic("settings_sidebar_not_found", {});
+        logDiagnostic("settings_insertion_failed", { reason: "sidebar_not_found" });
       }
       return false;
     }
@@ -351,13 +422,9 @@
         const parent = node.parentElement;
         const rect = parent.getBoundingClientRect();
         if (
-          parent instanceof HTMLElement &&
-          !parent.closest(`[${helperEntryAttribute}]`) &&
-          !parent.querySelector(`[${helperEntryAttribute}]`) &&
-          !(sidebar instanceof HTMLElement && parent.contains(sidebar)) &&
+          isValidSettingsContentRoot(parent, sidebar) &&
           rect.left >= (sidebarRect?.right || 340) - 24 &&
-          rect.width > 520 &&
-          rect.height > 420
+          textOf(parent).length > textOf(heading).length
         ) {
           candidates.push({ node: parent, area: rect.width * rect.height });
         }
@@ -385,13 +452,9 @@
         };
       })
       .filter((item) => {
-        if (item.node.closest(`[${helperEntryAttribute}]`)) return false;
-        if (item.node.querySelector(`[${helperEntryAttribute}]`)) return false;
-        if (sidebar instanceof HTMLElement && item.node.contains(sidebar)) return false;
+        if (!isValidSettingsContentRoot(item.node, sidebar)) return false;
         return (
           item.rect.left >= sidebarRect.right - 24 &&
-          item.rect.width > 520 &&
-          item.rect.height > 420 &&
           item.text.length > 20 &&
           ((item.text.includes("General") && item.text.includes("Work mode")) ||
             (item.text.includes("Work mode") && item.text.includes("Default permissions")) ||
@@ -494,6 +557,40 @@
             </div>
             <label class="codex-helper-switch" aria-label="Move sessions">
               <input type="checkbox" ${helperToggleAttribute}="sessionMoveEnabled">
+              <span></span>
+            </label>
+          </div>
+        </div>
+
+        <h2>Port Forwarding</h2>
+        <div class="codex-helper-panel">
+          <div class="codex-helper-row">
+            <div>
+              <div class="codex-helper-label">Enable port forwarding</div>
+              <div class="codex-helper-detail" data-codex-helper-setting-status="portForwardingEnabled">Loading</div>
+            </div>
+            <label class="codex-helper-switch" aria-label="Enable port forwarding">
+              <input type="checkbox" data-codex-helper-setting-toggle="portForwardingEnabled">
+              <span></span>
+            </label>
+          </div>
+          <div class="codex-helper-row">
+            <div>
+              <div class="codex-helper-label">Auto-forward detected web ports</div>
+              <div class="codex-helper-detail" data-codex-helper-setting-status="portAutoForwardWeb">Loading</div>
+            </div>
+            <label class="codex-helper-switch" aria-label="Auto-forward detected web ports">
+              <input type="checkbox" data-codex-helper-setting-toggle="portAutoForwardWeb">
+              <span></span>
+            </label>
+          </div>
+          <div class="codex-helper-row">
+            <div>
+              <div class="codex-helper-label">Use the same local port by default</div>
+              <div class="codex-helper-detail" data-codex-helper-setting-status="portSameLocalPort">Loading</div>
+            </div>
+            <label class="codex-helper-switch" aria-label="Use the same local port by default">
+              <input type="checkbox" data-codex-helper-setting-toggle="portSameLocalPort">
               <span></span>
             </label>
           </div>
@@ -701,7 +798,7 @@
     }
     const root = findSettingsContentRoot();
     if (!root) {
-      logDiagnostic("settings_page_root_not_found", {});
+      logDiagnostic("settings_content_root_failed", { reason: "content_root_not_found" });
       return;
     }
     clearHelperSettingsPage();
@@ -1164,6 +1261,307 @@
     };
   }
 
+  function parseWebPortsFromText(text) {
+    const ports = new Map();
+    const pattern =
+      /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):([0-9]{1,5})(?:[/?#][^\s"'<>]*)?/gi;
+    for (const match of text.matchAll(pattern)) {
+      const port = Number(match[1]);
+      if (Number.isInteger(port) && port >= 1 && port <= 65535) {
+        ports.set(port, { port, url: match[0] });
+      }
+    }
+    return Array.from(ports.values());
+  }
+
+  function portKey(context, remotePort, localPort) {
+    const localPortKey = Number.isInteger(localPort) && localPort > 0 ? localPort : "custom";
+    return [context.hostId || "unknown", context.path || "", remotePort, localPortKey].join(":");
+  }
+
+  function schedulePortScan() {
+    if (pendingPortScan) return;
+    pendingPortScan = window.setTimeout(() => {
+      pendingPortScan = 0;
+      scanTerminalWebPorts();
+    }, 500);
+  }
+
+  function findTerminalPortScanRoots() {
+    const selector = [
+      ".xterm",
+      "[class*='xterm' i]",
+      "[data-testid*='terminal' i]",
+      "[data-test*='terminal' i]",
+      "[aria-label*='terminal' i]",
+      "[data-panel-id*='terminal' i]",
+      "[data-codex-terminal]",
+    ].join(",");
+    const roots = [];
+    for (const node of document.querySelectorAll(selector)) {
+      if (!(node instanceof HTMLElement)) continue;
+      if (!isVisibleElement(node)) continue;
+      if (
+        node.closest(
+          `[${helperPageAttribute}], [${helperPortsPanelAttribute}], [${helperToastAttribute}], [${helperContextMenuAttribute}]`,
+        )
+      ) {
+        continue;
+      }
+      if (roots.some((root) => root.contains(node))) continue;
+      for (let index = roots.length - 1; index >= 0; index -= 1) {
+        if (node.contains(roots[index])) roots.splice(index, 1);
+      }
+      roots.push(node);
+    }
+    return roots;
+  }
+
+  function terminalTextForPortScan() {
+    const roots = findTerminalPortScanRoots();
+    const parts = [];
+    for (const root of roots) {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const parent = walker.currentNode.parentElement;
+        if (
+          parent?.closest(
+            `[${helperPageAttribute}], [${helperPortsPanelAttribute}], [${helperToastAttribute}], [${helperContextMenuAttribute}]`,
+          )
+        ) {
+          continue;
+        }
+        const text = (walker.currentNode.nodeValue || "").trim();
+        if (text) parts.push(text);
+      }
+    }
+    return parts.join("\n");
+  }
+
+  function localPortForDetectedPort(remotePort) {
+    return featureSettings.portSameLocalPort ? remotePort : 0;
+  }
+
+  function shouldAutoForwardDetectedPort(entry, context) {
+    return Boolean(featureSettings.portAutoForwardWeb && context.hostId && entry.localPort);
+  }
+
+  function scanTerminalWebPorts() {
+    if (!featureSettings.portForwardingEnabled) return;
+    const context = remoteContextFromDom();
+    const text = terminalTextForPortScan();
+    for (const candidate of parseWebPortsFromText(text)) {
+      const localPort = localPortForDetectedPort(candidate.port);
+      const key = portKey(context, candidate.port, localPort);
+      const existing = detectedPorts.get(key);
+      if (existing?.status === "forwarding" || existing?.status === "active") continue;
+      const entry = {
+        key,
+        hostId: context.hostId,
+        remotePath: context.path,
+        remotePort: candidate.port,
+        localPort,
+        url: candidate.url,
+        status: "detected",
+      };
+      detectedPorts.set(key, entry);
+      if (shouldAutoForwardDetectedPort(entry, context)) {
+        forwardDetectedPort(entry).catch((error) => {
+          entry.status = "failed";
+          entry.message = error?.message || String(error);
+          logDiagnostic("ports_auto_forward_failed", { error: entry.message, remotePort: entry.remotePort });
+        });
+      }
+    }
+  }
+
+  async function forwardDetectedPort(entry, source = "auto") {
+    entry.status = "forwarding";
+    const result = await bridge("/ports/forward", {
+      hostId: entry.hostId,
+      remotePath: entry.remotePath,
+      remotePort: entry.remotePort,
+      localPort: entry.localPort,
+      source,
+    });
+    if (result?.status !== "ok") {
+      entry.status = "failed";
+      entry.message = result?.message || "Port forwarding failed";
+      logDiagnostic("ports_auto_forward_failed", { result, remotePort: entry.remotePort });
+      return;
+    }
+    entry.status = "active";
+    entry.id = result.id;
+    entry.localUrl = result.localUrl;
+    showHelperToast(`Forwarded remote port ${entry.remotePort} to localhost:${entry.localPort}`);
+    if (document.querySelector(`[${helperPortsPanelAttribute}]`)) showPortsPanel();
+  }
+
+  function findBottomPanelPicker() {
+    const controls = Array.from(document.querySelectorAll("button, [role='button'], [role='tab']"));
+    const terminal = controls.find(
+      (node) => node instanceof HTMLElement && exactText(node, "Terminal") && isVisibleElement(node),
+    );
+    return terminal?.parentElement || null;
+  }
+
+  function installPortsEntry() {
+    if (document.querySelector(`[${helperPortsEntryAttribute}]`)) return true;
+    const picker = findBottomPanelPicker();
+    if (!(picker instanceof HTMLElement)) return false;
+    const terminal = Array.from(picker.querySelectorAll("button, [role='button'], [role='tab']")).find(
+      (node) => node instanceof HTMLElement && exactText(node, "Terminal"),
+    );
+    const entry = terminal instanceof HTMLElement ? terminal.cloneNode(true) : document.createElement("button");
+    if (!(entry instanceof HTMLElement)) return false;
+    entry.setAttribute(helperPortsEntryAttribute, "true");
+    entry.removeAttribute("aria-selected");
+    entry.removeAttribute("data-state");
+    replaceTextNodes(entry, textOf(entry), "Ports");
+    if (!textOf(entry).includes("Ports")) entry.textContent = "Ports";
+    entry.addEventListener(
+      "click",
+      (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        showPortsPanel();
+      },
+      true,
+    );
+    picker.appendChild(entry);
+    return true;
+  }
+
+  function mergedPortRows(activePorts) {
+    const rows = new Map();
+    for (const port of activePorts) {
+      rows.set(port.id || `${port.hostId}:${port.remotePath}:${port.remotePort}:${port.localPort}`, port);
+    }
+    for (const entry of detectedPorts.values()) {
+      const id = entry.id || entry.key;
+      if (!rows.has(id)) rows.set(id, entry);
+    }
+    return Array.from(rows.values()).sort((a, b) => (a.remotePort || 0) - (b.remotePort || 0));
+  }
+
+  async function showPortsPanel() {
+    installHelperStyles();
+    const result = await bridge("/ports/list");
+    renderPortsPanel(result?.status === "ok" && Array.isArray(result.ports) ? result.ports : []);
+  }
+
+  function renderPortsPanel(activePorts) {
+    document.querySelectorAll(`[${helperPortsPanelAttribute}]`).forEach((node) => node.remove());
+    const picker = findBottomPanelPicker();
+    const host = picker?.parentElement || document.body;
+    const panel = document.createElement("section");
+    panel.setAttribute(helperPortsPanelAttribute, "true");
+    const rows = mergedPortRows(activePorts);
+    panel.innerHTML = `
+      <div class="codex-helper-port-toolbar">
+        <strong>Ports</strong>
+        <button type="button" ${helperPortCommandAttribute}="manual">Forward Port</button>
+      </div>
+    `;
+    if (rows.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "codex-helper-port-row";
+      empty.textContent = "No forwarded ports";
+      panel.appendChild(empty);
+    } else {
+      for (const row of rows) panel.appendChild(createPortRow(row));
+    }
+    host.appendChild(panel);
+  }
+
+  function createPortRow(row) {
+    const item = document.createElement("div");
+    item.className = "codex-helper-port-row";
+    const status = row.status || "detected";
+    const localUrl = row.localUrl || (row.localPort ? `http://127.0.0.1:${row.localPort}` : "");
+    item.innerHTML = `
+      <div>${status}</div>
+      <div>${row.remotePort || ""}${localUrl ? ` -> ${localUrl}` : ""}</div>
+      <div class="codex-helper-port-actions"></div>
+    `;
+    const actions = item.querySelector(".codex-helper-port-actions");
+    if (actions instanceof HTMLElement) {
+      if (localUrl && status === "active") {
+        actions.appendChild(createPortAction("open", "Open", row.id, localUrl));
+        actions.appendChild(createPortAction("copy", "Copy URL", row.id, localUrl));
+        actions.appendChild(createPortAction("stop", "Stop", row.id, localUrl));
+      } else {
+        actions.appendChild(createPortAction("forward", "Forward", row.key || row.id, ""));
+      }
+    }
+    return item;
+  }
+
+  function createPortAction(command, label, id, localUrl) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.setAttribute(helperPortCommandAttribute, command);
+    if (id) button.setAttribute("data-codex-helper-port-id", id);
+    if (localUrl) button.setAttribute("data-codex-helper-port-url", localUrl);
+    return button;
+  }
+
+  async function handlePortCommand(button) {
+    const command = button.getAttribute(helperPortCommandAttribute) || "";
+    const id = button.getAttribute("data-codex-helper-port-id") || "";
+    const localUrl = button.getAttribute("data-codex-helper-port-url") || "";
+    if (command === "open" && localUrl) {
+      window.open(localUrl, "_blank", "noopener,noreferrer");
+      return;
+    }
+    if (command === "copy" && localUrl) {
+      await navigator.clipboard.writeText(localUrl);
+      showHelperToast("Copied port URL");
+      return;
+    }
+    if (command === "stop" && id) {
+      const result = await bridge("/ports/stop", { id });
+      if (result?.status !== "ok") throw new Error(result?.message || "Stop failed");
+      showPortsPanel();
+      return;
+    }
+    if (command === "forward") {
+      const entry = detectedPorts.get(id);
+      if (entry) {
+        const localPort = entry.localPort || Number(window.prompt("Local port", String(entry.remotePort)));
+        if (!Number.isInteger(localPort) || localPort < 1 || localPort > 65535) return;
+        const previousKey = entry.key;
+        entry.localPort = localPort;
+        entry.key = portKey({ hostId: entry.hostId, path: entry.remotePath }, entry.remotePort, localPort);
+        if (previousKey !== entry.key) {
+          detectedPorts.delete(previousKey);
+          detectedPorts.set(entry.key, entry);
+        }
+        await forwardDetectedPort(entry, "manual");
+      }
+      return;
+    }
+    if (command === "manual") {
+      const context = remoteContextFromDom();
+      const remotePort = Number(window.prompt("Remote port"));
+      if (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535) return;
+      const localPort = Number(window.prompt("Local port", String(remotePort)));
+      if (!Number.isInteger(localPort) || localPort < 1 || localPort > 65535) return;
+      await forwardDetectedPort(
+        {
+          key: portKey(context, remotePort, localPort),
+          hostId: context.hostId,
+          remotePath: context.path,
+          remotePort,
+          localPort,
+          status: "detected",
+        },
+        "manual",
+      );
+    }
+  }
+
   async function zedOpenRequestFromContext() {
     const context = remoteContextFromDom();
     if (context.hostId && context.path) {
@@ -1276,8 +1674,10 @@
     observerInstalled = true;
     const observer = new MutationObserver(() => {
       installSettingsEntry();
+      installPortsEntry();
       installZedMenuItems();
       installSessionContextMenuItems();
+      schedulePortScan();
       if (helperPageRoot && !helperPageRoot.isConnected) {
         clearHelperSettingsPage();
       }
@@ -1302,6 +1702,23 @@
         showHelperSettingsPage();
         return;
       }
+      const portsEntry = target.closest(`[${helperPortsEntryAttribute}]`);
+      if (portsEntry instanceof HTMLElement) {
+        event.preventDefault();
+        event.stopPropagation();
+        showPortsPanel();
+        return;
+      }
+      const portCommand = target.closest(`[${helperPortCommandAttribute}]`);
+      if (portCommand instanceof HTMLElement) {
+        event.preventDefault();
+        event.stopPropagation();
+        handlePortCommand(portCommand).catch((error) => {
+          showHelperToast(error?.message || String(error));
+          logDiagnostic("ports_command_failed", { error: error?.message || String(error) });
+        });
+        return;
+      }
       const restoreButton = target.closest("[data-codex-helper-restore-token]");
       if (restoreButton instanceof HTMLElement) {
         event.preventDefault();
@@ -1314,7 +1731,7 @@
         return;
       }
       if (target.closest("aside, nav, [role='navigation'], [role='tablist']")) {
-        const item = target.closest("button, a, [role='button'], [role='tab'], div");
+        const item = target.closest("button, a, [role='button'], [role='tab'], [role='menuitem']");
         if (item instanceof HTMLElement && settingsLabels.some((label) => exactText(item, label))) {
           clearHelperSettingsPage();
         }
@@ -1368,6 +1785,7 @@
   );
 
   installSettingsEntry();
+  installPortsEntry();
   installZedMenuItems();
   refreshFeatureSettings().catch((error) => {
     logDiagnostic("settings_feature_refresh_failed", { error: error?.message || String(error) });

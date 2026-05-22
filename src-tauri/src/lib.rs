@@ -6,6 +6,7 @@ mod launcher;
 mod logging;
 mod markdown;
 mod models;
+mod ports;
 mod routes;
 mod runtime;
 mod session_actions;
