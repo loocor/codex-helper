@@ -17,6 +17,34 @@ pub struct CdpTarget {
     pub web_socket_debugger_url: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CdpVersion {
+    pub web_socket_debugger_url: String,
+}
+
+pub async fn browser_websocket_url(debug_port: u16) -> anyhow::Result<String> {
+    let url = format!("http://127.0.0.1:{debug_port}/json/version");
+    let response = reqwest::get(&url)
+        .await
+        .map_err(|error| anyhow::anyhow!("CDP version query failed: {error}"))?;
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "CDP version query failed: {} {}",
+            response.status().as_u16(),
+            response.status().canonical_reason().unwrap_or("Unknown")
+        );
+    }
+    let version = response
+        .json::<CdpVersion>()
+        .await
+        .map_err(|error| anyhow::anyhow!("CDP version response decode failed: {error}"))?;
+    if version.web_socket_debugger_url.trim().is_empty() {
+        anyhow::bail!("CDP browser websocket URL is empty");
+    }
+    Ok(version.web_socket_debugger_url)
+}
+
 pub async fn list_targets(debug_port: u16) -> anyhow::Result<Vec<CdpTarget>> {
     let url = format!("http://127.0.0.1:{debug_port}/json");
     let response = reqwest::get(&url)

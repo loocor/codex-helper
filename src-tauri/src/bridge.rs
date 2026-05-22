@@ -53,24 +53,39 @@ pub fn build_bridge_script(binding_name: &str) -> String {
 
 pub async fn install_bridge(
     websocket_url: &str,
+    target_id: &str,
     ctx: BridgeContext,
     runtime_scripts: Vec<String>,
 ) -> anyhow::Result<()> {
     let handler = bridge_handler(ctx);
     let socket = connect_cdp_websocket(websocket_url).await?;
     let mut session = BindingCdpSession::new(socket).with_handler(handler);
+    let attached = session
+        .send_command(
+            1,
+            "Target.attachToTarget",
+            json!({ "targetId": target_id, "flatten": true }),
+        )
+        .await?;
+    let session_id = attached
+        .get("result")
+        .and_then(|result| result.get("sessionId"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("CDP attach response did not include sessionId"))?
+        .to_string();
+    session = session.with_session_id(session_id);
 
-    session.send_command(1, "Runtime.enable", json!({})).await?;
+    session.send_command(2, "Runtime.enable", json!({})).await?;
     session
         .send_command(
-            2,
+            3,
             "Runtime.removeBinding",
             json!({ "name": BRIDGE_BINDING_NAME }),
         )
         .await?;
     session
         .send_command(
-            3,
+            4,
             "Runtime.addBinding",
             json!({ "name": BRIDGE_BINDING_NAME }),
         )
@@ -79,14 +94,14 @@ pub async fn install_bridge(
     let bridge_script = build_bridge_script(BRIDGE_BINDING_NAME);
     session
         .send_command(
-            4,
+            5,
             "Page.addScriptToEvaluateOnNewDocument",
             json!({ "source": bridge_script }),
         )
         .await?;
     session
         .send_command(
-            5,
+            6,
             "Runtime.evaluate",
             runtime_evaluate_params(&bridge_script),
         )
@@ -142,6 +157,14 @@ fn runtime_evaluate_params(expression: &str) -> Value {
     })
 }
 
+fn cdp_command(id: u64, method: &str, params: Value, session_id: Option<&str>) -> Value {
+    let mut command = json!({ "id": id, "method": method, "params": params });
+    if let Some(session_id) = session_id {
+        command["sessionId"] = json!(session_id);
+    }
+    command
+}
+
 fn resolve_bridge_expression(request_id: &str, result: &Value) -> anyhow::Result<String> {
     Ok(format!(
         "window.__codexHelperResolve({}, {})",
@@ -163,6 +186,7 @@ struct BindingCdpSession<S> {
     responses: HashMap<u64, Value>,
     binding_calls: VecDeque<Value>,
     handler: Option<BridgeHandler>,
+    session_id: Option<String>,
 }
 
 impl<S> BindingCdpSession<S>
@@ -179,11 +203,17 @@ where
             responses: HashMap::new(),
             binding_calls: VecDeque::new(),
             handler: None,
+            session_id: None,
         }
     }
 
     fn with_handler(mut self, handler: BridgeHandler) -> Self {
         self.handler = Some(handler);
+        self
+    }
+
+    fn with_session_id(mut self, session_id: String) -> Self {
+        self.session_id = Some(session_id);
         self
     }
 
@@ -195,7 +225,7 @@ where
     ) -> anyhow::Result<Value> {
         self.socket
             .send(Message::Text(
-                json!({ "id": id, "method": method, "params": params })
+                cdp_command(id, method, params, self.session_id.as_deref())
                     .to_string()
                     .into(),
             ))
@@ -218,7 +248,7 @@ where
     ) -> anyhow::Result<()> {
         self.socket
             .send(Message::Text(
-                json!({ "id": id, "method": method, "params": params })
+                cdp_command(id, method, params, self.session_id.as_deref())
                     .to_string()
                     .into(),
             ))
@@ -440,5 +470,25 @@ mod tests {
         let id = extract_string_field(r#"{"id":"request\"1","payload":false}"#, "id");
 
         assert_eq!(id.as_deref(), Some("request\"1"));
+    }
+
+    #[test]
+    fn cdp_command_includes_flattened_session_id() {
+        let command = cdp_command(
+            42,
+            "Runtime.evaluate",
+            json!({ "expression": "1 + 1" }),
+            Some("session-1"),
+        );
+
+        assert_eq!(
+            command,
+            json!({
+                "id": 42,
+                "sessionId": "session-1",
+                "method": "Runtime.evaluate",
+                "params": { "expression": "1 + 1" },
+            })
+        );
     }
 }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::bridge::install_bridge;
-use crate::cdp::wait_for_codex_target;
+use crate::cdp::{browser_websocket_url, wait_for_codex_target};
 use crate::launcher::{launch_codex, resolve_codex_app_path, DEFAULT_DEBUG_PORT};
 use crate::logging::DiagnosticLogger;
 use crate::ports::PortForwardManager;
@@ -75,10 +75,7 @@ async fn launch_on_startup(port_manager: PortForwardManager) -> anyhow::Result<(
         serde_json::json!({ "debugPort": DEFAULT_DEBUG_PORT }),
     )?;
     let target = wait_for_codex_target(DEFAULT_DEBUG_PORT).await?;
-    let websocket_url = target
-        .web_socket_debugger_url
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("Selected Codex CDP target has no websocket URL"))?;
+    let target_id = target.id.clone();
     logger.append(
         "cdp.target_selected",
         serde_json::json!({
@@ -87,6 +84,7 @@ async fn launch_on_startup(port_manager: PortForwardManager) -> anyhow::Result<(
             "url": target.url,
         }),
     )?;
+    let websocket_url = browser_websocket_url(DEFAULT_DEBUG_PORT).await?;
     let runtime_scripts = build_runtime_bundle(&state_dir, &logger)?;
     let ctx = BridgeContext {
         state_dir,
@@ -94,7 +92,7 @@ async fn launch_on_startup(port_manager: PortForwardManager) -> anyhow::Result<(
         debug_port: DEFAULT_DEBUG_PORT,
         port_manager,
     };
-    install_bridge(websocket_url, ctx, runtime_scripts).await?;
+    install_bridge(&websocket_url, &target_id, ctx, runtime_scripts).await?;
     logger.append("bridge.injected", serde_json::json!({}))?;
     Ok(())
 }
