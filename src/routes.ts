@@ -1,0 +1,247 @@
+import { spawn } from "node:child_process";
+import {
+	appendFileSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { listTargets, pickCodexPageTarget } from "./cdp";
+
+import {
+	fallbackOpenRequestResponse,
+	openZedRemote,
+	resolveSshTargetResponse,
+	zedRemoteStatus,
+} from "./zed";
+
+type JsonValue =
+	| null
+	| boolean
+	| number
+	| string
+	| JsonValue[]
+	| { [key: string]: JsonValue };
+
+type HelperSettings = {
+	sessionDeleteEnabled: boolean;
+	markdownExportEnabled: boolean;
+	sessionMoveEnabled: boolean;
+	portForwardingEnabled: boolean;
+	portAutoForwardWeb: boolean;
+	portSameLocalPort: boolean;
+};
+
+const defaultSettings: HelperSettings = {
+	sessionDeleteEnabled: false,
+	markdownExportEnabled: false,
+	sessionMoveEnabled: false,
+	portForwardingEnabled: false,
+	portAutoForwardWeb: true,
+	portSameLocalPort: true,
+};
+
+function helperRoot(): string {
+	const configured = process.env.CODEX_HELPER_HOME?.trim();
+	return configured || join(homedir(), ".codex-helper");
+}
+
+function helperLogsDir(): string {
+	return join(helperRoot(), "logs");
+}
+
+function helperBackupsDir(): string {
+	return join(helperRoot(), "backups");
+}
+
+function helperScriptsDir(): string {
+	return join(helperRoot(), "scripts");
+}
+
+function helperConfigPath(): string {
+	return join(helperRoot(), "config.json");
+}
+
+function ensureHelperRoot(): void {
+	mkdirSync(helperRoot(), { recursive: true });
+	mkdirSync(helperLogsDir(), { recursive: true });
+	mkdirSync(helperBackupsDir(), { recursive: true });
+	mkdirSync(helperScriptsDir(), { recursive: true });
+}
+
+function logPath(): string {
+	ensureHelperRoot();
+	const logsDir = helperLogsDir();
+	return join(logsDir, "codex-helper.jsonl");
+}
+
+function appendDiagnostic(event: string, detail: JsonValue): void {
+	const record = {
+		timestamp: new Date().toISOString(),
+		event,
+		detail,
+	};
+	appendFileSync(logPath(), `${JSON.stringify(record)}\n`, "utf8");
+}
+
+function readSettings(): HelperSettings {
+	ensureHelperRoot();
+	try {
+		const settings = JSON.parse(
+			readFileSync(helperConfigPath(), "utf8"),
+		) as Partial<HelperSettings>;
+		return {
+			...defaultSettings,
+			...settings,
+		};
+	} catch {
+		writeFileSync(
+			helperConfigPath(),
+			`${JSON.stringify(defaultSettings, null, 2)}\n`,
+			"utf8",
+		);
+		return { ...defaultSettings };
+	}
+}
+
+function updateSettings(payload: Record<string, JsonValue>): HelperSettings {
+	const current = readSettings();
+	const next: HelperSettings = { ...current };
+	for (const [key, value] of Object.entries(payload)) {
+		if (!(key in defaultSettings)) {
+			throw new Error(`Unknown settings key: ${key}`);
+		}
+		if (typeof value !== "boolean") {
+			throw new Error(`Settings value for ${key} must be a boolean`);
+		}
+		(next as Record<string, boolean>)[key] = value;
+	}
+	writeFileSync(
+		helperConfigPath(),
+		`${JSON.stringify(next, null, 2)}\n`,
+		"utf8",
+	);
+	return next;
+}
+
+function listUserScripts(): string[] {
+	ensureHelperRoot();
+	const files = readdirSync(helperScriptsDir());
+	return files.filter((name) => name.endsWith(".js")).sort();
+}
+
+function readLatestLogContents(): string {
+	try {
+		const contents = readFileSync(logPath(), "utf8");
+		const lines = contents.split("\n").filter(Boolean);
+		return lines.slice(-80).join("\n");
+	} catch {
+		return "";
+	}
+}
+
+function openPath(path: string, reveal = false): JsonValue {
+	try {
+		const args = reveal ? ["-R", path] : [path];
+		const child = spawn("open", args, { stdio: "ignore", detached: true });
+		child.unref();
+		return { status: "ok", path };
+	} catch (error) {
+		return {
+			status: "failed",
+			message: error instanceof Error ? error.message : String(error),
+		};
+	}
+}
+
+function devtoolsUrl(
+	debugPort: number,
+	target: { webSocketDebuggerUrl?: string },
+): string {
+	const ws = (target.webSocketDebuggerUrl || "").trim();
+	if (!ws.startsWith("ws://")) {
+		throw new Error("Selected Codex DevTools target has no websocket URL");
+	}
+	return `http://127.0.0.1:${debugPort}/devtools/inspector.html?ws=${ws.slice(5)}`;
+}
+
+function helperDebugPort(): number {
+	const raw = process.env.CODEX_HELPER_DEBUG_PORT || "9229";
+	const value = Number(raw);
+	if (!Number.isInteger(value) || value < 1 || value > 65535) return 9229;
+	return value;
+}
+
+export async function handleBridgeRequest(
+	path: string,
+	payload: Record<string, JsonValue>,
+): Promise<JsonValue> {
+	switch (path) {
+		case "/backend/status":
+			return { status: "ok", message: "Codex Helper backend connected" };
+		case "/diagnostics/log": {
+			const event =
+				typeof payload.event === "string" ? payload.event : "renderer.event";
+			appendDiagnostic(event, payload);
+			return { status: "ok" };
+		}
+		case "/runtime/user-scripts":
+			return { status: "ok", scripts: listUserScripts() };
+		case "/settings/get":
+			return { status: "ok", settings: readSettings() };
+		case "/settings/set":
+			try {
+				return { status: "ok", settings: updateSettings(payload) };
+			} catch (error) {
+				return {
+					status: "failed",
+					message: error instanceof Error ? error.message : String(error),
+				};
+			}
+		case "/diagnostics/read-latest":
+			return {
+				status: "ok",
+				path: logPath(),
+				contents: readLatestLogContents(),
+			};
+		case "/diagnostics/reveal-log":
+			return openPath(logPath(), true);
+		case "/state/reveal":
+			return openPath(helperRoot());
+		case "/devtools/open":
+			try {
+				const debugPort = helperDebugPort();
+				const targets = await listTargets(debugPort);
+				const target = pickCodexPageTarget(targets);
+				const url = devtoolsUrl(debugPort, target);
+				return openPath(url);
+			} catch (error) {
+				return {
+					status: "failed",
+					message: error instanceof Error ? error.message : String(error),
+				};
+			}
+		case "/backups/list":
+			return { status: "ok", backups: [] };
+		case "/backups/restore":
+			return {
+				status: "failed",
+				message: "Restore is only available in the app backend",
+			};
+		case "/zed-remote/status":
+			return zedRemoteStatus();
+		case "/zed-remote/resolve-host":
+			return resolveSshTargetResponse(payload);
+		case "/zed-remote/fallback-request":
+			return fallbackOpenRequestResponse();
+		case "/zed-remote/open":
+			return openZedRemote(payload);
+		default:
+			return {
+				status: "failed",
+				message: `Unknown Codex Helper bridge path: ${path}`,
+			};
+	}
+}
