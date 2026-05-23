@@ -9,6 +9,7 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { listTargets, pickCodexPageTarget } from "./cdp";
+import { invokeRustBridge, isRustBridgePath } from "./rust-bridge";
 
 import {
 	fallbackOpenRequestResponse,
@@ -178,6 +179,9 @@ export async function handleBridgeRequest(
 	path: string,
 	payload: Record<string, JsonValue>,
 ): Promise<JsonValue> {
+	if (isRustBridgePath(path)) {
+		return invokeRustBridge(path, payload);
+	}
 	switch (path) {
 		case "/backend/status":
 			return { status: "ok", message: "Codex Helper backend connected" };
@@ -208,6 +212,12 @@ export async function handleBridgeRequest(
 			};
 		case "/diagnostics/reveal-log":
 			return openPath(logPath(), true);
+		case "/logs/reveal":
+			return openPath(helperLogsDir());
+		case "/scripts/reveal":
+			return openPath(helperScriptsDir());
+		case "/backups/reveal":
+			return openPath(helperBackupsDir());
 		case "/state/reveal":
 			return openPath(helperRoot());
 		case "/devtools/open":
@@ -223,13 +233,6 @@ export async function handleBridgeRequest(
 					message: error instanceof Error ? error.message : String(error),
 				};
 			}
-		case "/backups/list":
-			return { status: "ok", backups: [] };
-		case "/backups/restore":
-			return {
-				status: "failed",
-				message: "Restore is only available in the app backend",
-			};
 		case "/zed-remote/status":
 			return zedRemoteStatus();
 		case "/zed-remote/resolve-host":
