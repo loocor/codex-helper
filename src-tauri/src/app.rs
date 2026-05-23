@@ -1,24 +1,23 @@
 use std::sync::Arc;
 
-use crate::bridge::install_bridge;
-use crate::cdp::{browser_websocket_url, wait_for_codex_target};
-use crate::launcher::{launch_codex, resolve_codex_app_path, DEFAULT_DEBUG_PORT};
-use crate::logging::DiagnosticLogger;
+use crate::codex_control::CodexController;
 use crate::ports::PortForwardManager;
-use crate::routes::BridgeContext;
-use crate::runtime::build_runtime_bundle;
-use crate::state_dir::StateDir;
 
 pub fn run() {
     let port_manager = PortForwardManager::new();
+    let controller = CodexController::new();
+    let startup_controller = controller.clone();
     let startup_port_manager = port_manager.clone();
     let shutdown_port_manager = port_manager.clone();
     tauri::Builder::default()
         .setup(move |app| {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-            install_menu_bar_item(app.handle(), port_manager.clone())?;
-            tauri::async_runtime::spawn(async {
-                if let Err(error) = launch_on_startup(startup_port_manager).await {
+            install_menu_bar_item(app.handle(), controller.clone(), port_manager.clone())?;
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = startup_controller
+                    .initial_launch(startup_port_manager)
+                    .await
+                {
                     eprintln!("{error}");
                 }
             });
@@ -35,64 +34,70 @@ pub fn run() {
 
 fn install_menu_bar_item(
     app: &tauri::AppHandle,
+    controller: Arc<CodexController>,
     port_manager: PortForwardManager,
 ) -> anyhow::Result<()> {
-    use tauri::menu::{Menu, MenuItem};
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     use tauri::tray::TrayIconBuilder;
 
-    let quit = MenuItem::with_id(app, "quit", "Quit Codex Helper", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&quit])?;
-    TrayIconBuilder::with_id("codex-helper")
-        .icon(tauri::include_image!("icons/tray-icon.png"))
+    let quit_codex = MenuItem::with_id(app, "quit-codex", "Quit Codex", true, None::<&str>)?;
+    let reload_codex = MenuItem::with_id(app, "reload-codex", "Reload Codex", true, None::<&str>)?;
+    let restart_codex =
+        MenuItem::with_id(app, "restart-codex", "Restart Codex", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let quit_helper =
+        MenuItem::with_id(app, "quit-helper", "Quit Codex Helper", true, None::<&str>)?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &quit_codex,
+            &reload_codex,
+            &restart_codex,
+            &separator,
+            &quit_helper,
+        ],
+    )?;
+    let mut tray = TrayIconBuilder::with_id("codex-helper")
+        .icon(tauri::include_image!("icons/tray-menu.png"))
         .tooltip("Codex Helper is running")
         .menu(&menu)
-        .show_menu_on_left_click(true)
-        .on_menu_event(move |app, event| {
-            if event.id().as_ref() == "quit" {
-                port_manager.stop_all();
-                app.exit(0);
-            }
-        })
-        .build(app)?;
-    Ok(())
-}
-
-async fn launch_on_startup(port_manager: PortForwardManager) -> anyhow::Result<()> {
-    let state_dir = StateDir::init()?;
-    let logger = DiagnosticLogger::new(state_dir.logs_dir.clone());
-    logger.append(
-        "launcher.starting",
-        serde_json::json!({ "debugPort": DEFAULT_DEBUG_PORT }),
-    )?;
-    let app_path = resolve_codex_app_path(None)?;
-    logger.append(
-        "launcher.codex_app_resolved",
-        serde_json::json!({ "appPath": app_path }),
-    )?;
-    let _codex = launch_codex(&app_path, DEFAULT_DEBUG_PORT).await?;
-    logger.append(
-        "launcher.codex_started",
-        serde_json::json!({ "debugPort": DEFAULT_DEBUG_PORT }),
-    )?;
-    let target = wait_for_codex_target(DEFAULT_DEBUG_PORT).await?;
-    let target_id = target.id.clone();
-    logger.append(
-        "cdp.target_selected",
-        serde_json::json!({
-            "id": target.id,
-            "title": target.title,
-            "url": target.url,
-        }),
-    )?;
-    let websocket_url = browser_websocket_url(DEFAULT_DEBUG_PORT).await?;
-    let runtime_scripts = build_runtime_bundle(&state_dir, &logger)?;
-    let ctx = BridgeContext {
-        state_dir,
-        logger: Arc::new(logger.clone()),
-        debug_port: DEFAULT_DEBUG_PORT,
-        port_manager,
-    };
-    install_bridge(&websocket_url, &target_id, ctx, runtime_scripts).await?;
-    logger.append("bridge.injected", serde_json::json!({}))?;
+        .show_menu_on_left_click(true);
+    #[cfg(target_os = "macos")]
+    {
+        // Template image: black + alpha only; macOS inverts for light/dark menu bar.
+        tray = tray.icon_as_template(true);
+    }
+    tray.on_menu_event(move |app, event| match event.id().as_ref() {
+        "quit-codex" => {
+            let controller = controller.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = controller.quit_codex().await {
+                    eprintln!("{error}");
+                }
+            });
+        }
+        "reload-codex" => {
+            let controller = controller.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = controller.reload_codex().await {
+                    eprintln!("{error}");
+                }
+            });
+        }
+        "restart-codex" => {
+            let controller = controller.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = controller.restart_codex().await {
+                    eprintln!("{error}");
+                }
+            });
+        }
+        "quit-helper" => {
+            port_manager.stop_all();
+            app.exit(0);
+        }
+        _ => {}
+    })
+    .build(app)?;
     Ok(())
 }

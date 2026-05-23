@@ -31,6 +31,8 @@ Do not add npm, pnpm, or yarn lockfiles.
 
 Do not merge `src/` and `src-tauri/`; they are different languages and build targets.
 
+The dev launcher auto-selects a Codex CDP port: it attaches to an existing debug port in the `9229`–`9260` range, or launches Codex on the first free port in that range (falling back to an ephemeral port). Override with `--debug-port` only when needed. `CODEX_HELPER_DEBUG_PORT` is set to the chosen port for bridge routes.
+
 ## Scope
 
 Codex Helper is a small external launcher and runtime injector for Codex desktop.

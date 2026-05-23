@@ -48,6 +48,49 @@ export async function isDebugPortReady(debugPort: number): Promise<boolean> {
 	}
 }
 
+export async function hasCodexCdpTarget(debugPort: number): Promise<boolean> {
+	try {
+		const targets = await listTargets(debugPort);
+		return findCodexPageTarget(targets) !== null;
+	} catch {
+		return false;
+	}
+}
+
+export async function waitForDebugPort(
+	debugPort: number,
+	timer: LaunchTimer,
+	timeoutMs = 60_000,
+): Promise<void> {
+	const startedAt = Date.now();
+	let lastProgressAt = startedAt;
+	while (Date.now() - startedAt < timeoutMs) {
+		if (await isDebugPortReady(debugPort)) {
+			timer.stage("debug port ready", {
+				port: debugPort,
+				waitedMs: Date.now() - startedAt,
+			});
+			return;
+		}
+		const now = Date.now();
+		if (now - lastProgressAt >= CDP_POLL_PROGRESS_MS) {
+			timer.stage("wait debug port", {
+				port: debugPort,
+				waitedMs: now - startedAt,
+			});
+			lastProgressAt = now;
+		}
+		await Bun.sleep(250);
+	}
+	const { describePortBlockers, listenPidsOnPort } = await import("./port");
+	const blockerSummary = describePortBlockers(debugPort);
+	throw new Error(
+		listenPidsOnPort(debugPort).length > 0
+			? `Timed out waiting for Codex debug port ${debugPort} after ${Date.now() - startedAt}ms. Port is held by: ${blockerSummary}`
+			: `Timed out waiting for Codex debug port ${debugPort} after ${Date.now() - startedAt}ms`,
+	);
+}
+
 export async function listTargets(debugPort: number): Promise<CdpTarget[]> {
 	const response = await fetchCdp(`http://127.0.0.1:${debugPort}/json`);
 	if (!response.ok) {
@@ -62,14 +105,25 @@ export function pickCodexPageTarget(targets: CdpTarget[]): CdpTarget {
 	const pages = targets.filter(
 		(target) => target.type === "page" && target.webSocketDebuggerUrl,
 	);
-	const codexPage = pages.find((target) =>
-		`${target.title ?? ""} ${target.url ?? ""}`.toLowerCase().includes("codex"),
-	);
+	const codexPage = findCodexPageTarget(pages);
 	const selected = codexPage ?? pages[0];
 	if (!selected?.webSocketDebuggerUrl) {
 		throw new Error("No injectable Codex page target found");
 	}
 	return selected;
+}
+
+export function findCodexPageTarget(targets: CdpTarget[]): CdpTarget | null {
+	return (
+		targets.find(
+			(target) =>
+				target.type === "page" &&
+				Boolean(target.webSocketDebuggerUrl) &&
+				`${target.title ?? ""} ${target.url ?? ""}`
+					.toLowerCase()
+					.includes("codex"),
+		) ?? null
+	);
 }
 
 export async function waitForCodexTarget(

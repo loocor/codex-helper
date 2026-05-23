@@ -1,11 +1,20 @@
 declare const Bun: {
 	argv: string[];
 	sleep(ms: number): Promise<void>;
+	listen(options: {
+		hostname: string;
+		port: number;
+		socket: { data(): void };
+	}): {
+		port: number;
+		stop(): void;
+	};
 };
 
 declare const process: {
 	env: Record<string, string | undefined>;
 	platform: string;
+	execPath: string;
 	exit(code?: number): never;
 	on(event: "SIGINT", listener: () => void): void;
 };
@@ -52,6 +61,6 @@ declare module "node:child_process" {
 	export function spawnSync(
 		command: string,
 		args: string[],
-		options: { stdio: "ignore" },
-	): { status: number | null };
+		options: { stdio: "ignore" | "inherit"; encoding?: "utf8" },
+	): { status: number | null; stdout?: string };
 }
