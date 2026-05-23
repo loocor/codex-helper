@@ -4,12 +4,13 @@ use crate::logging::DiagnosticLogger;
 use crate::state_dir::StateDir;
 
 const RENDERER_RUNTIME: &str = include_str!("../../runtime/renderer.js");
+const ZED_OPEN_TWEAK: &str = include_str!("../../runtime/tweaks/zed-open.js");
 
 pub fn build_runtime_bundle(
     state_dir: &StateDir,
     logger: &DiagnosticLogger,
 ) -> anyhow::Result<Vec<String>> {
-    let mut scripts = vec![RENDERER_RUNTIME.to_string()];
+    let mut scripts = vec![RENDERER_RUNTIME.to_string(), ZED_OPEN_TWEAK.to_string()];
     if !state_dir.scripts_dir.exists() {
         return Ok(scripts);
     }
@@ -59,7 +60,11 @@ mod tests {
         let bundle = build_runtime_bundle(&state_dir, &logger).expect("bundle");
 
         assert!(bundle[0].contains("Codex Helper") || bundle[0].contains("codex-helper"));
-        assert_eq!(bundle[1], "window.a = true;");
-        assert_eq!(bundle[2], "window.b = true;");
+        assert!(
+            bundle[1].contains("zed_menu_item_injected")
+                || bundle[1].contains("data-codex-helper-zed-menu-item")
+        );
+        assert_eq!(bundle[2], "window.a = true;");
+        assert_eq!(bundle[3], "window.b = true;");
     }
 }
