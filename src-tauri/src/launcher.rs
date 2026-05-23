@@ -24,6 +24,7 @@ pub fn build_macos_open_command(app_path: &Path, debug_port: u16) -> Vec<String>
         app_path.to_string_lossy().to_string(),
         "--args".to_string(),
         format!("--remote-debugging-port={debug_port}"),
+        format!("--remote-allow-origins=http://127.0.0.1:{debug_port}"),
     ]
 }
 
@@ -56,6 +57,7 @@ mod tests {
         assert!(command.contains(&"-a".to_string()));
         assert!(command.contains(&"--args".to_string()));
         assert!(command.contains(&"--remote-debugging-port=9229".to_string()));
+        assert!(command.contains(&"--remote-allow-origins=http://127.0.0.1:9229".to_string()));
     }
 
     #[test]
