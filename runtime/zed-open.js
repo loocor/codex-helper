@@ -274,7 +274,7 @@
     const root = scope?.querySelectorAll ? scope : document;
     const nodes = [];
     if (scope instanceof HTMLElement && scope.matches?.(selector)) nodes.push(scope);
-    root.querySelectorAll?.(selector).forEach((node) => nodes.push(node));
+    for (const node of root.querySelectorAll?.(selector) || []) nodes.push(node);
     return Array.from(new Set(nodes));
   }
 
@@ -474,7 +474,7 @@
       const className = String(item.node.className || "");
       return aria === "true" || state === "active" || /selected|active/.test(className);
     });
-    return (active || visible[0] || {}).value || "";
+    return (active || visible[0])?.value || "";
   }
 
   function remoteContextFromSidebar() {

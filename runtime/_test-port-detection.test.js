@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { buildRuntimeBundle } from "./bundle.ts";
 
-const source = readFileSync(new URL("./renderer.js", import.meta.url), "utf8");
+const source = buildRuntimeBundle();
 
 function extractFunction(name) {
   const marker = `function ${name}(`;
@@ -31,12 +31,14 @@ test("parseWebPortsFromText extracts clear web URLs", () => {
       API listening on http://127.0.0.1:8000/health
       Preview: http://0.0.0.0:3000
       IPv6: http://[::1]:7000/path
+      Local server on localhost:8787
     `),
   ).toEqual([
     { port: 5173, url: "http://localhost:5173/" },
     { port: 8000, url: "http://127.0.0.1:8000/health" },
     { port: 3000, url: "http://0.0.0.0:3000" },
     { port: 7000, url: "http://[::1]:7000/path" },
+    { port: 8787, url: "http://127.0.0.1:8787" },
   ]);
 });
 

@@ -21,6 +21,16 @@ Use Bun for all JavaScript and TypeScript tasks.
 
 Do not add npm, pnpm, or yarn lockfiles.
 
+## Repository Layout
+
+- `src-tauri/`: packaged app shell (Rust/Tauri) — launch Codex, CDP, bridge routes, session storage
+- `src/` (`launch.ts`, `bridge.ts`, `cdp.ts`, …): Bun dev launcher only; not injected into Codex
+- `runtime/*.js`: injectable runtime source (ordered by `runtime/index.json`; tests use `_test-*.test.js`)
+- Standalone runtime scripts: any `runtime/*.js` not listed in `index.json` (for example `zed-open.js`)
+- `dist/bundle.js`: bundled injectable output (`bun run bundle:runtime`, gitignored)
+
+Do not merge `src/` and `src-tauri/`; they are different languages and build targets.
+
 ## Scope
 
 Codex Helper is a small external launcher and runtime injector for Codex desktop.

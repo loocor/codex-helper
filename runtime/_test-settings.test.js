@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { buildRuntimeBundle } from "./bundle.ts";
 
-const source = readFileSync(new URL("./renderer.js", import.meta.url), "utf8");
+const source = buildRuntimeBundle();
 
 test("settings sidebar detection does not scan arbitrary div containers", () => {
   expect(source).not.toContain(
@@ -44,8 +44,26 @@ test("settings page groups options by feature area", () => {
   expect(source).toContain('codex-helper-settings-section-title text-sm font-medium text-token-text-primary">Basic</div>');
   expect(source).toContain('codex-helper-settings-section-title text-sm font-medium text-token-text-primary">Sessions</div>');
   expect(source).toContain('codex-helper-settings-section-title text-sm font-medium text-token-text-primary">Port forwarding</div>');
-  expect(source).toContain('codex-helper-settings-section-title text-sm font-medium text-token-text-primary">Other</div>');
-  expect(source).toContain("Open in Zed");
+  expect(source).toContain('sectionHeading("Loaded scripts"');
+  expect(source).toContain('sectionHeading("Deleted sessions"');
+  expect(source).toContain('sectionHeading("Log files"');
+  expect(source).toContain("https://github.com/loocor/codex-helper");
+  expect(source).toContain('externalLinkRow("Project repository"');
+  expect(source).toContain('actionRow("Open in Zed"');
+  expect(source).toContain("sectionHeading");
+  expect(source).toContain("open-scripts-dir");
+  expect(source).toContain("open-backups-dir");
+  expect(source).toContain("open-logs-dir");
+  expect(source).toContain("codex-helper-settings-section-link");
+  expect(source).not.toContain("Helper directory");
+  expect(source).toContain("codex-helper-settings-scroll");
+  expect(source).toContain("createCompactBackupRow");
+  expect(source).toContain('move: "Move Session"');
+  expect(source).toContain('const order = ["export", "move", "delete"]');
+  expect(source).toContain("helperSessionMenuIcon");
+  expect(source).toContain("confirmMoveSession");
+  expect(source).toContain("isRemoteProjectPath");
+  expect(source).not.toContain('">Other</div>');
 });
 
 test("settings dialog close control uses icon button", () => {
@@ -63,4 +81,20 @@ test("account menu exposes helper settings dialog entry", () => {
 test("startup does not eagerly mount inline General settings page", () => {
   expect(source).not.toContain("showHelperSettingsPage({ refresh: true })");
   expect(source).not.toContain("showHelperSettingsPage({ refresh: false })");
+});
+
+test("session context menu extends Codex native electronBridge menu", () => {
+  expect(source).toContain("showExtendedSessionContextMenu");
+  expect(source).toContain("buildCodexSessionNativeMenuItems");
+  expect(source).toContain("openProjectMoveMenu");
+  expect(source).toContain("nativeProjectTargets");
+  expect(source).toContain("helperSessionMenuIcon");
+  expect(source).toContain("Move Session");
+  expect(source).toContain("window.electronBridge");
+  expect(source).toContain("open-thread-new-window");
+  expect(source).toContain("codex-helper-session-");
+  expect(source).toContain("stopImmediatePropagation");
+  expect(source).not.toContain("installSessionContextMenuItems");
+  expect(source).not.toContain("installElectronContextMenuHook");
+  expect(source).not.toContain("promptMoveTargetPath");
 });

@@ -1,7 +1,6 @@
+.worktrees/
 node_modules/
-dist/
 src-tauri/target/
 src-tauri/gen/
-src-tauri/icons/icon.png
+dist/
 .DS_Store
-.worktrees/
