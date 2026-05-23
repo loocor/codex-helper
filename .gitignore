@@ -2,5 +2,8 @@
 node_modules/
 src-tauri/target/
 src-tauri/gen/
+src-tauri/icons/tray-menu.png
+src-tauri/icons/tray-menu-scaled.png
+src-tauri/icons/tray-flat.png
 dist/
 .DS_Store

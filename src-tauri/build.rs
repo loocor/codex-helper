@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    sync_codex_icon();
+    assert_app_icon();
+    prepare_tray_icon();
     generate_runtime_modules();
     tauri_build::build();
 }
@@ -97,42 +98,118 @@ fn generate_runtime_modules() {
         .unwrap_or_else(|error| panic!("failed to write {}: {error}", generated_path.display()));
 }
 
-fn sync_codex_icon() {
+fn assert_app_icon() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let codex_app_path =
-        env::var("CODEX_APP_PATH").unwrap_or_else(|_| "/Applications/Codex.app".to_string());
-    let codex_icon_source = PathBuf::from(codex_app_path)
-        .join("Contents")
-        .join("Resources")
-        .join("icon.icns");
+    let app_icon = manifest_dir.join("icons/icon.png");
 
-    if !codex_icon_source.is_file() {
-        panic!("Codex icon not found: {}", codex_icon_source.display());
-    }
-
-    let icons_dir = manifest_dir.join("icons");
-    fs::create_dir_all(&icons_dir)
-        .unwrap_or_else(|error| panic!("failed to create {}: {error}", icons_dir.display()));
-
-    let tauri_icon_png = icons_dir.join("icon.png");
-    let status = Command::new("sips")
-        .arg("-s")
-        .arg("format")
-        .arg("png")
-        .arg(&codex_icon_source)
-        .arg("--out")
-        .arg(&tauri_icon_png)
-        .status()
-        .unwrap_or_else(|error| panic!("failed to run sips for Codex icon conversion: {error}"));
-
-    if !status.success() {
+    if !app_icon.is_file() {
         panic!(
-            "failed to convert Codex icon {} to {}",
-            codex_icon_source.display(),
-            tauri_icon_png.display()
+            "App icon not found: {} (add your Codex Helper icon PNG here)",
+            app_icon.display()
         );
     }
 
-    println!("cargo:rerun-if-changed=CODEX_APP_PATH");
-    println!("cargo:rerun-if-changed={}", codex_icon_source.display());
+    let _ = fs::read(&app_icon)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", app_icon.display()));
+
+    println!("cargo:rerun-if-changed={}", app_icon.display());
+}
+
+/// Build `icons/tray-menu.png` from `icons/tray.png` for menu bar embedding.
+///
+/// Edit `tray.png` (any size, black + transparent). Cargo embeds the generated
+/// 44×44 asset via `include_image!` so icon changes rebuild reliably.
+fn prepare_tray_icon() {
+    const MENU_BAR_PX: &str = "44";
+
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let icons_dir = manifest_dir.join("icons");
+    let tray_source = icons_dir.join("tray.png");
+    let tray_flat = icons_dir.join("tray-flat.png");
+    let tray_scaled = icons_dir.join("tray-menu-scaled.png");
+    let tray_menu = icons_dir.join("tray-menu.png");
+
+    if !tray_source.is_file() {
+        panic!(
+            "Tray icon source not found: {} (black shape on transparent PNG)",
+            tray_source.display()
+        );
+    }
+
+    // Track source; read bytes so cargo always knows this build step depends on it.
+    let _ = fs::read(&tray_source)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", tray_source.display()));
+
+    println!("cargo:rerun-if-changed={}", tray_source.display());
+
+    // Interlaced PNG (Adam7) breaks Tauri tray embedding; flatten before resize.
+    deinterlace_png(&tray_source, &tray_flat);
+
+    let fit = Command::new("sips")
+        .arg("-Z")
+        .arg(MENU_BAR_PX)
+        .arg(&tray_flat)
+        .arg("--out")
+        .arg(&tray_scaled)
+        .status()
+        .unwrap_or_else(|error| panic!("failed to run sips for tray icon fit: {error}"));
+    if !fit.success() {
+        panic!(
+            "failed to fit tray icon {} within {MENU_BAR_PX}px",
+            tray_flat.display()
+        );
+    }
+
+    let pad = Command::new("sips")
+        .arg("--padToHeightWidth")
+        .arg(MENU_BAR_PX)
+        .arg(MENU_BAR_PX)
+        .arg(&tray_scaled)
+        .arg("--out")
+        .arg(&tray_menu)
+        .status()
+        .unwrap_or_else(|error| panic!("failed to run sips for tray icon pad: {error}"));
+    let _ = fs::remove_file(&tray_flat);
+    let _ = fs::remove_file(&tray_scaled);
+    if !pad.success() {
+        panic!(
+            "failed to pad tray icon {} to {MENU_BAR_PX}x{MENU_BAR_PX}",
+            tray_scaled.display()
+        );
+    }
+
+    println!("cargo:rerun-if-changed={}", tray_menu.display());
+}
+
+fn deinterlace_png(source: &Path, dest: &Path) {
+    let tiff = dest.with_extension("tif");
+    let to_tiff = Command::new("sips")
+        .arg("-s")
+        .arg("format")
+        .arg("tiff")
+        .arg(source)
+        .arg("--out")
+        .arg(&tiff)
+        .status()
+        .unwrap_or_else(|error| panic!("failed to run sips for tray deinterlace: {error}"));
+    if !to_tiff.success() {
+        panic!(
+            "failed to deinterlace tray icon {} via TIFF",
+            source.display()
+        );
+    }
+
+    let to_png = Command::new("sips")
+        .arg("-s")
+        .arg("format")
+        .arg("png")
+        .arg(&tiff)
+        .arg("--out")
+        .arg(dest)
+        .status()
+        .unwrap_or_else(|error| panic!("failed to run sips for tray PNG export: {error}"));
+    let _ = fs::remove_file(&tiff);
+    if !to_png.success() {
+        panic!("failed to write deinterlaced tray icon {}", dest.display());
+    }
 }

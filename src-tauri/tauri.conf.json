@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "",
     "beforeBuildCommand": "",
-    "frontendDist": "../runtime"
+    "frontendDist": "assets"
   },
   "app": {
     "windows": [
@@ -26,6 +26,8 @@
   "bundle": {
     "active": false,
     "targets": "app",
-    "icon": ["icons/icon.png"]
+    "icon": [
+      "icons/icon.png"
+    ]
   }
 }
