@@ -3,14 +3,26 @@ use std::fs;
 use crate::logging::DiagnosticLogger;
 use crate::state_dir::StateDir;
 
-const RENDERER_RUNTIME: &str = include_str!("../../runtime/renderer.js");
-const ZED_OPEN_TWEAK: &str = include_str!("../../runtime/tweaks/zed-open.js");
+const RUNTIME_HEADER: &str = "(() => {\n  if (typeof document === \"undefined\") return;\n\n";
+const RUNTIME_FOOTER: &str = "\n})();\n";
+
+include!(concat!(env!("OUT_DIR"), "/runtime_modules.rs"));
+
+fn bundled_runtime() -> String {
+    let body = RUNTIME_MODULE_SOURCES.join("\n\n");
+    format!("{RUNTIME_HEADER}{body}{RUNTIME_FOOTER}")
+}
 
 pub fn build_runtime_bundle(
     state_dir: &StateDir,
     logger: &DiagnosticLogger,
 ) -> anyhow::Result<Vec<String>> {
-    let mut scripts = vec![RENDERER_RUNTIME.to_string(), ZED_OPEN_TWEAK.to_string()];
+    let mut scripts = vec![bundled_runtime()];
+    scripts.extend(
+        STANDALONE_RUNTIME_SCRIPTS
+            .iter()
+            .map(|source| source.to_string()),
+    );
     if !state_dir.scripts_dir.exists() {
         return Ok(scripts);
     }
