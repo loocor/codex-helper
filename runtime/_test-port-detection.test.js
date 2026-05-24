@@ -727,18 +727,21 @@ test("remote port lifecycle loop is not gated by pinned summary visibility", () 
   expect(maintainPortsPanelNow).not.toContain("stopPortScanLoop();");
 });
 
-test("runtime stops managed tunnels outside the active session", () => {
+test("runtime keeps managed tunnels outside the active session", () => {
   const syncRemoteSessionPortsOnce = extractFunction("syncRemoteSessionPortsOnce");
   const maintainPortsPanelNow = extractFunction("maintainPortsPanelNow");
 
-  expect(source).toContain("function stopForwardedTunnelsOutsideSession(");
   expect(source).toContain("function stopAllManagedPortForwards(");
-  expect(source).toContain("!samePortSession(port, context)");
-  expect(syncRemoteSessionPortsOnce).toContain(
+  expect(syncRemoteSessionPortsOnce).not.toContain(
     "stopForwardedTunnelsOutsideSession(",
   );
   expect(syncRemoteSessionPortsOnce).toContain("activePorts");
+  expect(maintainPortsPanelNow).toContain("!featureSettings.portForwardingEnabled");
   expect(maintainPortsPanelNow).toContain("stopAllManagedPortForwards()");
+  expect(maintainPortsPanelNow.indexOf("!featureSettings.portForwardingEnabled"))
+    .toBeLessThan(
+      maintainPortsPanelNow.indexOf("!portForwardingUiAvailable()"),
+  );
 });
 
 test("remote sync aborts stale async results after session changes", () => {
