@@ -126,7 +126,6 @@ pub async fn install_bridge(
             .await?;
     }
 
-    session.drain_binding_queue().await?;
     tokio::spawn(async move {
         loop {
             if session.drain_binding_queue().await.is_err() {

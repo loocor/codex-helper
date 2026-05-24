@@ -6,6 +6,7 @@ import { handleBridgeRequest } from "./routes";
 
 const BRIDGE_BINDING_NAME = "codexHelperBridgeV1";
 const CDP_COMMAND_TIMEOUT_MS = 5000;
+const BRIDGE_REQUEST_TIMEOUT_MS = 10000;
 
 type JsonValue =
 	| null
@@ -73,6 +74,27 @@ function cdpCommand(
 	};
 	if (sessionId) command.sessionId = sessionId;
 	return JSON.stringify(command);
+}
+
+async function withBridgeRequestTimeout<T>(
+	promise: Promise<T>,
+	path: string,
+): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeoutPromise = new Promise<T>((_, reject) => {
+		timer = setTimeout(() => {
+			reject(
+				new Error(
+					`Bridge request ${path || "(unknown)"} timed out after ${BRIDGE_REQUEST_TIMEOUT_MS}ms`,
+				),
+			);
+		}, BRIDGE_REQUEST_TIMEOUT_MS);
+	});
+	try {
+		return await Promise.race([promise, timeoutPromise]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
 }
 
 class BindingCdpSession {
@@ -150,7 +172,11 @@ class BindingCdpSession {
 	async drainBindingQueue(): Promise<void> {
 		while (this.bindingCalls.length > 0) {
 			const message = this.bindingCalls.shift();
-			if (message) await this.routeBindingCall(message);
+			if (message) {
+				this.routeBindingCall(message).catch((error: unknown) => {
+					console.warn("[Codex Helper] bridge route failed", error);
+				});
+			}
 		}
 	}
 
@@ -171,7 +197,10 @@ class BindingCdpSession {
 		if (!requestId) return;
 
 		try {
-			const result = await handleBridgeRequest(path, payload);
+			const result = await withBridgeRequestTimeout(
+				handleBridgeRequest(path, payload),
+				path,
+			);
 			const expression = `window.__codexHelperResolve(${JSON.stringify(requestId)}, ${JSON.stringify(result)})`;
 			await this.sendCommandWithoutWait(
 				nextMessageId++,
@@ -288,9 +317,6 @@ export async function installBridge(options: {
 		bytes: runtimeBytes,
 	});
 
-	await session.drainBindingQueue();
-	timer.stage("inject drain bindings");
-
 	const pump = async () => {
 		while (socket.readyState === WebSocket.OPEN) {
 			await session.drainBindingQueue();
@@ -298,6 +324,7 @@ export async function installBridge(options: {
 		}
 	};
 	void pump();
+	timer.stage("inject binding pump");
 
 	return () => {
 		socket.close();
