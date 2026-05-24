@@ -1092,6 +1092,10 @@ async function syncRemoteSessionPortsOnce() {
     activeResult?.status === "ok" && Array.isArray(activeResult.ports)
       ? activeResult.ports
       : [];
+  if (remoteForwardingContextChanged(initialSessionKey)) return;
+  const stoppedOutsideSession =
+    await stopForwardedTunnelsOutsideSession(context, activePorts);
+  if (remoteForwardingContextChanged(initialSessionKey)) return;
   const stopped = await stopStaleForwardedTunnels(
     context,
     discoveredRemotePorts,
@@ -1109,7 +1113,8 @@ async function syncRemoteSessionPortsOnce() {
     activePorts,
     discoveredRemotePorts,
   );
-  if (stopped || stoppedDuplicates) scheduleRefreshPortsPanel();
+  if (stopped || stoppedDuplicates || stoppedOutsideSession)
+    scheduleRefreshPortsPanel();
 }
 
 async function resolveRemoteForwardingContext() {
@@ -1682,16 +1687,12 @@ function maintainPortsPanel() {
 
 function maintainPortsPanelNow() {
   removeLegacyPortsBottomPanelUi();
-  if (!featureSettings.portForwardingEnabled) {
+  if (!portForwardingUiAvailable()) {
     if (featureSettingsLoaded) stopAllManagedPortForwards().catch((error) => {
       logDiagnostic("ports_stop_all_failed", {
         error: error?.message || String(error),
       });
     });
-    removePortsPinnedSummaryUi();
-    return;
-  }
-  if (!portForwardingUiAvailable()) {
     removePortsPinnedSummaryUi();
     return;
   }
