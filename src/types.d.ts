@@ -16,7 +16,7 @@ declare const process: {
 	platform: string;
 	execPath: string;
 	exit(code?: number): never;
-	on(event: "SIGINT", listener: () => void): void;
+	on(event: "SIGINT" | "SIGTERM" | "SIGHUP" | "exit", listener: () => void): void;
 };
 
 declare module "node:fs" {

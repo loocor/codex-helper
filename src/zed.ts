@@ -11,7 +11,7 @@ type JsonValue =
 	| JsonValue[]
 	| { [key: string]: JsonValue };
 
-type SshTarget = {
+export type SshTarget = {
 	user: string;
 	host: string;
 	port: number | null;
@@ -260,7 +260,7 @@ function targetFromManagedRemoteConnection(
 	return { user, host: validateSshHost(host), port };
 }
 
-function resolveSshTargetFromGlobalState(
+export function resolveSshTargetFromGlobalState(
 	state: Record<string, JsonValue>,
 	hostId: string,
 ): SshTarget {
@@ -356,12 +356,16 @@ function launchZedUrl(url: string): void {
 	throw new ZedRemoteError("Zed is not installed or not available on PATH");
 }
 
+export function resolveSshTargetForHostId(hostId: string): SshTarget {
+	return resolveSshTargetFromGlobalState(readGlobalState(), hostId);
+}
+
 export function resolveSshTargetResponse(
 	payload: Record<string, JsonValue>,
 ): JsonValue {
 	try {
 		const hostId = stringValue(payload.hostId);
-		const target = resolveSshTargetFromGlobalState(readGlobalState(), hostId);
+		const target = resolveSshTargetForHostId(hostId);
 		return {
 			status: "ok",
 			ssh: { user: target.user, host: target.host, port: target.port },

@@ -4,7 +4,10 @@ use serde_json::{json, Value};
 
 use crate::cdp::{list_targets, pick_codex_page_target, CdpTarget};
 use crate::logging::DiagnosticLogger;
-use crate::ports::{request_from_payload, PortForwardManager};
+use crate::ports::{
+    discover_remote_listening_ports, discovery_request_from_payload, request_from_payload,
+    PortForwardManager,
+};
 use crate::session_actions::{
     delete_session_response, deleted_sessions_response, export_markdown_response,
     move_thread_workspace_response, restore_deleted_session_response, undo_delete_response,
@@ -66,6 +69,22 @@ pub async fn handle_bridge_request(ctx: BridgeContext, path: &str, payload: Valu
         "/export-markdown" => export_markdown_response(&payload),
         "/move-thread-workspace" => move_thread_workspace_response(&ctx.state_dir, &payload),
         "/ports/list" => ctx.port_manager.list().await,
+        "/ports/discover" => match discovery_request_from_payload(&payload) {
+            Ok(request) => match resolve_ssh_target_for_host_id(&request.host_id, None) {
+                Ok(target) => match discover_remote_listening_ports(&request, &target).await {
+                    Ok(ports) => json!({
+                        "status": "ok",
+                        "hostId": request.host_id,
+                        "remotePath": request.remote_path,
+                        "threadId": request.thread_id,
+                        "ports": ports,
+                    }),
+                    Err(message) => json!({ "status": "failed", "message": message }),
+                },
+                Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+            },
+            Err(message) => json!({ "status": "failed", "message": message }),
+        },
         "/ports/forward" => match request_from_payload(&payload) {
             Ok(request) => match resolve_ssh_target_for_host_id(&request.host_id, None) {
                 Ok(target) => ctx.port_manager.start(request, target).await,

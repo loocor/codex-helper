@@ -9,11 +9,18 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { listTargets, pickCodexPageTarget } from "./cdp";
+import {
+	PortForwardManager,
+	discoverRemoteListeningPorts,
+	discoveryRequestFromPayload,
+	requestFromPayload,
+} from "./ports";
 import { invokeRustBridge, isRustBridgePath } from "./rust-bridge";
 
 import {
 	fallbackOpenRequestResponse,
 	openZedRemote,
+	resolveSshTargetForHostId,
 	resolveSshTargetResponse,
 	zedRemoteStatus,
 } from "./zed";
@@ -43,6 +50,12 @@ const defaultSettings: HelperSettings = {
 	portAutoForwardWeb: true,
 	portSameLocalPort: true,
 };
+
+const portManager = new PortForwardManager();
+
+export function stopPortForwards(): void {
+	portManager.stopAll();
+}
 
 function helperRoot(): string {
 	const configured = process.env.CODEX_HELPER_HOME?.trim();
@@ -233,6 +246,41 @@ export async function handleBridgeRequest(
 					message: error instanceof Error ? error.message : String(error),
 				};
 			}
+		case "/ports/list":
+			return portManager.list();
+		case "/ports/discover":
+			try {
+				const request = discoveryRequestFromPayload(payload);
+				const target = resolveSshTargetForHostId(request.hostId);
+				const ports = await discoverRemoteListeningPorts(request, target);
+				return {
+					status: "ok",
+					hostId: request.hostId,
+					remotePath: request.remotePath,
+					threadId: request.threadId,
+					ports,
+				};
+			} catch (error) {
+				return {
+					status: "failed",
+					message: error instanceof Error ? error.message : String(error),
+				};
+			}
+		case "/ports/forward":
+			try {
+				const request = requestFromPayload(payload);
+				const target = resolveSshTargetForHostId(request.hostId);
+				return portManager.start(request, target);
+			} catch (error) {
+				return {
+					status: "failed",
+					message: error instanceof Error ? error.message : String(error),
+				};
+			}
+		case "/ports/stop": {
+			const id = typeof payload.id === "string" ? payload.id : "";
+			return portManager.stop(id);
+		}
 		case "/zed-remote/status":
 			return zedRemoteStatus();
 		case "/zed-remote/resolve-host":

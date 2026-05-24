@@ -4,6 +4,7 @@ import { createLaunchTimer } from "./debug";
 import { resolveDebugPortForLaunch } from "./debug-port";
 import { ensureCodexLaunchedWithDebugPort } from "./launcher";
 import { buildRuntimeScripts, resolveCodexAppPath } from "./paths";
+import { stopPortForwards } from "./routes";
 
 type LaunchOptions = {
 	appPath?: string;
@@ -96,10 +97,21 @@ async function main(): Promise<void> {
 	console.log(
 		`Codex Helper injected into target ${target.id} on debug port ${debugPort}`,
 	);
-	process.on("SIGINT", () => {
+	let cleanedUp = false;
+	const cleanupOnce = () => {
+		if (cleanedUp) return;
+		cleanedUp = true;
+		stopPortForwards();
 		disconnect();
+	};
+	const exitAfterSignal = () => {
+		cleanupOnce();
 		process.exit(0);
-	});
+	};
+	process.on("SIGINT", exitAfterSignal);
+	process.on("SIGTERM", exitAfterSignal);
+	process.on("SIGHUP", exitAfterSignal);
+	process.on("exit", cleanupOnce);
 	await new Promise(() => {});
 }
 
