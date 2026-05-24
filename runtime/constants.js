@@ -37,8 +37,10 @@ let pinnedSummaryCardRef = null;
 let pinnedPortsLastSnapshot = "";
 let lastPortScanSessionKey = "";
 let resolvedRemoteForwardingContext = null;
+let portForwardMenuRoot = null;
 const detectedPorts = new Map();
 const portDiscoveryStates = new Map();
+const suppressedPortMappings = new Set();
 let featureSettings = {
   sessionDeleteEnabled: false,
   markdownExportEnabled: false,

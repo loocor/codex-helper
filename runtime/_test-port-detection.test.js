@@ -681,8 +681,50 @@ test("runtime stops stale active tunnels even without detected cache entries", (
   expect(syncRemoteSessionPortsOnce).toContain("stopStaleForwardedTunnels(");
   expect(syncRemoteSessionPortsOnce).toContain("stopDuplicateForwardedTunnels(");
   expect(syncRemoteSessionPortsOnce).toContain(
-    "reconcileDiscoveredRemotePorts(context, ports, activePorts)",
+    "reconcileDiscoveredRemotePorts(",
   );
+});
+
+test("terminal evidence gates new candidates but not stale tunnel pruning", () => {
+  const syncRemoteSessionPortsOnce = extractFunction("syncRemoteSessionPortsOnce");
+  const reconcileDiscoveredRemotePorts = extractFunction(
+    "reconcileDiscoveredRemotePorts",
+  );
+
+  expect(syncRemoteSessionPortsOnce).toContain(
+    "const evidencedPorts = portsWithSessionEvidence(",
+  );
+  expect(syncRemoteSessionPortsOnce).toContain(
+    "const discoveredRemotePorts = discoveredRemotePortSet(discoveredPorts);",
+  );
+  expect(syncRemoteSessionPortsOnce).toContain(
+    "stopStaleForwardedTunnels(\n    context,\n    discoveredRemotePorts,",
+  );
+  expect(syncRemoteSessionPortsOnce).toContain(
+    "reconcileDiscoveredRemotePorts(\n    context,\n    evidencedPorts,\n    activePorts,\n    discoveredRemotePorts,",
+  );
+  expect(reconcileDiscoveredRemotePorts).toContain(
+    "discoveredRemotePorts = discoveredRemotePortSet(ports)",
+  );
+  expect(reconcileDiscoveredRemotePorts).toContain(
+    "pruneStaleDetectedPorts(context, discoveredRemotePorts)",
+  );
+});
+
+test("remote port lifecycle loop is not gated by pinned summary visibility", () => {
+  const ensurePortScanLoop = extractFunction("ensurePortScanLoop");
+  const maintainPortsPanelNow = extractFunction("maintainPortsPanelNow");
+
+  expect(ensurePortScanLoop).toContain("!featureSettings.portForwardingEnabled");
+  expect(ensurePortScanLoop).toContain("!hasRemoteForwardingContext()");
+  expect(ensurePortScanLoop).not.toContain(
+    "!findPinnedSummaryCard() && !portsPanelIsVisible()",
+  );
+  expect(maintainPortsPanelNow).toContain("ensurePortScanLoop();");
+  expect(maintainPortsPanelNow.indexOf("ensurePortScanLoop();")).toBeLessThan(
+    maintainPortsPanelNow.indexOf("const card = findPinnedSummaryCard();"),
+  );
+  expect(maintainPortsPanelNow).not.toContain("stopPortScanLoop();");
 });
 
 test("runtime stops managed tunnels outside the active session", () => {

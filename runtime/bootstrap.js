@@ -79,6 +79,12 @@ document.addEventListener(
   (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
+    if (
+      portForwardMenuRoot?.isConnected &&
+      !target.closest("[data-codex-helper-port-menu]")
+    ) {
+      closePortForwardRowMenu();
+    }
     const accountSettingsEntry = target.closest(
       `[${helperAccountSettingsEntryAttribute}]`,
     );
@@ -164,6 +170,10 @@ document.addEventListener(
   "keydown",
   (event) => {
     if (event.key !== "Escape") return;
+    if (portForwardMenuRoot?.isConnected) {
+      closePortForwardRowMenu();
+      return;
+    }
     if (!document.querySelector(`[${helperSettingsDialogAttribute}]`)) return;
     closeHelperSettingsDialog();
   },

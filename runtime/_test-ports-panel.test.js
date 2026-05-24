@@ -66,6 +66,34 @@ test("pinned ports rows include lifecycle status labels", () => {
   expect(source).toContain('"starting"');
 });
 
+test("pinned ports rows expose hover actions and a mapping menu", () => {
+  expect(source).toContain("function installPortForwardRowActions(");
+  expect(source).toContain("function createPortRowActionButton(");
+  expect(source).toContain("function openPortForwardRowMenu(");
+  expect(source).toContain("data-codex-helper-port-row");
+  expect(source).toContain("codex-helper-port-row-actions");
+  expect(source).toContain("Edit mapping record");
+  expect(source).toContain("Delete mapping record");
+});
+
+test("pinned ports mapping menu edits and deletes managed records", () => {
+  expect(source).toContain('command === "edit-mapping"');
+  expect(source).toContain('command === "delete-mapping"');
+  expect(source).toContain("function portEntryFromCommandButton(");
+  expect(source).toContain("async function editPortMapping(");
+  expect(source).toContain("async function deletePortMapping(");
+  expect(source).toContain('bridge("/ports/forward"');
+  expect(source).toContain('bridge("/ports/stop"');
+});
+
+test("deleted pinned port mappings suppress rediscovery for the session", () => {
+  expect(source).toContain("const suppressedPortMappings = new Set();");
+  expect(source).toContain("function suppressPortMapping(");
+  expect(source).toContain("function portMappingIsSuppressed(");
+  expect(source).toContain("suppressedPortMappings.clear();");
+  expect(source).toContain("portMappingIsSuppressed(context, remotePort)");
+});
+
 test("pinned ports row template falls back when Sources has no rows", () => {
   const findSummaryRowTemplate = source.slice(
     source.indexOf("function findSummaryRowTemplate("),

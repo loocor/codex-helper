@@ -244,6 +244,86 @@ function installHelperStyles() {
         overflow: auto;
         padding: 18px;
       }
+      [data-codex-helper-port-row] {
+        position: relative;
+        padding-right: 52px;
+      }
+      [data-codex-helper-port-row] .codex-helper-port-row-actions {
+        position: absolute;
+        right: 8px;
+        top: 50%;
+        transform: translateY(-50%);
+        display: inline-flex;
+        align-items: center;
+        gap: 2px;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 120ms ease;
+      }
+      [data-codex-helper-port-row]:hover .codex-helper-port-row-actions,
+      [data-codex-helper-port-row]:focus-within .codex-helper-port-row-actions {
+        opacity: 1;
+        pointer-events: auto;
+      }
+      .codex-helper-port-row-action {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        border: 0;
+        border-radius: 6px;
+        padding: 0;
+        background: transparent;
+        color: color-mix(in srgb, currentColor 68%, transparent);
+        cursor: pointer;
+      }
+      .codex-helper-port-row-action:hover,
+      .codex-helper-port-row-action:focus-visible {
+        background: color-mix(in srgb, currentColor 10%, transparent);
+        color: inherit;
+        outline: none;
+      }
+      .codex-helper-port-row-action svg {
+        width: 13px;
+        height: 13px;
+      }
+      [data-codex-helper-port-menu] {
+        position: fixed;
+        z-index: 2147483646;
+        min-width: 168px;
+        padding: 4px;
+        border-radius: 8px;
+        border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+        background: Canvas;
+        color: CanvasText;
+        box-shadow: 0 12px 36px color-mix(in srgb, black 18%, transparent);
+      }
+      [data-codex-helper-port-menu] button {
+        display: flex;
+        width: 100%;
+        align-items: center;
+        justify-content: flex-start;
+        gap: 8px;
+        border: 0;
+        border-radius: 6px;
+        padding: 7px 8px;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        font-size: 13px;
+        text-align: left;
+        cursor: pointer;
+      }
+      [data-codex-helper-port-menu] button:hover,
+      [data-codex-helper-port-menu] button:focus-visible {
+        background: color-mix(in srgb, currentColor 8%, transparent);
+        outline: none;
+      }
+      [data-codex-helper-port-menu] svg {
+        width: 14px;
+        height: 14px;
+      }
       [${helperSettingsDialogAttribute}] [${helperDialogPageAttribute}] {
         border-top: 0;
         padding-top: 0;

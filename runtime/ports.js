@@ -482,6 +482,7 @@ function pruneDetectedPortsForSessionChange() {
   const sessionKey = currentPortScanSessionKey();
   if (!sessionKey || sessionKey === lastPortScanSessionKey) return false;
   lastPortScanSessionKey = sessionKey;
+  suppressedPortMappings.clear();
   if (detectedPorts.size === 0) return false;
   detectedPorts.clear();
   return true;
@@ -490,7 +491,10 @@ function pruneDetectedPortsForSessionChange() {
 function ensurePortScanLoop() {
   if (portScanIntervalId) return;
   portScanIntervalId = window.setInterval(() => {
-    if (!findPinnedSummaryCard() && !portsPanelIsVisible()) {
+    if (
+      !featureSettings.portForwardingEnabled ||
+      !hasRemoteForwardingContext()
+    ) {
       stopPortScanLoop();
       return;
     }
@@ -574,6 +578,41 @@ function portsWithSessionEvidence(ports, evidence) {
   });
 }
 
+function portSuppressionKey(context, remotePort) {
+  const port = Number(remotePort);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return "";
+  return `${portSessionKey(context)}|${port}`;
+}
+
+function suppressPortMapping(entry) {
+  if (!entry) return false;
+  const context = {
+    hostId: entry.hostId || "",
+    path: entry.remotePath || "",
+    threadId: entry.threadId || "",
+  };
+  const key = portSuppressionKey(context, entry.remotePort);
+  if (!key) return false;
+  suppressedPortMappings.add(key);
+  return true;
+}
+
+function unsuppressPortMapping(entry) {
+  if (!entry) return false;
+  const context = {
+    hostId: entry.hostId || "",
+    path: entry.remotePath || "",
+    threadId: entry.threadId || "",
+  };
+  const key = portSuppressionKey(context, entry.remotePort);
+  return Boolean(key && suppressedPortMappings.delete(key));
+}
+
+function portMappingIsSuppressed(context, remotePort) {
+  const key = portSuppressionKey(context, remotePort);
+  return Boolean(key && suppressedPortMappings.has(key));
+}
+
 function localPortForDetectedPort(remotePort) {
   return featureSettings.portSameLocalPort ? remotePort : 0;
 }
@@ -596,6 +635,7 @@ function scanTerminalWebPorts() {
   const text = terminalTextForPortScan();
   let changed = false;
   for (const candidate of parseWebPortsFromText(text)) {
+    if (portMappingIsSuppressed(context, candidate.port)) continue;
     const localPort = localPortForDetectedPort(candidate.port);
     const key = portKey(context, candidate.port, localPort);
     const existing = detectedPorts.get(key);
@@ -908,9 +948,13 @@ function updateDetectedPortFromForwardedTunnel(entry, port) {
   return changed;
 }
 
-function reconcileDiscoveredRemotePorts(context, ports, activePorts = []) {
+function reconcileDiscoveredRemotePorts(
+  context,
+  ports,
+  activePorts = [],
+  discoveredRemotePorts = discoveredRemotePortSet(ports),
+) {
   let changed = markRemotePortDiscoverySucceeded(context);
-  const discoveredRemotePorts = discoveredRemotePortSet(ports);
   const activeForwardedPorts = activeForwardedPortMap(activePorts, context);
   changed = pruneStaleDetectedPorts(context, discoveredRemotePorts) || changed;
   for (const port of ports) {
@@ -918,6 +962,17 @@ function reconcileDiscoveredRemotePorts(context, ports, activePorts = []) {
     if (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535)
       continue;
     const activeForward = activeForwardedPorts.get(remotePort);
+    if (portMappingIsSuppressed(context, remotePort)) {
+      if (activeForward?.id) {
+        bridge("/ports/stop", { id: activeForward.id }).catch((error) => {
+          logDiagnostic("ports_suppressed_stop_failed", {
+            error: error?.message || String(error),
+            remotePort,
+          });
+        });
+      }
+      continue;
+    }
     const activeLocalPort = Number(activeForward?.localPort);
     const localPort =
       Number.isInteger(activeLocalPort) && activeLocalPort > 0
@@ -1026,7 +1081,8 @@ async function syncRemoteSessionPortsOnce() {
     throw new Error(result?.message || "Port discovery failed");
   }
   const discoveredPorts = Array.isArray(result.ports) ? result.ports : [];
-  const ports = portsWithSessionEvidence(
+  const discoveredRemotePorts = discoveredRemotePortSet(discoveredPorts);
+  const evidencedPorts = portsWithSessionEvidence(
     discoveredPorts,
     terminalPortEvidenceSet(),
   );
@@ -1042,7 +1098,7 @@ async function syncRemoteSessionPortsOnce() {
   if (remoteForwardingContextChanged(initialSessionKey)) return;
   const stopped = await stopStaleForwardedTunnels(
     context,
-    discoveredRemotePortSet(ports),
+    discoveredRemotePorts,
     activePorts,
   );
   if (remoteForwardingContextChanged(initialSessionKey)) return;
@@ -1051,7 +1107,12 @@ async function syncRemoteSessionPortsOnce() {
     activePorts,
   );
   if (remoteForwardingContextChanged(initialSessionKey)) return;
-  reconcileDiscoveredRemotePorts(context, ports, activePorts);
+  reconcileDiscoveredRemotePorts(
+    context,
+    evidencedPorts,
+    activePorts,
+    discoveredRemotePorts,
+  );
   if (stopped || stoppedDuplicates || stoppedOutsideSession)
     scheduleRefreshPortsPanel();
 }
@@ -1133,6 +1194,7 @@ function handlePortForwardingDisabled() {
   removePortsPinnedSummaryUi();
   detectedPorts.clear();
   portDiscoveryStates.clear();
+  suppressedPortMappings.clear();
   resolvedRemoteForwardingContext = null;
   stopAllManagedPortForwards().catch((error) => {
     logDiagnostic("ports_disable_stop_failed", {
@@ -1300,6 +1362,93 @@ function setSummaryRowText(row, text) {
   else row.textContent = text;
 }
 
+function createPortActionIcon(name) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "2");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  const paths =
+    name === "trash"
+      ? [
+        "M3 6h18",
+        "M8 6V4h8v2",
+        "M19 6l-1 14H6L5 6",
+        "M10 11v6",
+        "M14 11v6",
+      ]
+      : [
+        "M12 20h9",
+        "M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z",
+      ];
+  for (const value of paths) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", value);
+    svg.appendChild(path);
+  }
+  svg.setAttribute("aria-hidden", "true");
+  return svg;
+}
+
+function setPortCommandDataset(element, entry) {
+  element.setAttribute("data-codex-helper-port-id", entry.id || "");
+  element.setAttribute("data-codex-helper-port-key", entry.key || "");
+  element.setAttribute("data-codex-helper-port-host-id", entry.hostId || "");
+  element.setAttribute(
+    "data-codex-helper-port-remote-path",
+    entry.remotePath || "",
+  );
+  element.setAttribute("data-codex-helper-port-thread-id", entry.threadId || "");
+  element.setAttribute(
+    "data-codex-helper-port-remote-port",
+    String(entry.remotePort || ""),
+  );
+  element.setAttribute(
+    "data-codex-helper-port-local-port",
+    String(entry.localPort || ""),
+  );
+}
+
+function createPortRowActionButton(action, label, iconName, entry) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "codex-helper-port-row-action";
+  button.setAttribute(helperPortCommandAttribute, "show-mapping-menu");
+  button.setAttribute("data-codex-helper-port-action", action);
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  setPortCommandDataset(button, entry);
+  button.appendChild(createPortActionIcon(iconName));
+  return button;
+}
+
+function installPortForwardRowActions(row, entry) {
+  row.setAttribute("data-codex-helper-port-row", "true");
+  row.querySelector(".codex-helper-port-row-actions")?.remove();
+  setPortCommandDataset(row, entry);
+  const actions = document.createElement("span");
+  actions.className = "codex-helper-port-row-actions";
+  actions.appendChild(
+    createPortRowActionButton(
+      "edit",
+      "Edit mapping record",
+      "pencil",
+      entry,
+    ),
+  );
+  actions.appendChild(
+    createPortRowActionButton(
+      "delete",
+      "Delete mapping record",
+      "trash",
+      entry,
+    ),
+  );
+  row.appendChild(actions);
+}
+
 function createSummaryRowFromTemplate(templateRow, text, iconRow) {
   const row = templateRow.cloneNode(true);
   row.removeAttribute("id");
@@ -1373,13 +1522,13 @@ function populatePortForwardList(section, activePorts, host) {
   }
 
   for (const entry of rows) {
-    list.appendChild(
-      createSummaryRowFromTemplate(
-        templateRow,
-        portRowLabel(entry),
-        portIconRow,
-      ),
+    const row = createSummaryRowFromTemplate(
+      templateRow,
+      portRowLabel(entry),
+      portIconRow,
     );
+    installPortForwardRowActions(row, entry);
+    list.appendChild(row);
   }
   return true;
 }
@@ -1547,6 +1696,11 @@ function maintainPortsPanelNow() {
     removePortsPinnedSummaryUi();
     return;
   }
+  ensurePortScanLoop();
+  syncRemoteSessionPorts().catch((error) => {
+    handleRemotePortDiscoveryFailure(error);
+  });
+
   const card = findPinnedSummaryCard();
   if (!(card instanceof HTMLElement)) {
     if (!pinnedSummaryHideTimer) {
@@ -1561,7 +1715,6 @@ function maintainPortsPanelNow() {
         pinnedPortsLastSnapshot = "";
         pinnedSummaryCardRef = null;
         portsSurface = "none";
-        stopPortScanLoop();
       }, 800);
     }
     return;
@@ -1572,10 +1725,6 @@ function maintainPortsPanelNow() {
     pinnedSummaryHideTimer = 0;
   }
 
-  ensurePortScanLoop();
-  syncRemoteSessionPorts().catch((error) => {
-    handleRemotePortDiscoveryFailure(error);
-  });
   scheduleRefreshPortsPanel();
 }
 
@@ -1624,6 +1773,180 @@ function portsUnavailableMessage() {
   return "No ports detected yet.";
 }
 
+function closePortForwardRowMenu() {
+  if (portForwardMenuRoot?.isConnected) portForwardMenuRoot.remove();
+  portForwardMenuRoot = null;
+}
+
+function copyPortCommandDataset(source, target) {
+  for (const name of [
+    "data-codex-helper-port-id",
+    "data-codex-helper-port-key",
+    "data-codex-helper-port-host-id",
+    "data-codex-helper-port-remote-path",
+    "data-codex-helper-port-thread-id",
+    "data-codex-helper-port-remote-port",
+    "data-codex-helper-port-local-port",
+  ]) {
+    target.setAttribute(name, source.getAttribute(name) || "");
+  }
+}
+
+function createPortMenuItem(command, label, iconName, source) {
+  const item = document.createElement("button");
+  item.type = "button";
+  item.setAttribute(helperPortCommandAttribute, command);
+  copyPortCommandDataset(source, item);
+  item.appendChild(createPortActionIcon(iconName));
+  item.appendChild(document.createTextNode(label));
+  return item;
+}
+
+function openPortForwardRowMenu(button) {
+  closePortForwardRowMenu();
+  const menu = document.createElement("div");
+  menu.setAttribute("data-codex-helper-port-menu", "true");
+  menu.setAttribute("role", "menu");
+  menu.appendChild(
+    createPortMenuItem(
+      "edit-mapping",
+      "Edit mapping record",
+      "pencil",
+      button,
+    ),
+  );
+  menu.appendChild(
+    createPortMenuItem(
+      "delete-mapping",
+      "Delete mapping record",
+      "trash",
+      button,
+    ),
+  );
+  document.body.appendChild(menu);
+  const rect = button.getBoundingClientRect();
+  const menuRect = menu.getBoundingClientRect();
+  const top = Math.min(rect.bottom + 6, window.innerHeight - menuRect.height - 8);
+  const left = Math.min(
+    rect.right - menuRect.width,
+    window.innerWidth - menuRect.width - 8,
+  );
+  menu.style.top = `${Math.max(8, top)}px`;
+  menu.style.left = `${Math.max(8, left)}px`;
+  portForwardMenuRoot = menu;
+}
+
+function portEntryFromCommandButton(button) {
+  const id = button.getAttribute("data-codex-helper-port-id") || "";
+  const key = button.getAttribute("data-codex-helper-port-key") || "";
+  for (const entry of detectedPorts.values()) {
+    if ((id && entry.id === id) || (key && entry.key === key)) return entry;
+  }
+
+  const hostId = button.getAttribute("data-codex-helper-port-host-id") || "";
+  const remotePath =
+    button.getAttribute("data-codex-helper-port-remote-path") || "";
+  const threadId = button.getAttribute("data-codex-helper-port-thread-id") || "";
+  const remotePort = Number(
+    button.getAttribute("data-codex-helper-port-remote-port") || "",
+  );
+  const localPort = Number(
+    button.getAttribute("data-codex-helper-port-local-port") || "",
+  );
+  if (
+    !hostId ||
+    !remotePath ||
+    !threadId ||
+    !Number.isInteger(remotePort) ||
+    remotePort < 1
+  ) {
+    return null;
+  }
+  const entry = {
+    key:
+      key ||
+      portKey({ hostId, path: remotePath, threadId }, remotePort, localPort),
+    id,
+    hostId,
+    remotePath,
+    threadId,
+    remotePort,
+    localPort: Number.isInteger(localPort) && localPort > 0 ? localPort : 0,
+    status: id ? "active" : "detected",
+    lastSeenAt: portTimestamp(),
+  };
+  detectedPorts.set(entry.key, entry);
+  return entry;
+}
+
+async function stopPortEntryTunnel(entry) {
+  if (!entry?.id) return;
+  const result = await bridge("/ports/stop", { id: entry.id });
+  if (result?.status !== "ok") throw new Error(result?.message || "Stop failed");
+  delete entry.id;
+  delete entry.localUrl;
+}
+
+async function editPortMapping(button) {
+  const entry = portEntryFromCommandButton(button);
+  if (!entry) return;
+  const currentLocalPort =
+    Number.isInteger(entry.localPort) && entry.localPort > 0
+      ? entry.localPort
+      : entry.remotePort;
+  const nextLocalPort = Number(
+    window.prompt("Local port", String(currentLocalPort)),
+  );
+  if (
+    !Number.isInteger(nextLocalPort) ||
+    nextLocalPort < 1 ||
+    nextLocalPort > 65535
+  ) {
+    return;
+  }
+  closePortForwardRowMenu();
+  unsuppressPortMapping(entry);
+  await stopPortEntryTunnel(entry);
+  const previousKey = entry.key;
+  entry.localPort = nextLocalPort;
+  entry.status = "detected";
+  entry.message = "";
+  const nextKey = portKey(
+    { hostId: entry.hostId, path: entry.remotePath, threadId: entry.threadId },
+    entry.remotePort,
+    nextLocalPort,
+  );
+  if (previousKey !== nextKey) setDetectedPortEntryKey(entry, nextKey);
+  await forwardDetectedPort(entry, "manual");
+}
+
+async function deletePortMapping(button) {
+  const entry = portEntryFromCommandButton(button);
+  if (!entry) return;
+  const removedId = entry.id || "";
+  const removedKey = entry.key || "";
+  closePortForwardRowMenu();
+  await stopPortEntryTunnel(entry);
+  suppressPortMapping(entry);
+  for (const [key, value] of Array.from(detectedPorts.entries())) {
+    const sameMapping =
+      value.hostId === entry.hostId &&
+      value.remotePath === entry.remotePath &&
+      value.threadId === entry.threadId &&
+      Number(value.remotePort) === Number(entry.remotePort);
+    if (
+      value === entry ||
+      (removedId && value.id === removedId) ||
+      (removedKey && key === removedKey) ||
+      sameMapping
+    ) {
+      detectedPorts.delete(key);
+    }
+  }
+  showHelperToast(`Deleted port mapping for ${entry.remotePort}`);
+  await refreshPortsPanelIfVisible();
+}
+
 function scheduleRefreshPortsPanel() {
   if (refreshPortsPanelTimer) return;
   refreshPortsPanelTimer = window.setTimeout(() => {
@@ -1658,23 +1981,44 @@ async function refreshPortsPanelIfVisible() {
 async function handlePortCommand(button) {
   const command = button.getAttribute(helperPortCommandAttribute) || "";
   if (
-    (command === "forward" || command === "manual") &&
+    (
+      command === "forward" ||
+      command === "manual" ||
+      command === "show-mapping-menu" ||
+      command === "edit-mapping" ||
+      command === "delete-mapping"
+    ) &&
     !isPortForwardingOperational()
   ) {
     throw new Error(portsUnavailableMessage());
   }
   const id = button.getAttribute("data-codex-helper-port-id") || "";
   const localUrl = button.getAttribute("data-codex-helper-port-url") || "";
+  if (command === "show-mapping-menu") {
+    openPortForwardRowMenu(button);
+    return;
+  }
+  if (command === "edit-mapping") {
+    await editPortMapping(button);
+    return;
+  }
+  if (command === "delete-mapping") {
+    await deletePortMapping(button);
+    return;
+  }
   if (command === "open" && localUrl) {
+    closePortForwardRowMenu();
     window.open(localUrl, "_blank", "noopener,noreferrer");
     return;
   }
   if (command === "copy" && localUrl) {
+    closePortForwardRowMenu();
     await navigator.clipboard.writeText(localUrl);
     showHelperToast("Copied port URL");
     return;
   }
   if (command === "stop" && id) {
+    closePortForwardRowMenu();
     const result = await bridge("/ports/stop", { id });
     if (result?.status !== "ok")
       throw new Error(result?.message || "Stop failed");
