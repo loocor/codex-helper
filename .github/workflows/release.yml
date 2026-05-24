@@ -43,8 +43,6 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
@@ -53,21 +51,12 @@ jobs:
           test -n "$APPLE_CERTIFICATE_PASSWORD" || { echo "missing APPLE_CERTIFICATE_PASSWORD" >&2; exit 1; }
           test -n "$KEYCHAIN_PASSWORD" || { echo "missing KEYCHAIN_PASSWORD" >&2; exit 1; }
           test -n "$APPLE_SIGNING_IDENTITY" || { echo "missing APPLE_SIGNING_IDENTITY" >&2; exit 1; }
+          test "$APPLE_SIGNING_IDENTITY" != "-" || { echo "APPLE_SIGNING_IDENTITY must be a Developer ID identity for release builds" >&2; exit 1; }
+          test -n "$APPLE_TEAM_ID" || { echo "missing APPLE_TEAM_ID" >&2; exit 1; }
 
-          has_api_key=0
-          if [[ -n "$APPLE_API_KEY" && -n "$APPLE_API_ISSUER" && -n "$APPLE_API_PRIVATE_KEY" ]]; then
-            has_api_key=1
-          fi
-
-          has_apple_id=0
-          if [[ -n "$APPLE_ID" && -n "$APPLE_PASSWORD" && -n "$APPLE_TEAM_ID" ]]; then
-            has_apple_id=1
-          fi
-
-          if [[ "$has_api_key" -eq 0 && "$has_apple_id" -eq 0 ]]; then
-            echo "missing notarization credentials: set API key triple or Apple ID triple" >&2
-            exit 1
-          fi
+          test -n "$APPLE_API_KEY" || { echo "missing APPLE_API_KEY" >&2; exit 1; }
+          test -n "$APPLE_API_ISSUER" || { echo "missing APPLE_API_ISSUER" >&2; exit 1; }
+          test -n "$APPLE_API_PRIVATE_KEY" || { echo "missing APPLE_API_PRIVATE_KEY" >&2; exit 1; }
 
       - name: Import Developer ID certificate
         env:
@@ -106,8 +95,8 @@ jobs:
           set -euo pipefail
 
           if [[ -z "$APPLE_API_KEY" || -z "$APPLE_API_ISSUER" || -z "$APPLE_API_PRIVATE_KEY" ]]; then
-            echo "App Store Connect API key credentials not configured; using Apple ID notarization credentials."
-            exit 0
+            echo "missing App Store Connect API key notarization credentials" >&2
+            exit 1
           fi
 
           KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
@@ -118,12 +107,9 @@ jobs:
       - name: Build DMG
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
           REQUIRE_SIGNING: "1"
           REQUIRE_NOTARIZE: "1"
           OUTPUT_DIR: ${{ github.workspace }}/dist/macos
