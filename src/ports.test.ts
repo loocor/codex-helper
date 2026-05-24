@@ -262,6 +262,23 @@ test("PortForwardManager stop terminates stubborn tunnel children", async () => 
 	const tempDir = mkdtempSync(join(tmpdir(), "codex-helper-ports-"));
 	const pidPath = join(tempDir, "fake-ssh.pid");
 	const scriptPath = join(tempDir, "fake-ssh.sh");
+	const serverPath = join(tempDir, "server.js");
+	writeFileSync(
+		serverPath,
+		`
+process.on("SIGTERM", () => {});
+Bun.listen({
+	hostname: "127.0.0.1",
+	port: Number(Bun.argv[2]),
+	socket: {
+		data() {},
+		open() {},
+		close() {},
+	},
+});
+setInterval(() => {}, 1000);
+`,
+	);
 	writeFileSync(
 		scriptPath,
 		`#!/bin/sh
@@ -275,20 +292,7 @@ while [ "$#" -gt 0 ]; do
 done
 local_port=$(printf "%s" "$local_spec" | awk -F: '{print $2}')
 echo $$ > ${JSON.stringify(pidPath)}
-exec python3 - "$local_port" <<'PY'
-import signal
-import socket
-import sys
-import time
-
-signal.signal(signal.SIGTERM, signal.SIG_IGN)
-sock = socket.socket()
-sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-sock.bind(("127.0.0.1", int(sys.argv[1])))
-sock.listen(1)
-while True:
-    time.sleep(1)
-PY
+exec ${JSON.stringify(process.execPath)} ${JSON.stringify(serverPath)} "$local_port"
 `,
 	);
 	chmodSync(scriptPath, 0o755);
