@@ -32,3 +32,14 @@ test("dev bridge validates port discovery requests", async () => {
 		message: "Remote path is required",
 	});
 });
+
+test("dev bridge only opens local forwarded urls externally", async () => {
+	const result = await handleBridgeRequest("/url/open-external", {
+		url: "https://example.com:3000",
+	});
+
+	expect(result).toEqual({
+		status: "failed",
+		message: "Only local forwarded URLs can be opened",
+	});
+});

@@ -170,6 +170,26 @@ function openPath(path: string, reveal = false): JsonValue {
 	}
 }
 
+function localBrowserUrlFromPayload(payload: Record<string, JsonValue>): string {
+	const raw = typeof payload.url === "string" ? payload.url.trim() : "";
+	if (!raw) throw new Error("URL is required");
+	let url: URL;
+	try {
+		url = new URL(raw);
+	} catch {
+		throw new Error("URL is invalid");
+	}
+	const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+	if (url.protocol !== "http:" && url.protocol !== "https:") {
+		throw new Error("Only http(s) URLs can be opened");
+	}
+	if (!["localhost", "127.0.0.1", "::1", "0.0.0.0"].includes(host)) {
+		throw new Error("Only local forwarded URLs can be opened");
+	}
+	if (!url.port) throw new Error("Local forwarded URL must include a port");
+	return url.toString();
+}
+
 function devtoolsUrl(
 	debugPort: number,
 	target: { webSocketDebuggerUrl?: string },
@@ -240,6 +260,15 @@ export async function handleBridgeRequest(
 				const target = pickCodexPageTarget(targets);
 				const url = devtoolsUrl(debugPort, target);
 				return openPath(url);
+			} catch (error) {
+				return {
+					status: "failed",
+					message: error instanceof Error ? error.message : String(error),
+				};
+			}
+		case "/url/open-external":
+			try {
+				return openPath(localBrowserUrlFromPayload(payload));
 			} catch (error) {
 				return {
 					status: "failed",

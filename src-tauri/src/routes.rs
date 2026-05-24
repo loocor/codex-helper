@@ -62,6 +62,7 @@ pub async fn handle_bridge_request(ctx: BridgeContext, path: &str, payload: Valu
         "/backups/reveal" => reveal_path_response(&ctx.state_dir.backups_dir),
         "/state/reveal" => reveal_path_response(&ctx.state_dir.root),
         "/devtools/open" => open_devtools_response(ctx.debug_port).await,
+        "/url/open-external" => open_external_local_url_response(&payload),
         "/delete" => delete_session_response(&ctx.state_dir, &payload),
         "/undo" => undo_delete_response(&ctx.state_dir, &payload),
         "/backups/list" => deleted_sessions_response(&ctx.state_dir),
@@ -182,6 +183,66 @@ async fn open_devtools_response(debug_port: u16) -> Value {
     }
 }
 
+fn open_external_local_url_response(payload: &Value) -> Value {
+    let url = match local_browser_url_from_payload(payload) {
+        Ok(url) => url,
+        Err(message) => return json!({ "status": "failed", "message": message }),
+    };
+    match std::process::Command::new("open").arg(&url).spawn() {
+        Ok(_) => json!({ "status": "ok", "url": url }),
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
+}
+
+fn local_browser_url_from_payload(payload: &Value) -> Result<String, String> {
+    let raw = payload
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "URL is required".to_string())?;
+    let rest = if let Some(rest) = raw.strip_prefix("http://") {
+        rest
+    } else if let Some(rest) = raw.strip_prefix("https://") {
+        rest
+    } else {
+        return Err("Only http(s) URLs can be opened".to_string());
+    };
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "URL is invalid".to_string())?;
+    if authority.contains('@') {
+        return Err("URL is invalid".to_string());
+    }
+    let (host, port) = if let Some(after_bracket) = authority.strip_prefix('[') {
+        let (host, suffix) = after_bracket
+            .split_once(']')
+            .ok_or_else(|| "URL is invalid".to_string())?;
+        let port = suffix
+            .strip_prefix(':')
+            .ok_or_else(|| "Local forwarded URL must include a port".to_string())?;
+        (host, port)
+    } else {
+        let (host, port) = authority
+            .rsplit_once(':')
+            .ok_or_else(|| "Local forwarded URL must include a port".to_string())?;
+        (host, port)
+    };
+    let normalized_host = host.to_ascii_lowercase();
+    if !matches!(
+        normalized_host.as_str(),
+        "localhost" | "127.0.0.1" | "::1" | "0.0.0.0"
+    ) {
+        return Err("Only local forwarded URLs can be opened".to_string());
+    }
+    if port.is_empty() || !port.chars().all(|value| value.is_ascii_digit()) {
+        return Err("Local forwarded URL must include a port".to_string());
+    }
+    Ok(raw.to_string())
+}
+
 pub fn devtools_url(debug_port: u16, target: &CdpTarget) -> anyhow::Result<String> {
     if let Some(frontend_url) = target
         .devtools_frontend_url
@@ -276,6 +337,26 @@ mod tests {
         assert_eq!(
             devtools_url(9229, &target).expect("devtools url"),
             "http://127.0.0.1:9229/devtools/inspector.html?ws=localhost:9229/devtools/page/target-1"
+        );
+    }
+
+    #[test]
+    fn local_browser_url_rejects_external_hosts() {
+        let payload = json!({ "url": "https://example.com:3000" });
+
+        assert_eq!(
+            local_browser_url_from_payload(&payload).expect_err("external host"),
+            "Only local forwarded URLs can be opened"
+        );
+    }
+
+    #[test]
+    fn local_browser_url_accepts_localhost_with_port() {
+        let payload = json!({ "url": "http://localhost:3000/path" });
+
+        assert_eq!(
+            local_browser_url_from_payload(&payload).expect("local url"),
+            "http://localhost:3000/path"
         );
     }
 }
