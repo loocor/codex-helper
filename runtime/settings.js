@@ -371,11 +371,13 @@ function applySettings(result) {
     }
     return;
   }
+  const wasPortForwardingEnabled = featureSettings.portForwardingEnabled;
   const settings = result.settings || {};
   featureSettings = {
     ...featureSettings,
     ...settings,
   };
+  featureSettingsLoaded = true;
   for (const root of helperSettingsRoots()) {
     for (const input of root.querySelectorAll(`[${helperToggleAttribute}]`)) {
       if (!(input instanceof HTMLInputElement)) continue;
@@ -383,6 +385,9 @@ function applySettings(result) {
       input.checked = settings[key] === true;
     }
   }
+  maintainPortsPanel();
+  if (featureSettings.portForwardingEnabled) schedulePortScan();
+  else if (wasPortForwardingEnabled) handlePortForwardingDisabled();
 }
 
 function resultText(result) {
@@ -464,8 +469,9 @@ async function refreshFeatureSettings() {
       ...featureSettings,
       ...result.settings,
     };
+    featureSettingsLoaded = true;
   }
   maintainPortsPanel();
-  schedulePortScan();
+  if (featureSettings.portForwardingEnabled) schedulePortScan();
   return featureSettings;
 }

@@ -31,6 +31,80 @@ test("ports render only in pinned summary card", () => {
   expect(source).not.toContain("codex-helper-ports-pinned-heading");
 });
 
+test("pinned ports section owns its disclosure interaction", () => {
+  expect(source).toContain("function installPortForwardPinnedDisclosure(");
+  expect(source).toContain("togglePortForwardPinnedDisclosure(section)");
+  expect(source).toContain("installPortForwardPinnedDisclosure(existing)");
+  expect(source).toContain("installPortForwardPinnedDisclosure(section)");
+  expect(source).toContain("data-codex-helper-ports-disclosure-installed");
+});
+
+test("pinned ports disclosure icon points right when collapsed", () => {
+  expect(source).toContain("function setPortForwardPinnedIconDirection(");
+  expect(source).toContain('icon.style.transform = collapsed ? "rotate(-90deg)" : ""');
+  expect(source).toContain("setPortForwardPinnedIconDirection(section, collapsed)");
+});
+
+test("pinned ports summary repopulates rows even when snapshot is unchanged", () => {
+  expect(source).toContain("function portForwardPinnedSectionHasRows(");
+  expect(source).toContain("const section = ensurePortsPinnedSection(card);");
+  expect(source).toContain(
+    "snapshot === pinnedPortsLastSnapshot && portForwardPinnedSectionHasRows(section)",
+  );
+});
+
+test("pinned ports summary can render from an empty Sources section template", () => {
+  expect(source).toContain("function fallbackSummaryRowTemplate(");
+  expect(source).toContain("fallbackSummaryRowTemplate(sources)");
+  expect(source).toContain("row.textContent = text");
+});
+
+test("pinned ports rows include lifecycle status labels", () => {
+  expect(source).toContain("function portStatusLabel(");
+  expect(source).toContain('return `${remotePort} → ${localPort} · ${status}`;');
+  expect(source).toContain('"unreachable"');
+  expect(source).toContain('"starting"');
+});
+
+test("pinned ports row template falls back when Sources has no rows", () => {
+  const findSummaryRowTemplate = source.slice(
+    source.indexOf("function findSummaryRowTemplate("),
+    source.indexOf("function findSummaryIconRowTemplate("),
+  );
+
+  expect(findSummaryRowTemplate).toContain("host.querySelectorAll");
+  expect(findSummaryRowTemplate).toContain("helperPortsPinnedAttribute");
+  expect(findSummaryRowTemplate).toContain("summary-panel-row-accessory");
+});
+
+test("detected lifecycle state overrides active tunnel rows in summary", () => {
+  expect(source).toContain("const current = rows.get(id);");
+  expect(source).toContain("status: entry.status || current.status");
+  expect(source).toContain("message: entry.message || current.message || \"\"");
+});
+
+test("port forwarding disabled removes pinned summary UI", () => {
+  expect(source).toContain("function removePortsPinnedSummaryUi(");
+  expect(source).toContain("if (!featureSettings.portForwardingEnabled)");
+  expect(source).toContain("removePortsPinnedSummaryUi();");
+  expect(source).toContain("stopPortScanLoop();");
+});
+
+test("non-remote sessions do not render pinned port forwarding UI", () => {
+  const maintainPortsPanelNow = source.slice(
+    source.indexOf("function maintainPortsPanelNow("),
+    source.indexOf("function activePortsForCurrentSession("),
+  );
+  const refreshPortsPanelIfVisible = source.slice(
+    source.indexOf("async function refreshPortsPanelIfVisible("),
+    source.indexOf("async function handlePortCommand("),
+  );
+
+  expect(maintainPortsPanelNow).toContain("!portForwardingUiAvailable()");
+  expect(refreshPortsPanelIfVisible).toContain("!portForwardingUiAvailable()");
+  expect(source).toContain("function portForwardingUiAvailable()");
+});
+
 test("ports detection uses session sidebar state and debounced pinned UI", () => {
   expect(source).toContain("function sessionContextFromDom()");
   expect(source).toContain("data-app-action-sidebar-thread-active");
@@ -40,4 +114,12 @@ test("ports detection uses session sidebar state and debounced pinned UI", () =>
   expect(source).toContain("function terminalTextForPortScan()");
   expect(source).not.toContain("function ensureBottomPanelOpen()");
   expect(source).not.toContain("Open a terminal session to detect");
+});
+
+test("ports panel updates when the active sidebar thread changes", () => {
+  expect(source).toContain("attributeFilter:");
+  expect(source).toContain('"data-app-action-sidebar-thread-active"');
+  expect(source).toContain('"data-app-action-sidebar-thread-host-id"');
+  expect(source).toContain('"data-app-action-sidebar-thread-kind"');
+  expect(source).toContain('"data-app-action-sidebar-thread-id"');
 });

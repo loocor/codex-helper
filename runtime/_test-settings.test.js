@@ -40,6 +40,21 @@ test("settings page exposes port forwarding policy switches", () => {
   );
 });
 
+test("settings updates refresh port forwarding panel visibility", () => {
+  expect(source).toContain("function applySettings(");
+  expect(source).toContain("maintainPortsPanel();");
+  expect(source).toContain("if (featureSettings.portForwardingEnabled) schedulePortScan();");
+});
+
+test("disabling port forwarding stops managed tunnels", () => {
+  expect(source).toContain("function handlePortForwardingDisabled(");
+  expect(source).toContain("function stopAllManagedPortForwards(");
+  expect(source).toContain('bridge("/ports/list"');
+  expect(source).toContain('bridge("/ports/stop"');
+  expect(source).toContain("detectedPorts.clear();");
+  expect(source).toContain("portDiscoveryStates.clear();");
+});
+
 test("settings page groups options by feature area", () => {
   expect(source).toContain('codex-helper-settings-section-title text-sm font-medium text-token-text-primary">Basic</div>');
   expect(source).toContain('codex-helper-settings-section-title text-sm font-medium text-token-text-primary">Sessions</div>');

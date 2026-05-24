@@ -1,4 +1,12 @@
 // Mutation observer, event listeners, and startup hooks
+if (typeof window.__codexHelperRuntimeCleanup === "function") {
+  try {
+    window.__codexHelperRuntimeCleanup();
+  } catch (error) {
+    console.warn("[Codex Helper] previous runtime cleanup failed", error);
+  }
+}
+
 function closeOpenMenus() {
   document.dispatchEvent(
     new KeyboardEvent("keydown", {
@@ -36,9 +44,35 @@ function installObserver() {
     childList: true,
     subtree: true,
     attributes: true,
-    attributeFilter: ["role", "aria-selected", "data-state", "class"],
+    attributeFilter: [
+      "role",
+      "aria-selected",
+      "aria-current",
+      "data-state",
+      "class",
+      "data-app-action-sidebar-thread-active",
+      "data-app-action-sidebar-thread-host-id",
+      "data-app-action-sidebar-thread-kind",
+      "data-app-action-sidebar-thread-id",
+    ],
   });
+  helperRuntimeObserver = observer;
 }
+
+window.__codexHelperRuntimeCleanup = () => {
+  if (pendingPortScan) clearTimeout(pendingPortScan);
+  if (maintainPortsPanelTimer) clearTimeout(maintainPortsPanelTimer);
+  if (refreshPortsPanelTimer) clearTimeout(refreshPortsPanelTimer);
+  if (pinnedSummaryHideTimer) clearTimeout(pinnedSummaryHideTimer);
+  stopPortScanLoop();
+  if (helperRuntimeObserver) helperRuntimeObserver.disconnect();
+  pendingPortScan = 0;
+  maintainPortsPanelTimer = 0;
+  refreshPortsPanelTimer = 0;
+  pinnedSummaryHideTimer = 0;
+  observerInstalled = false;
+  helperRuntimeObserver = null;
+};
 
 document.addEventListener(
   "click",

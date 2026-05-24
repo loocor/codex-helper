@@ -20,6 +20,7 @@ const helperActionClass =
 const helperPanelClass =
   "codex-helper-panel flex flex-col divide-y-[0.5px] divide-token-border overflow-hidden rounded-lg border border-token-border";
 let observerInstalled = false;
+let helperRuntimeObserver = null;
 let helperPageRoot = null;
 let helperDialogRoot = null;
 let helperContentHost = null;
@@ -30,10 +31,14 @@ let maintainPortsPanelTimer = 0;
 let refreshPortsPanelTimer = 0;
 let pinnedSummaryHideTimer = 0;
 let portScanIntervalId = 0;
+let remotePortSyncInFlight = false;
+let managedPortStopInFlight = false;
 let pinnedSummaryCardRef = null;
 let pinnedPortsLastSnapshot = "";
 let lastPortScanSessionKey = "";
+let resolvedRemoteForwardingContext = null;
 const detectedPorts = new Map();
+const portDiscoveryStates = new Map();
 let featureSettings = {
   sessionDeleteEnabled: false,
   markdownExportEnabled: false,
@@ -42,3 +47,4 @@ let featureSettings = {
   portAutoForwardWeb: true,
   portSameLocalPort: true,
 };
+let featureSettingsLoaded = false;
