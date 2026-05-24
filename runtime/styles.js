@@ -1,4 +1,5 @@
 // Injected stylesheet for Helper UI
+// biome-ignore-all lint/correctness/noUnusedVariables: called from bootstrap.js, account.js, and sessions.js in the bundled runtime
 function installHelperStyles() {
   let style = document.getElementById("codex-helper-runtime-style");
   if (!(style instanceof HTMLStyleElement)) {
@@ -244,35 +245,53 @@ function installHelperStyles() {
         overflow: auto;
         padding: 18px;
       }
-      [data-codex-helper-port-row] {
-        position: relative;
-        padding-right: 52px;
+      [data-codex-helper-port-row][data-codex-helper-port-row-menu-open="true"]
+        [class*="summary-panel-row-accessory"] {
+        opacity: 1 !important;
+        visibility: visible !important;
+        pointer-events: auto !important;
       }
       [data-codex-helper-port-row] .codex-helper-port-row-actions {
-        position: absolute;
-        right: 8px;
-        top: 50%;
-        transform: translateY(-50%);
+        flex-shrink: 0;
         display: inline-flex;
         align-items: center;
-        gap: 2px;
         opacity: 0;
         pointer-events: none;
-        transition: opacity 120ms ease;
       }
       [data-codex-helper-port-row]:hover .codex-helper-port-row-actions,
-      [data-codex-helper-port-row]:focus-within .codex-helper-port-row-actions {
+      [data-codex-helper-port-row]:focus-within .codex-helper-port-row-actions,
+      [data-codex-helper-port-row][data-codex-helper-port-row-menu-open="true"]
+        .codex-helper-port-row-actions {
         opacity: 1;
         pointer-events: auto;
+      }
+      .codex-helper-port-row-leading-icon {
+        width: 16px;
+        height: 16px;
+        flex: 0 0 16px;
+      }
+      .codex-helper-port-local-url {
+        display: inline;
+        border: 0;
+        padding: 0;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        cursor: pointer;
+      }
+      .codex-helper-port-local-url:hover,
+      .codex-helper-port-local-url:focus-visible {
+        text-decoration: underline;
+        outline: none;
       }
       .codex-helper-port-row-action {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        width: 22px;
-        height: 22px;
+        width: 32px;
+        height: 28px;
         border: 0;
-        border-radius: 6px;
+        border-radius: 10px;
         padding: 0;
         background: transparent;
         color: color-mix(in srgb, currentColor 68%, transparent);
@@ -280,7 +299,7 @@ function installHelperStyles() {
       }
       .codex-helper-port-row-action:hover,
       .codex-helper-port-row-action:focus-visible {
-        background: color-mix(in srgb, currentColor 10%, transparent);
+        background: color-mix(in srgb, currentColor 8%, transparent);
         color: inherit;
         outline: none;
       }
@@ -291,7 +310,7 @@ function installHelperStyles() {
       [data-codex-helper-port-menu] {
         position: fixed;
         z-index: 2147483646;
-        min-width: 168px;
+        min-width: 280px;
         padding: 4px;
         border-radius: 8px;
         border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
@@ -315,6 +334,16 @@ function installHelperStyles() {
         text-align: left;
         cursor: pointer;
       }
+      [data-codex-helper-port-menu] button.codex-helper-port-menu-toggle,
+      [data-codex-helper-port-menu] [role="menuitemcheckbox"] {
+        justify-content: space-between;
+        gap: 12px;
+      }
+      [data-codex-helper-port-menu] .codex-helper-port-menu-label {
+        flex: 1 1 auto;
+        min-width: 0;
+        text-align: left;
+      }
       [data-codex-helper-port-menu] button:hover,
       [data-codex-helper-port-menu] button:focus-visible {
         background: color-mix(in srgb, currentColor 8%, transparent);
@@ -323,6 +352,121 @@ function installHelperStyles() {
       [data-codex-helper-port-menu] svg {
         width: 14px;
         height: 14px;
+        flex-shrink: 0;
+      }
+      [data-codex-helper-port-menu] .codex-helper-port-menu-check {
+        display: inline-flex;
+        width: 16px;
+        flex: 0 0 16px;
+        align-items: center;
+        justify-content: flex-end;
+        margin-left: auto;
+      }
+      [data-codex-helper-port-menu] .codex-helper-port-menu-separator {
+        height: 1px;
+        margin: 4px 8px;
+        background: color-mix(in srgb, currentColor 12%, transparent);
+      }
+      [data-codex-helper-port-dialog] {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483646;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: color-mix(in srgb, black 24%, transparent);
+        color: CanvasText;
+      }
+      [data-codex-helper-port-dialog] .codex-helper-port-dialog-panel {
+        width: min(460px, calc(100vw - 48px));
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        border-radius: 12px;
+        border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+        background: Canvas;
+        box-shadow: 0 20px 64px color-mix(in srgb, black 24%, transparent);
+        padding: 16px;
+      }
+      [data-codex-helper-port-dialog] .codex-helper-port-dialog-title {
+        font-size: 14px;
+        font-weight: 600;
+      }
+      [data-codex-helper-port-dialog] .codex-helper-port-dialog-message {
+        font-size: 13px;
+        line-height: 1.4;
+        color: color-mix(in srgb, currentColor 72%, transparent);
+      }
+      [data-codex-helper-port-dialog] .codex-helper-port-dialog-port-row {
+        display: flex;
+        align-items: end;
+        gap: 12px;
+        min-width: 0;
+      }
+      [data-codex-helper-port-dialog] .codex-helper-port-dialog-port-row label {
+        flex: 1 1 0;
+        min-width: 0;
+      }
+      [data-codex-helper-port-dialog] .codex-helper-port-dialog-arrow {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 24px;
+        height: 32px;
+        color: color-mix(in srgb, currentColor 54%, transparent);
+        font-size: 14px;
+      }
+      [data-codex-helper-port-dialog] label {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        font-size: 12px;
+        color: color-mix(in srgb, currentColor 64%, transparent);
+      }
+      [data-codex-helper-port-dialog] input {
+        height: 32px;
+        width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+        border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+        border-radius: 8px;
+        padding: 0 9px;
+        background: color-mix(in srgb, Canvas 96%, currentColor 4%);
+        color: CanvasText;
+        font: inherit;
+        font-size: 13px;
+      }
+      [data-codex-helper-port-dialog] input:focus-visible {
+        outline: 2px solid var(--color-token-focus-border, rgb(48, 145, 255));
+        outline-offset: 1px;
+      }
+      [data-codex-helper-port-dialog] input[readonly] {
+        color: color-mix(in srgb, currentColor 60%, transparent);
+      }
+      [data-codex-helper-port-dialog] .codex-helper-port-dialog-error {
+        min-height: 16px;
+        font-size: 12px;
+        color: rgb(196, 55, 55);
+      }
+      [data-codex-helper-port-dialog] .codex-helper-port-dialog-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+      [data-codex-helper-port-dialog] .codex-helper-port-dialog-actions button {
+        border: 0;
+        border-radius: 8px;
+        padding: 7px 10px;
+        background: color-mix(in srgb, currentColor 8%, transparent);
+        color: inherit;
+        font: inherit;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      [data-codex-helper-port-dialog] .codex-helper-port-dialog-actions button:hover,
+      [data-codex-helper-port-dialog] .codex-helper-port-dialog-actions button:focus-visible {
+        background: color-mix(in srgb, currentColor 12%, transparent);
+        outline: none;
       }
       [${helperSettingsDialogAttribute}] [${helperDialogPageAttribute}] {
         border-top: 0;

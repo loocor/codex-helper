@@ -27,6 +27,8 @@ test("settings page exposes port forwarding policy switches", () => {
   const descKeyBinding = templatePlaceholder("descKey");
   const toggleKeyBinding = templatePlaceholder("toggleKey");
   expect(source).toContain("Enable port forwarding");
+  expect(source).toContain('${helperSettingsSectionAttribute}="port-forwarding"');
+  expect(source).toContain("function focusHelperSettingsSection(");
   expect(source).toContain(`data-codex-helper-setting-desc="${descKeyBinding}"`);
   expect(source).toContain(`${helperToggleBinding}="${toggleKeyBinding}"`);
   expect(source).toContain(

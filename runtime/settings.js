@@ -92,7 +92,7 @@ function renderHelperPage(host, options = {}) {
             ${switchRow("Move sessions", "Move sessions between projects from the sidebar context menu.", "sessionMoveEnabled", "sessionMoveEnabled", "Move sessions")}
             `)}
           </section>
-          <section class="codex-helper-settings-section flex flex-col gap-1.5">
+          <section class="codex-helper-settings-section flex flex-col gap-1.5" ${helperSettingsSectionAttribute}="port-forwarding">
             <div class="codex-helper-settings-section-title text-sm font-medium text-token-text-primary">Port forwarding</div>
             ${settingsPanel(`
             ${switchRow("Enable port forwarding", "Detect and forward ports from agent sessions.", "portForwardingEnabled", "portForwardingEnabled", "Enable port forwarding")}
@@ -190,6 +190,30 @@ function helperSettingsRoots() {
   return [helperPageRoot, helperDialogRoot].filter(
     (root) => root instanceof HTMLElement && root.isConnected,
   );
+}
+
+function focusHelperSettingsSection(sectionId) {
+  const selector = `[${helperSettingsSectionAttribute}="${sectionId}"]`;
+  for (const root of helperSettingsRoots()) {
+    const section = root.querySelector(selector);
+    if (!(section instanceof HTMLElement)) continue;
+    const scrollParent =
+      section.closest(".codex-helper-settings-dialog-body") ||
+      section.closest(`[${helperSettingsDialogAttribute}]`) ||
+      root;
+    if (scrollParent instanceof HTMLElement) {
+      const parentTop = scrollParent.getBoundingClientRect().top;
+      const sectionTop = section.getBoundingClientRect().top;
+      scrollParent.scrollTo({
+        top: Math.max(0, scrollParent.scrollTop + sectionTop - parentTop - 12),
+        behavior: "smooth",
+      });
+    } else {
+      section.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+    return true;
+  }
+  return false;
 }
 
 async function refreshHelperPage() {

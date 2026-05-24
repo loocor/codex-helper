@@ -10,6 +10,7 @@ const helperSessionActionPrefix = "codex-helper-session-";
 const helperAccountSettingsEntryAttribute =
   "data-codex-helper-account-settings-entry";
 const helperSettingsDialogAttribute = "data-codex-helper-settings-dialog";
+const helperSettingsSectionAttribute = "data-codex-helper-settings-section";
 const helperPortCommandAttribute = "data-codex-helper-port-command";
 const helperPortsPinnedAttribute = "data-codex-helper-ports-pinned";
 let portsSurface = "none";
@@ -38,6 +39,9 @@ let pinnedPortsLastSnapshot = "";
 let lastPortScanSessionKey = "";
 let resolvedRemoteForwardingContext = null;
 let portForwardMenuRoot = null;
+let portForwardMenuAnchorRow = null;
+let portForwardSettingsAnchorButton = null;
+let portForwardDialogRoot = null;
 const detectedPorts = new Map();
 const portDiscoveryStates = new Map();
 const suppressedPortMappings = new Set();

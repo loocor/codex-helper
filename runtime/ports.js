@@ -886,19 +886,6 @@ async function stopDuplicateForwardedTunnels(context, activePorts) {
   return changed;
 }
 
-async function stopForwardedTunnelsOutsideSession(context, activePorts) {
-  let changed = false;
-  for (const port of activePorts) {
-    const id = typeof port.id === "string" ? port.id : "";
-    if (!id) continue;
-    if (!samePortSession(port, context)) {
-      await bridge("/ports/stop", { id });
-      changed = true;
-    }
-  }
-  return changed;
-}
-
 function detectedEntryForRemotePort(context, remotePort) {
   for (const entry of detectedPorts.values()) {
     if (!samePortSession(entry, context)) continue;
@@ -1092,10 +1079,6 @@ async function syncRemoteSessionPortsOnce() {
     activeResult?.status === "ok" && Array.isArray(activeResult.ports)
       ? activeResult.ports
       : [];
-  if (remoteForwardingContextChanged(initialSessionKey)) return;
-  const stoppedOutsideSession =
-    await stopForwardedTunnelsOutsideSession(context, activePorts);
-  if (remoteForwardingContextChanged(initialSessionKey)) return;
   const stopped = await stopStaleForwardedTunnels(
     context,
     discoveredRemotePorts,
@@ -1113,8 +1096,7 @@ async function syncRemoteSessionPortsOnce() {
     activePorts,
     discoveredRemotePorts,
   );
-  if (stopped || stoppedDuplicates || stoppedOutsideSession)
-    scheduleRefreshPortsPanel();
+  if (stopped || stoppedDuplicates) scheduleRefreshPortsPanel();
 }
 
 async function resolveRemoteForwardingContext() {
@@ -1290,6 +1272,15 @@ function findPinnedSummarySectionsHost(card) {
   );
 }
 
+function findEnvironmentSummarySection(host) {
+  return Array.from(host.querySelectorAll("section")).find(
+    (section) =>
+      section instanceof HTMLElement &&
+      !section.hasAttribute(helperPortsPinnedAttribute) &&
+      (section.textContent || "").includes("Environment"),
+  );
+}
+
 function findSourcesSummarySection(host) {
   return Array.from(host.querySelectorAll("section")).find(
     (section) =>
@@ -1300,6 +1291,29 @@ function findSourcesSummarySection(host) {
 }
 
 function findSummaryRowTemplate(host) {
+  const environment = findEnvironmentSummarySection(host);
+  if (environment instanceof HTMLElement) {
+    const commitRow = Array.from(
+      environment.querySelectorAll("[class*='summary-panel-row']"),
+    ).find(
+      (row) =>
+        row instanceof HTMLElement && textOf(row).includes("Commit"),
+    );
+    if (commitRow instanceof HTMLElement) return commitRow;
+
+    const actionRow = Array.from(
+      environment.querySelectorAll("[class*='summary-panel-row']"),
+    ).find(
+      (row) =>
+        row instanceof HTMLElement &&
+        row.querySelector("[class*='summary-panel-row-accessory']"),
+    );
+    if (actionRow instanceof HTMLElement) return actionRow;
+
+    const row = environment.querySelector("[class*='summary-panel-row']");
+    if (row instanceof HTMLElement) return row;
+  }
+
   const sources = findSourcesSummarySection(host);
   if (!(sources instanceof HTMLElement)) return null;
   const row = sources.querySelector("[class*='summary-panel-row']");
@@ -1310,7 +1324,7 @@ function findSummaryRowTemplate(host) {
     (candidate) =>
       candidate instanceof HTMLElement &&
       !candidate.closest(`[${helperPortsPinnedAttribute}]`) &&
-      !candidate.querySelector("[class*='summary-panel-row-accessory']"),
+      candidate.querySelector("[class*='summary-panel-row-accessory']"),
   );
 }
 
@@ -1321,6 +1335,13 @@ function fallbackSummaryRowTemplate(sources) {
 }
 
 function findSummaryIconRowTemplate(host, label) {
+  const environment = findEnvironmentSummarySection(host);
+  if (environment instanceof HTMLElement) {
+    const row = Array.from(
+      environment.querySelectorAll("[class*='summary-panel-row']"),
+    ).find((candidate) => exactText(candidate, label));
+    if (row instanceof HTMLElement) return row;
+  }
   return Array.from(host.querySelectorAll("[class*='summary-panel-row']")).find(
     (row) => row instanceof HTMLElement && exactText(row, label),
   );
@@ -1353,16 +1374,98 @@ function setSummarySectionTitle(section, title) {
   if (titleNode) titleNode.textContent = title;
 }
 
-function setSummaryRowText(row, text) {
-  const label =
+function summaryRowLabelNode(row) {
+  return (
     row.querySelector("span.flex.min-w-0.flex-1 span") ||
     row.querySelector("span.flex.min-w-0.flex-1") ||
-    row.querySelector("span");
+    row.querySelector("span")
+  );
+}
+
+function setSummaryRowText(row, text) {
+  const label = summaryRowLabelNode(row);
   if (label) label.textContent = text;
   else row.textContent = text;
 }
 
+function cloneSummaryPanelIcon(host, selectors) {
+  const roots = [
+    findPinnedSummaryCard(),
+    findEnvironmentSummarySection(host),
+    host,
+    document,
+  ].filter((node) => node instanceof HTMLElement);
+  for (const root of roots) {
+    for (const selector of selectors) {
+      const svg = root.querySelector(selector);
+      if (svg instanceof SVGElement) {
+        const cloned = svg.cloneNode(true);
+        cloned.removeAttribute("id");
+        return cloned;
+      }
+    }
+  }
+  return null;
+}
+
+function findNativeSummaryMenuItemTemplate(labelFragment) {
+  return Array.from(document.querySelectorAll('[role="menuitem"]')).find(
+    (item) =>
+      item instanceof HTMLElement &&
+      textOf(item).includes(labelFragment),
+  );
+}
+
+function replaceMenuItemLabel(item, label) {
+  const spans = Array.from(item.querySelectorAll("span"));
+  for (let index = spans.length - 1; index >= 0; index -= 1) {
+    const span = spans[index];
+    if (span.querySelector("svg")) continue;
+    if ((span.textContent || "").trim()) {
+      span.textContent = label;
+      return;
+    }
+  }
+  item.appendChild(document.createTextNode(label));
+}
+
+function setMenuItemCheckedState(item, checked) {
+  item.setAttribute("aria-checked", checked ? "true" : "false");
+  const checkSlot = item.querySelector(".codex-helper-port-menu-check");
+  if (checkSlot instanceof HTMLElement) {
+    checkSlot.replaceChildren();
+    if (checked) checkSlot.appendChild(createPortActionIcon("check"));
+    return;
+  }
+  let checkIcon = item.querySelector(
+    'svg[class*="check" i], svg.lucide-check, svg.lucide-check-check',
+  );
+  if (!(checkIcon instanceof SVGElement)) {
+    const svgs = item.querySelectorAll("svg");
+    checkIcon = svgs.length ? svgs[svgs.length - 1] : null;
+  }
+  if (checkIcon instanceof SVGElement) {
+    checkIcon.style.visibility = checked ? "visible" : "hidden";
+    checkIcon.style.opacity = checked ? "1" : "0";
+  }
+}
+
 function createPortActionIcon(name) {
+  const domPatterns = {
+    copy: ['svg[class*="copy" i]', "svg.lucide-copy"],
+    open: [
+      'svg[class*="external-link" i]',
+      "svg.lucide-external-link",
+      'svg[class*="globe" i]',
+    ],
+    settings: ['svg[class*="settings" i]', "svg.lucide-settings"],
+    check: ['svg[class*="check" i]', "svg.lucide-check"],
+  };
+  if (domPatterns[name]) {
+    const cloned = cloneSummaryPanelIcon(document, domPatterns[name]);
+    if (cloned instanceof SVGElement) return cloned;
+  }
+
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("fill", "none");
@@ -1370,19 +1473,33 @@ function createPortActionIcon(name) {
   svg.setAttribute("stroke-width", "2");
   svg.setAttribute("stroke-linecap", "round");
   svg.setAttribute("stroke-linejoin", "round");
-  const paths =
-    name === "trash"
-      ? [
+  const paths = (() => {
+    if (name === "trash") {
+      return [
         "M3 6h18",
         "M8 6V4h8v2",
         "M19 6l-1 14H6L5 6",
         "M10 11v6",
         "M14 11v6",
-      ]
-      : [
-        "M12 20h9",
-        "M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z",
       ];
+    }
+    if (name === "plus") {
+      return ["M12 5v14", "M5 12h14"];
+    }
+    if (name === "ellipsis") {
+      return ["M12 12h.01", "M19 12h.01", "M5 12h.01"];
+    }
+    if (name === "copy") {
+      return ["M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12", "M15 2v5h5"];
+    }
+    if (name === "check") {
+      return ["M20 6 9 17l-5-5"];
+    }
+    return [
+      "M12 20h9",
+      "M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z",
+    ];
+  })();
   for (const value of paths) {
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
     path.setAttribute("d", value);
@@ -1390,6 +1507,62 @@ function createPortActionIcon(name) {
   }
   svg.setAttribute("aria-hidden", "true");
   return svg;
+}
+
+function createPortForwardIcon(host = document) {
+  const cloned = cloneSummaryPanelIcon(host, [
+    'svg[class*="wifi" i]',
+    "svg.lucide-wifi",
+    'svg[class*="wi-fi" i]',
+  ]);
+  if (cloned instanceof SVGElement) {
+    cloned.classList.add("codex-helper-port-row-leading-icon");
+    return cloned;
+  }
+
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.classList.add("codex-helper-port-row-leading-icon");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "2");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  for (const value of [
+    "M12 20h.01",
+    "M2 8.82a15 15 0 0 1 20 0",
+    "M5 12.86a10 10 0 0 1 14 0",
+    "M8.5 16.429a5 5 0 0 1 7 0",
+  ]) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", value);
+    svg.appendChild(path);
+  }
+  return svg;
+}
+
+function localUrlForPortEntry(entry) {
+  const localUrl = String(entry.localUrl || "").trim();
+  if (localUrl) return localUrl;
+  if (Number.isInteger(entry.localPort) && entry.localPort > 0) {
+    return `http://127.0.0.1:${entry.localPort}`;
+  }
+  return "";
+}
+
+function localForwardedUrlIsAllowed(value) {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    return (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      Boolean(url.port) &&
+      ["localhost", "127.0.0.1", "::1", "0.0.0.0"].includes(host)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function setPortCommandDataset(element, entry) {
@@ -1409,6 +1582,10 @@ function setPortCommandDataset(element, entry) {
     "data-codex-helper-port-local-port",
     String(entry.localPort || ""),
   );
+  element.setAttribute(
+    "data-codex-helper-port-url",
+    localUrlForPortEntry(entry),
+  );
 }
 
 function createPortRowActionButton(action, label, iconName, entry) {
@@ -1424,34 +1601,123 @@ function createPortRowActionButton(action, label, iconName, entry) {
   return button;
 }
 
-function installPortForwardRowActions(row, entry) {
-  row.setAttribute("data-codex-helper-port-row", "true");
+function summaryActionRowTemplate(host) {
+  return findSummaryRowTemplate(host);
+}
+
+function summaryAccessoryTemplate(host) {
+  const row = summaryActionRowTemplate(host);
+  const accessory = row?.querySelector("[class*='summary-panel-row-accessory']");
+  return accessory instanceof HTMLElement ? accessory : null;
+}
+
+function summaryActionButtonTemplate(host) {
+  const row = summaryActionRowTemplate(host);
+  if (!(row instanceof HTMLElement)) return null;
+  const accessory =
+    row.querySelector("[class*='summary-panel-row-accessory']") ||
+    row.querySelector("button[aria-label*='actions' i]") ||
+    row.querySelector("button");
+  const button =
+    accessory instanceof HTMLButtonElement
+      ? accessory
+      : accessory?.querySelector?.("button");
+  return button instanceof HTMLButtonElement ? button : null;
+}
+
+function clearPortForwardRowActions(row) {
+  const accessory = row.querySelector("[class*='summary-panel-row-accessory']");
+  if (accessory instanceof HTMLElement) {
+    accessory.querySelector("button")?.remove();
+    return;
+  }
   row.querySelector(".codex-helper-port-row-actions")?.remove();
-  setPortCommandDataset(row, entry);
+}
+
+function createPortRowActionsAccessory(button, host) {
+  const template = summaryAccessoryTemplate(host);
+  if (template instanceof HTMLElement) {
+    const accessory = template.cloneNode(true);
+    accessory.querySelector("button")?.remove();
+    accessory.appendChild(button);
+    return accessory;
+  }
   const actions = document.createElement("span");
   actions.className = "codex-helper-port-row-actions";
-  actions.appendChild(
+  actions.appendChild(button);
+  return actions;
+}
+
+function createNativePortRowActionButton(host, entry) {
+  const template = summaryActionButtonTemplate(host);
+  if (!(template instanceof HTMLButtonElement)) return null;
+  const nativeButton = template.cloneNode(true);
+  if (!(nativeButton instanceof HTMLButtonElement)) return null;
+  nativeButton.removeAttribute("id");
+  nativeButton.removeAttribute("data-state");
+  nativeButton.removeAttribute("aria-expanded");
+  nativeButton.type = "button";
+  nativeButton.setAttribute(helperPortCommandAttribute, "show-mapping-menu");
+  nativeButton.setAttribute("data-codex-helper-port-action", "menu");
+  nativeButton.setAttribute("aria-label", "Port mapping actions");
+  nativeButton.title = "Port mapping actions";
+  setPortCommandDataset(nativeButton, entry);
+  return nativeButton;
+}
+
+function installPortForwardRowActions(row, entry, host = document) {
+  row.setAttribute("data-codex-helper-port-row", "true");
+  setPortCommandDataset(row, entry);
+  const button =
+    createNativePortRowActionButton(host, entry) ||
     createPortRowActionButton(
-      "edit",
-      "Edit mapping record",
-      "pencil",
+      "menu",
+      "Port mapping actions",
+      "ellipsis",
       entry,
-    ),
-  );
-  actions.appendChild(
-    createPortRowActionButton(
-      "delete",
-      "Delete mapping record",
-      "trash",
-      entry,
-    ),
-  );
-  row.appendChild(actions);
+    );
+  const accessory = row.querySelector("[class*='summary-panel-row-accessory']");
+  if (accessory instanceof HTMLElement) {
+    accessory.replaceChildren(button);
+    return;
+  }
+  row.appendChild(createPortRowActionsAccessory(button, host));
+}
+
+function createCurrentSessionPortCommandSource(
+  context = currentRemoteForwardingContext(),
+) {
+  if (!remoteForwardingContextIsReady(context)) return null;
+  const source = document.createElement("span");
+  source.setAttribute("data-codex-helper-port-host-id", context.hostId || "");
+  source.setAttribute("data-codex-helper-port-remote-path", context.path || "");
+  source.setAttribute("data-codex-helper-port-thread-id", context.threadId || "");
+  source.setAttribute("data-codex-helper-port-remote-port", "");
+  source.setAttribute("data-codex-helper-port-local-port", "");
+  source.setAttribute("data-codex-helper-port-id", "");
+  source.setAttribute("data-codex-helper-port-key", "");
+  return source;
+}
+
+function installPortForwardEmptyActions(row, context, host = document) {
+  row.setAttribute("data-codex-helper-port-empty-row", "true");
+  row.setAttribute("data-codex-helper-port-row", "true");
+  const source = createCurrentSessionPortCommandSource(context);
+  if (!(source instanceof HTMLElement)) return;
+  const entry = {
+    hostId: source.getAttribute("data-codex-helper-port-host-id") || "",
+    remotePath: source.getAttribute("data-codex-helper-port-remote-path") || "",
+    threadId: source.getAttribute("data-codex-helper-port-thread-id") || "",
+    remotePort: "",
+    localPort: "",
+  };
+  installPortForwardRowActions(row, entry, host);
 }
 
 function createSummaryRowFromTemplate(templateRow, text, iconRow) {
   const row = templateRow.cloneNode(true);
   row.removeAttribute("id");
+  clearPortForwardRowActions(row);
   if (iconRow instanceof HTMLElement) {
     const icon = iconRow.querySelector("svg");
     const target = row.querySelector("svg");
@@ -1459,6 +1725,18 @@ function createSummaryRowFromTemplate(templateRow, text, iconRow) {
   }
   setSummaryRowText(row, text);
   return row;
+}
+
+function ensurePortForwardRowIcon(row, host = document) {
+  const icon = createPortForwardIcon(host);
+  const target = row.querySelector("svg");
+  if (target) {
+    target.replaceWith(icon);
+    return;
+  }
+  const label = summaryRowLabelNode(row);
+  const container = label?.parentElement;
+  if (label && container) container.insertBefore(icon, label);
 }
 
 function portStatusLabel(entry) {
@@ -1483,7 +1761,34 @@ function portRowLabel(entry) {
   const remotePort = entry.remotePort || "—";
   const localPort = portLocalPortLabel(entry);
   const status = portStatusLabel(entry);
-  return `${remotePort} → ${localPort} · ${status}`;
+  return `${remotePort} ↔ ${localPort} · ${status}`;
+}
+
+function setPortRowContent(row, entry) {
+  const label = summaryRowLabelNode(row);
+  if (!(label instanceof HTMLElement)) {
+    setSummaryRowText(row, portRowLabel(entry));
+    return;
+  }
+  const remote = document.createElement("span");
+  remote.textContent = String(entry.remotePort || "—");
+  const separator = document.createElement("span");
+  separator.textContent = " ↔ ";
+  const localUrl = localUrlForPortEntry(entry);
+  const local = document.createElement(localUrl ? "button" : "span");
+  local.textContent = portLocalPortLabel(entry);
+  if (local instanceof HTMLButtonElement) {
+    local.type = "button";
+    local.className = "codex-helper-port-local-url";
+    local.setAttribute(helperPortCommandAttribute, "open-local-url-system");
+    local.setAttribute("data-codex-helper-port-local-url", "true");
+    local.setAttribute("aria-label", `Open localhost:${portLocalPortLabel(entry)}`);
+    local.title = `Open ${localUrl}`;
+    setPortCommandDataset(local, entry);
+  }
+  const status = document.createElement("span");
+  status.textContent = ` · ${portStatusLabel(entry)}`;
+  label.replaceChildren(remote, separator, local, status);
 }
 
 function emptyPortForwardLabel(rows, context = sessionContextFromDom()) {
@@ -1511,13 +1816,14 @@ function populatePortForwardList(section, activePorts, host) {
   list.replaceChildren();
 
   if (rows.length === 0) {
-    list.appendChild(
-      createSummaryRowFromTemplate(
-        templateRow,
-        emptyPortForwardLabel(rows, context),
-        templateRow,
-      ),
+    const emptyRow = createSummaryRowFromTemplate(
+      templateRow,
+      emptyPortForwardLabel(rows, context),
+      portIconRow,
     );
+    ensurePortForwardRowIcon(emptyRow, host);
+    installPortForwardEmptyActions(emptyRow, context, host);
+    list.appendChild(emptyRow);
     return true;
   }
 
@@ -1527,7 +1833,9 @@ function populatePortForwardList(section, activePorts, host) {
       portRowLabel(entry),
       portIconRow,
     );
-    installPortForwardRowActions(row, entry);
+    ensurePortForwardRowIcon(row, host);
+    setPortRowContent(row, entry);
+    installPortForwardRowActions(row, entry, host);
     list.appendChild(row);
   }
   return true;
@@ -1561,14 +1869,67 @@ function portForwardPinnedSectionHasRows(section) {
   );
 }
 
+function findPortForwardSectionHeaderButtons(section) {
+  const header = section.querySelector("header");
+  if (!(header instanceof HTMLElement)) {
+    return { disclosure: null, settings: null };
+  }
+  const buttons = Array.from(header.querySelectorAll("button")).filter(
+    (node) => node instanceof HTMLButtonElement,
+  );
+  if (buttons.length === 0) return { disclosure: null, settings: null };
+  const disclosure = buttons[0];
+  const settings =
+    buttons.find(
+      (button) =>
+        button !== disclosure &&
+        (/settings|configure/i.test(button.getAttribute("aria-label") || "") ||
+          /settings|configure/i.test(button.title || "")),
+    ) || (buttons.length >= 2 ? buttons[buttons.length - 1] : null);
+  return { disclosure, settings };
+}
+
+function ensurePortForwardSectionSettingsButton(section, host = document) {
+  const { settings } = findPortForwardSectionHeaderButtons(section);
+  if (settings instanceof HTMLButtonElement) return settings;
+  const environment = findEnvironmentSummarySection(host);
+  const envSettings = environment
+    ? findPortForwardSectionHeaderButtons(environment).settings
+    : null;
+  const header = section.querySelector("header");
+  if (!(envSettings instanceof HTMLButtonElement) || !(header instanceof HTMLElement)) {
+    return null;
+  }
+  const cloned = envSettings.cloneNode(true);
+  if (!(cloned instanceof HTMLButtonElement)) return null;
+  cloned.removeAttribute("id");
+  header.appendChild(cloned);
+  return cloned;
+}
+
+function installPortForwardSectionSettings(section, host = document) {
+  ensurePortForwardSectionSettingsButton(section, host);
+  const { settings } = findPortForwardSectionHeaderButtons(section);
+  if (!(settings instanceof HTMLButtonElement)) return false;
+  settings.setAttribute(helperPortCommandAttribute, "show-settings-menu");
+  settings.setAttribute("data-codex-helper-port-settings-button", "true");
+  settings.setAttribute("aria-label", "Port forwarding settings");
+  settings.title = "Port forwarding settings";
+  settings.removeAttribute("data-state");
+  settings.removeAttribute("aria-expanded");
+  return true;
+}
+
 function setPortForwardPinnedIconDirection(section, collapsed) {
-  const icon = section.querySelector("header button svg");
+  const { disclosure } = findPortForwardSectionHeaderButtons(section);
+  const icon = disclosure?.querySelector("svg");
   if (!(icon instanceof SVGElement)) return;
   icon.style.transform = collapsed ? "rotate(-90deg)" : "";
 }
 
 function setPortForwardPinnedDisclosure(section, collapsed) {
-  const button = section.querySelector("header button");
+  const { disclosure } = findPortForwardSectionHeaderButtons(section);
+  const button = disclosure;
   const content = findPortForwardDisclosureContent(section);
   if (button instanceof HTMLElement) {
     button.setAttribute("aria-expanded", collapsed ? "false" : "true");
@@ -1591,7 +1952,8 @@ function togglePortForwardPinnedDisclosure(section) {
 }
 
 function installPortForwardPinnedDisclosure(section) {
-  const button = section.querySelector("header button");
+  const { disclosure } = findPortForwardSectionHeaderButtons(section);
+  const button = disclosure;
   if (!(button instanceof HTMLElement)) return false;
   if (
     section.getAttribute("data-codex-helper-ports-disclosure-installed") ===
@@ -1625,22 +1987,32 @@ function ensurePortsPinnedSection(card) {
   const host = findPinnedSummarySectionsHost(card);
   const existing = host.querySelector(`[${helperPortsPinnedAttribute}]`);
   if (existing instanceof HTMLElement) {
-    if (existing.querySelector("[class*='summary-panel-row']")) {
+    if (
+      existing.getAttribute("data-codex-helper-ports-template") ===
+      "environment" &&
+      existing.querySelector("[class*='summary-panel-row']")
+    ) {
       installPortForwardPinnedDisclosure(existing);
+      installPortForwardSectionSettings(existing, host);
       return existing;
     }
     existing.remove();
   }
 
+  const environment = findEnvironmentSummarySection(host);
   const sources = findSourcesSummarySection(host);
+  const sectionTemplate = environment || sources;
+  if (!(sectionTemplate instanceof HTMLElement)) return null;
   if (!(sources instanceof HTMLElement)) return null;
 
-  const section = sources.cloneNode(true);
+  const section = sectionTemplate.cloneNode(true);
   section.setAttribute(helperPortsPinnedAttribute, "true");
+  section.setAttribute("data-codex-helper-ports-template", "environment");
   setSummarySectionTitle(section, "Port Forward");
   const list = findPortForwardListContainer(section);
   if (list instanceof HTMLElement) list.replaceChildren();
   installPortForwardPinnedDisclosure(section);
+  installPortForwardSectionSettings(section, host);
   sources.insertAdjacentElement("afterend", section);
   return section;
 }
@@ -1774,8 +2146,20 @@ function portsUnavailableMessage() {
 }
 
 function closePortForwardRowMenu() {
+  if (portForwardMenuAnchorRow?.isConnected) {
+    portForwardMenuAnchorRow.removeAttribute(
+      "data-codex-helper-port-row-menu-open",
+    );
+  }
+  portForwardMenuAnchorRow = null;
+  portForwardSettingsAnchorButton = null;
   if (portForwardMenuRoot?.isConnected) portForwardMenuRoot.remove();
   portForwardMenuRoot = null;
+}
+
+function closePortForwardDialog() {
+  if (portForwardDialogRoot?.isConnected) portForwardDialogRoot.remove();
+  portForwardDialogRoot = null;
 }
 
 function copyPortCommandDataset(source, target) {
@@ -1787,6 +2171,7 @@ function copyPortCommandDataset(source, target) {
     "data-codex-helper-port-thread-id",
     "data-codex-helper-port-remote-port",
     "data-codex-helper-port-local-port",
+    "data-codex-helper-port-url",
   ]) {
     target.setAttribute(name, source.getAttribute(name) || "");
   }
@@ -1797,34 +2182,76 @@ function createPortMenuItem(command, label, iconName, source) {
   item.type = "button";
   item.setAttribute(helperPortCommandAttribute, command);
   copyPortCommandDataset(source, item);
-  item.appendChild(createPortActionIcon(iconName));
+  if (iconName) item.appendChild(createPortActionIcon(iconName));
   item.appendChild(document.createTextNode(label));
   return item;
 }
 
-function openPortForwardRowMenu(button) {
-  closePortForwardRowMenu();
+function createPortMenuSeparator() {
+  const separator = document.createElement("div");
+  separator.className = "codex-helper-port-menu-separator";
+  separator.setAttribute("role", "separator");
+  separator.setAttribute("aria-hidden", "true");
+  return separator;
+}
+
+function createPortSettingsToggleMenuItem(settingKey, label) {
+  const checked = featureSettings[settingKey] === true;
+  const template =
+    findNativeSummaryMenuItemTemplate("Use the same local port") ||
+    findNativeSummaryMenuItemTemplate("Auto-forward detected web ports");
+  if (template instanceof HTMLElement) {
+    const item = template.cloneNode(true);
+    if (!(item instanceof HTMLElement)) {
+      return createPortSettingsToggleMenuItemFallback(settingKey, label, checked);
+    }
+    item.removeAttribute("id");
+    item.removeAttribute("data-highlighted");
+    item.removeAttribute("data-state");
+    if (item instanceof HTMLButtonElement) {
+      item.type = "button";
+    }
+    item.setAttribute(helperPortCommandAttribute, "toggle-setting");
+    item.setAttribute("data-codex-helper-port-setting-key", settingKey);
+    item.classList.add("codex-helper-port-menu-toggle");
+    item.setAttribute("role", "menuitemcheckbox");
+    replaceMenuItemLabel(item, label);
+    setMenuItemCheckedState(item, checked);
+    return item;
+  }
+  return createPortSettingsToggleMenuItemFallback(settingKey, label, checked);
+}
+
+function createPortSettingsToggleMenuItemFallback(settingKey, label, checked) {
+  const item = document.createElement("button");
+  item.type = "button";
+  item.className = "codex-helper-port-menu-toggle";
+  item.setAttribute(helperPortCommandAttribute, "toggle-setting");
+  item.setAttribute("data-codex-helper-port-setting-key", settingKey);
+  item.setAttribute("role", "menuitemcheckbox");
+  item.setAttribute("aria-checked", checked ? "true" : "false");
+  const labelSpan = document.createElement("span");
+  labelSpan.className = "codex-helper-port-menu-label";
+  labelSpan.textContent = label;
+  const check = document.createElement("span");
+  check.className = "codex-helper-port-menu-check";
+  check.setAttribute("aria-hidden", "true");
+  if (checked) check.appendChild(createPortActionIcon("check"));
+  item.appendChild(labelSpan);
+  item.appendChild(check);
+  return item;
+}
+
+function createPortMenuRoot() {
   const menu = document.createElement("div");
   menu.setAttribute("data-codex-helper-port-menu", "true");
   menu.setAttribute("role", "menu");
-  menu.appendChild(
-    createPortMenuItem(
-      "edit-mapping",
-      "Edit mapping record",
-      "pencil",
-      button,
-    ),
-  );
-  menu.appendChild(
-    createPortMenuItem(
-      "delete-mapping",
-      "Delete mapping record",
-      "trash",
-      button,
-    ),
-  );
   document.body.appendChild(menu);
-  const rect = button.getBoundingClientRect();
+  return menu;
+}
+
+function positionPortForwardMenu(menu, anchor) {
+  const rect = anchor.getBoundingClientRect();
   const menuRect = menu.getBoundingClientRect();
   const top = Math.min(rect.bottom + 6, window.innerHeight - menuRect.height - 8);
   const left = Math.min(
@@ -1836,17 +2263,112 @@ function openPortForwardRowMenu(button) {
   portForwardMenuRoot = menu;
 }
 
-function portEntryFromCommandButton(button) {
+function positionPortForwardMenuAtPoint(menu, clientX, clientY) {
+  const menuRect = menu.getBoundingClientRect();
+  const top = Math.min(clientY, window.innerHeight - menuRect.height - 8);
+  const left = Math.min(clientX, window.innerWidth - menuRect.width - 8);
+  menu.style.top = `${Math.max(8, top)}px`;
+  menu.style.left = `${Math.max(8, left)}px`;
+  portForwardMenuRoot = menu;
+}
+
+function openPortForwardRowMenu(button) {
+  closePortForwardRowMenu();
+  const row = button.closest("[data-codex-helper-port-row]");
+  if (row instanceof HTMLElement) {
+    row.setAttribute("data-codex-helper-port-row-menu-open", "true");
+    portForwardMenuAnchorRow = row;
+  }
+  const menu = createPortMenuRoot();
+  menu.appendChild(
+    createPortMenuItem(
+      "add-mapping",
+      "Add port mapping record",
+      "plus",
+      button,
+    ),
+  );
+  const remotePort = Number(
+    button.getAttribute("data-codex-helper-port-remote-port") || "",
+  );
+  if (Number.isInteger(remotePort) && remotePort > 0) {
+    menu.appendChild(
+      createPortMenuItem(
+        "edit-mapping",
+        "Edit mapping record",
+        "pencil",
+        button,
+      ),
+    );
+    menu.appendChild(
+      createPortMenuItem(
+        "delete-mapping",
+        "Delete mapping record",
+        "trash",
+        button,
+      ),
+    );
+  }
+  positionPortForwardMenu(menu, button);
+}
+
+function openPortForwardSettingsMenu(button) {
+  closePortForwardRowMenu();
+  portForwardSettingsAnchorButton = button;
+  const menu = createPortMenuRoot();
+  menu.setAttribute("data-codex-helper-port-settings-menu", "true");
+  menu.appendChild(
+    createPortSettingsToggleMenuItem(
+      "portAutoForwardWeb",
+      "Auto-forward detected web ports",
+    ),
+  );
+  menu.appendChild(
+    createPortSettingsToggleMenuItem(
+      "portSameLocalPort",
+      "Use the same local port by default",
+    ),
+  );
+  menu.appendChild(createPortMenuSeparator());
+  menu.appendChild(
+    createPortMenuItem("open-settings", "Helper Settings", "settings", button),
+  );
+  positionPortForwardMenu(menu, button);
+}
+
+function openPortLocalUrlMenu(button, event) {
+  closePortForwardRowMenu();
+  const menu = createPortMenuRoot();
+  menu.appendChild(
+    createPortMenuItem(
+      "open-local-url-system",
+      "Open in default browser",
+      "open",
+      button,
+    ),
+  );
+  menu.appendChild(
+    createPortMenuItem("copy", "Copy local address", "copy", button),
+  );
+  positionPortForwardMenuAtPoint(menu, event.clientX, event.clientY);
+}
+
+function commandContextFromButton(button) {
+  const hostId = button.getAttribute("data-codex-helper-port-host-id") || "";
+  const remotePath =
+    button.getAttribute("data-codex-helper-port-remote-path") || "";
+  const threadId = button.getAttribute("data-codex-helper-port-thread-id") || "";
+  return { hostId, path: remotePath, threadId };
+}
+
+function portEntryFromCommandButton(button, options = {}) {
   const id = button.getAttribute("data-codex-helper-port-id") || "";
   const key = button.getAttribute("data-codex-helper-port-key") || "";
   for (const entry of detectedPorts.values()) {
     if ((id && entry.id === id) || (key && entry.key === key)) return entry;
   }
 
-  const hostId = button.getAttribute("data-codex-helper-port-host-id") || "";
-  const remotePath =
-    button.getAttribute("data-codex-helper-port-remote-path") || "";
-  const threadId = button.getAttribute("data-codex-helper-port-thread-id") || "";
+  const context = commandContextFromButton(button);
   const remotePort = Number(
     button.getAttribute("data-codex-helper-port-remote-port") || "",
   );
@@ -1854,28 +2376,26 @@ function portEntryFromCommandButton(button) {
     button.getAttribute("data-codex-helper-port-local-port") || "",
   );
   if (
-    !hostId ||
-    !remotePath ||
-    !threadId ||
+    !context.hostId ||
+    !context.path ||
+    !context.threadId ||
     !Number.isInteger(remotePort) ||
     remotePort < 1
   ) {
     return null;
   }
   const entry = {
-    key:
-      key ||
-      portKey({ hostId, path: remotePath, threadId }, remotePort, localPort),
+    key: key || portKey(context, remotePort, localPort),
     id,
-    hostId,
-    remotePath,
-    threadId,
+    hostId: context.hostId,
+    remotePath: context.path,
+    threadId: context.threadId,
     remotePort,
     localPort: Number.isInteger(localPort) && localPort > 0 ? localPort : 0,
     status: id ? "active" : "detected",
     lastSeenAt: portTimestamp(),
   };
-  detectedPorts.set(entry.key, entry);
+  if (options.create !== false) detectedPorts.set(entry.key, entry);
   return entry;
 }
 
@@ -1887,6 +2407,227 @@ async function stopPortEntryTunnel(entry) {
   delete entry.localUrl;
 }
 
+function parsePortInput(value) {
+  const port = Number(String(value || "").trim());
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : 0;
+}
+
+function resolvePortMappingDialog(result, value, cleanup) {
+  cleanup();
+  result(value);
+}
+
+async function requestPortMappingInput(options = {}) {
+  closePortForwardRowMenu();
+  closePortForwardDialog();
+  if (portForwardDialogRoot?.isConnected) return null;
+  return new Promise((resolve) => {
+    const dialog = document.createElement("div");
+    dialog.setAttribute("data-codex-helper-port-dialog", "true");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-label", options.title || "Port mapping");
+    dialog.innerHTML = `
+      <div class="codex-helper-port-dialog-panel">
+        <div class="codex-helper-port-dialog-title">${options.title || "Port mapping"}</div>
+        <div class="codex-helper-port-dialog-port-row">
+          <label>
+            <span>Remote port</span>
+            <input data-codex-helper-port-dialog-remote inputmode="numeric" autocomplete="off">
+          </label>
+          <span class="codex-helper-port-dialog-arrow" aria-hidden="true">↔</span>
+          <label>
+            <span>Local port</span>
+            <input data-codex-helper-port-dialog-local inputmode="numeric" autocomplete="off">
+          </label>
+        </div>
+        <div class="codex-helper-port-dialog-error" data-codex-helper-port-dialog-error></div>
+        <div class="codex-helper-port-dialog-actions">
+          <button type="button" data-codex-helper-port-dialog-cancel>Cancel</button>
+          <button type="button" data-codex-helper-port-dialog-submit>${options.submitLabel || "Save"}</button>
+        </div>
+      </div>
+    `;
+    const remoteInput = dialog.querySelector(
+      "[data-codex-helper-port-dialog-remote]",
+    );
+    const localInput = dialog.querySelector(
+      "[data-codex-helper-port-dialog-local]",
+    );
+    const error = dialog.querySelector("[data-codex-helper-port-dialog-error]");
+    if (
+      !(remoteInput instanceof HTMLInputElement) ||
+      !(localInput instanceof HTMLInputElement) ||
+      !(error instanceof HTMLElement)
+    ) {
+      resolve(null);
+      return;
+    }
+    remoteInput.value = options.remotePort ? String(options.remotePort) : "";
+    localInput.value = options.localPort ? String(options.localPort) : "";
+    if (options.lockRemotePort) {
+      remoteInput.readOnly = true;
+      remoteInput.setAttribute("aria-readonly", "true");
+    }
+    const cleanup = () => {
+      dialog.remove();
+      if (portForwardDialogRoot === dialog) portForwardDialogRoot = null;
+    };
+    const submit = () => {
+      const remotePort = parsePortInput(remoteInput.value);
+      const localPort = parsePortInput(localInput.value);
+      if (!remotePort || !localPort) {
+        error.textContent = "Enter valid ports from 1 to 65535.";
+        return;
+      }
+      resolvePortMappingDialog(resolve, { remotePort, localPort }, cleanup);
+    };
+    dialog.addEventListener(
+      "click",
+      (event) => {
+        const target = event.target;
+        if (
+          target === dialog ||
+          target?.closest?.("[data-codex-helper-port-dialog-cancel]")
+        ) {
+          event.preventDefault();
+          resolvePortMappingDialog(resolve, null, cleanup);
+          return;
+        }
+        if (target?.closest?.("[data-codex-helper-port-dialog-submit]")) {
+          event.preventDefault();
+          submit();
+        }
+      },
+      true,
+    );
+    dialog.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          resolvePortMappingDialog(resolve, null, cleanup);
+          return;
+        }
+        if (event.key === "Enter") {
+          event.preventDefault();
+          submit();
+        }
+      },
+      true,
+    );
+    document.body.appendChild(dialog);
+    portForwardDialogRoot = dialog;
+    (options.lockRemotePort ? localInput : remoteInput).focus();
+  });
+}
+
+async function confirmPortMappingDelete(entry) {
+  closePortForwardRowMenu();
+  closePortForwardDialog();
+  if (portForwardDialogRoot?.isConnected) return false;
+  return new Promise((resolve) => {
+    const dialog = document.createElement("div");
+    dialog.setAttribute("data-codex-helper-port-dialog", "true");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-label", "Delete port mapping");
+    dialog.innerHTML = `
+      <div class="codex-helper-port-dialog-panel">
+        <div class="codex-helper-port-dialog-title">Delete port mapping?</div>
+        <div class="codex-helper-port-dialog-message">Remote port ${entry.remotePort} will stop forwarding to localhost:${portLocalPortLabel(entry)}.</div>
+        <div class="codex-helper-port-dialog-actions">
+          <button type="button" data-codex-helper-port-dialog-cancel>Cancel</button>
+          <button type="button" data-codex-helper-port-dialog-delete>Delete</button>
+        </div>
+      </div>
+    `;
+    const cleanup = () => {
+      dialog.remove();
+      if (portForwardDialogRoot === dialog) portForwardDialogRoot = null;
+    };
+    dialog.addEventListener(
+      "click",
+      (event) => {
+        const target = event.target;
+        if (
+          target === dialog ||
+          target?.closest?.("[data-codex-helper-port-dialog-cancel]")
+        ) {
+          event.preventDefault();
+          resolvePortMappingDialog(resolve, false, cleanup);
+          return;
+        }
+        if (target?.closest?.("[data-codex-helper-port-dialog-delete]")) {
+          event.preventDefault();
+          resolvePortMappingDialog(resolve, true, cleanup);
+        }
+      },
+      true,
+    );
+    dialog.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        resolvePortMappingDialog(resolve, false, cleanup);
+      },
+      true,
+    );
+    document.body.appendChild(dialog);
+    portForwardDialogRoot = dialog;
+    const cancel = dialog.querySelector(
+      "[data-codex-helper-port-dialog-cancel]",
+    );
+    if (cancel instanceof HTMLElement) cancel.focus();
+  });
+}
+
+async function addPortMapping(button) {
+  const context = commandContextFromButton(button);
+  if (!context.hostId || !context.path || !context.threadId) return;
+  const input = await requestPortMappingInput({
+    title: "Add port mapping",
+    remotePort: "",
+    localPort: "",
+    submitLabel: "Add",
+  });
+  if (!input) return;
+  const key = portKey(context, input.remotePort, input.localPort);
+  const existing =
+    detectedPorts.get(key) ||
+    detectedEntryForRemotePort(
+      { hostId: context.hostId, path: context.path, threadId: context.threadId },
+      input.remotePort,
+    );
+  const entry =
+    existing ||
+    {
+      key,
+      hostId: context.hostId,
+      remotePath: context.path,
+      threadId: context.threadId,
+      remotePort: input.remotePort,
+      localPort: input.localPort,
+      status: "detected",
+      lastSeenAt: portTimestamp(),
+    };
+  if (
+    existing?.id &&
+    Number.isInteger(existing.localPort) &&
+    existing.localPort > 0 &&
+    existing.localPort !== input.localPort
+  ) {
+    await stopPortEntryTunnel(existing);
+  }
+  entry.localPort = input.localPort;
+  entry.status = "detected";
+  entry.message = "";
+  setDetectedPortEntryKey(entry, key);
+  unsuppressPortMapping(entry);
+  await forwardDetectedPort(entry, "manual");
+}
+
 async function editPortMapping(button) {
   const entry = portEntryFromCommandButton(button);
   if (!entry) return;
@@ -1894,27 +2635,24 @@ async function editPortMapping(button) {
     Number.isInteger(entry.localPort) && entry.localPort > 0
       ? entry.localPort
       : entry.remotePort;
-  const nextLocalPort = Number(
-    window.prompt("Local port", String(currentLocalPort)),
-  );
-  if (
-    !Number.isInteger(nextLocalPort) ||
-    nextLocalPort < 1 ||
-    nextLocalPort > 65535
-  ) {
-    return;
-  }
-  closePortForwardRowMenu();
+  const input = await requestPortMappingInput({
+    title: "Edit port mapping",
+    remotePort: entry.remotePort,
+    localPort: currentLocalPort,
+    lockRemotePort: true,
+    submitLabel: "Save",
+  });
+  if (!input) return;
   unsuppressPortMapping(entry);
   await stopPortEntryTunnel(entry);
   const previousKey = entry.key;
-  entry.localPort = nextLocalPort;
+  entry.localPort = input.localPort;
   entry.status = "detected";
   entry.message = "";
   const nextKey = portKey(
     { hostId: entry.hostId, path: entry.remotePath, threadId: entry.threadId },
     entry.remotePort,
-    nextLocalPort,
+    input.localPort,
   );
   if (previousKey !== nextKey) setDetectedPortEntryKey(entry, nextKey);
   await forwardDetectedPort(entry, "manual");
@@ -1923,9 +2661,9 @@ async function editPortMapping(button) {
 async function deletePortMapping(button) {
   const entry = portEntryFromCommandButton(button);
   if (!entry) return;
+  if (!(await confirmPortMappingDelete(entry))) return;
   const removedId = entry.id || "";
   const removedKey = entry.key || "";
-  closePortForwardRowMenu();
   await stopPortEntryTunnel(entry);
   suppressPortMapping(entry);
   for (const [key, value] of Array.from(detectedPorts.entries())) {
@@ -1945,6 +2683,27 @@ async function deletePortMapping(button) {
   }
   showHelperToast(`Deleted port mapping for ${entry.remotePort}`);
   await refreshPortsPanelIfVisible();
+}
+
+function openPortLocalUrlInCodex(button) {
+  const localUrl = button.getAttribute("data-codex-helper-port-url") || "";
+  if (!localForwardedUrlIsAllowed(localUrl)) {
+    throw new Error("Only local forwarded URLs can be opened");
+  }
+  closePortForwardRowMenu();
+  window.open(localUrl, "_blank", "noopener,noreferrer");
+}
+
+async function openPortLocalUrlInSystem(button) {
+  const localUrl = button.getAttribute("data-codex-helper-port-url") || "";
+  if (!localForwardedUrlIsAllowed(localUrl)) {
+    throw new Error("Only local forwarded URLs can be opened");
+  }
+  closePortForwardRowMenu();
+  const result = await bridge("/url/open-external", { url: localUrl });
+  if (result?.status !== "ok") {
+    throw new Error(result?.message || "Open failed");
+  }
 }
 
 function scheduleRefreshPortsPanel() {
@@ -1978,6 +2737,25 @@ async function refreshPortsPanelIfVisible() {
   if (changed || duplicatesStopped) scheduleRefreshPortsPanel();
 }
 
+async function togglePortForwardSetting(button) {
+  const key = button.getAttribute("data-codex-helper-port-setting-key") || "";
+  if (!(key in featureSettings)) {
+    throw new Error("Unknown port forwarding setting");
+  }
+  const settingsButton = portForwardSettingsAnchorButton?.isConnected
+    ? portForwardSettingsAnchorButton
+    : null;
+  const result = await bridge("/settings/set", { [key]: !featureSettings[key] });
+  if (result?.status !== "ok") {
+    throw new Error(result?.message || "Settings update failed");
+  }
+  applySettings(result);
+  closePortForwardRowMenu();
+  if (settingsButton instanceof HTMLButtonElement) {
+    openPortForwardSettingsMenu(settingsButton);
+  }
+}
+
 async function handlePortCommand(button) {
   const command = button.getAttribute(helperPortCommandAttribute) || "";
   if (
@@ -1985,6 +2763,7 @@ async function handlePortCommand(button) {
       command === "forward" ||
       command === "manual" ||
       command === "show-mapping-menu" ||
+      command === "add-mapping" ||
       command === "edit-mapping" ||
       command === "delete-mapping"
     ) &&
@@ -1994,8 +2773,25 @@ async function handlePortCommand(button) {
   }
   const id = button.getAttribute("data-codex-helper-port-id") || "";
   const localUrl = button.getAttribute("data-codex-helper-port-url") || "";
+  if (command === "show-settings-menu") {
+    openPortForwardSettingsMenu(button);
+    return;
+  }
+  if (command === "toggle-setting") {
+    await togglePortForwardSetting(button);
+    return;
+  }
+  if (command === "open-settings") {
+    closePortForwardRowMenu();
+    showHelperSettingsDialog({ focusSection: "port-forwarding" });
+    return;
+  }
   if (command === "show-mapping-menu") {
     openPortForwardRowMenu(button);
+    return;
+  }
+  if (command === "add-mapping") {
+    await addPortMapping(button);
     return;
   }
   if (command === "edit-mapping") {
@@ -2006,6 +2802,14 @@ async function handlePortCommand(button) {
     await deletePortMapping(button);
     return;
   }
+  if (command === "open-local-url-codex") {
+    openPortLocalUrlInCodex(button);
+    return;
+  }
+  if (command === "open-local-url-system") {
+    await openPortLocalUrlInSystem(button);
+    return;
+  }
   if (command === "open" && localUrl) {
     closePortForwardRowMenu();
     window.open(localUrl, "_blank", "noopener,noreferrer");
@@ -2014,7 +2818,7 @@ async function handlePortCommand(button) {
   if (command === "copy" && localUrl) {
     closePortForwardRowMenu();
     await navigator.clipboard.writeText(localUrl);
-    showHelperToast("Copied port URL");
+    showHelperToast("Copied local address");
     return;
   }
   if (command === "stop" && id) {
@@ -2033,17 +2837,20 @@ async function handlePortCommand(button) {
   if (command === "forward") {
     const entry = detectedPorts.get(id);
     if (!entry) return;
-    const localPort =
-      entry.localPort ||
-      Number(window.prompt("Local port", String(entry.remotePort)));
-    if (!Number.isInteger(localPort) || localPort < 1 || localPort > 65535)
-      return;
+    const input = await requestPortMappingInput({
+      title: "Forward port",
+      remotePort: entry.remotePort,
+      localPort: entry.localPort || entry.remotePort,
+      lockRemotePort: true,
+      submitLabel: "Forward",
+    });
+    if (!input) return;
     const previousKey = entry.key;
-    entry.localPort = localPort;
+    entry.localPort = input.localPort;
     entry.key = portKey(
       { hostId: entry.hostId, path: entry.remotePath, threadId: entry.threadId },
       entry.remotePort,
-      localPort,
+      input.localPort,
     );
     if (previousKey !== entry.key) {
       detectedPorts.delete(previousKey);

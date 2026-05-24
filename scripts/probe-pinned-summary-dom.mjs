@@ -34,27 +34,66 @@ const attached = (await call("Target.attachToTarget", {
 const sessionId = attached.sessionId;
 
 const expression = `(() => {
-  const sources = [...document.querySelectorAll("section")].find(
-    (section) =>
-      section instanceof HTMLElement &&
-      (section.textContent || "").includes("Sources") &&
-      (section.textContent || "").includes("Web search"),
-  );
-  const rows = sources
-    ? [...sources.querySelectorAll("*")].filter(
+  function sectionFor(label) {
+    return [...document.querySelectorAll("section")].find(
+      (section) =>
+        section instanceof HTMLElement &&
+        (section.textContent || "").includes(label),
+    );
+  }
+
+  function rowInfo(row) {
+    if (!(row instanceof HTMLElement)) return null;
+    return {
+      className: String(row.className || "").slice(0, 220),
+      text: (row.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 80),
+      hasAccessory: Boolean(
+        row.querySelector("[class*='summary-panel-row-accessory']"),
+      ),
+      accessoryClass: String(
+        row.querySelector("[class*='summary-panel-row-accessory']")?.className ||
+          "",
+      ).slice(0, 220),
+      html: row.outerHTML.slice(0, 1200),
+    };
+  }
+
+  const environment = sectionFor("Environment");
+  const sources = sectionFor("Sources");
+  const portForward = sectionFor("Port Forward");
+
+  const envRows = environment
+    ? [...environment.querySelectorAll("*")].filter(
         (node) =>
           node instanceof HTMLElement &&
           node.className &&
           String(node.className).includes("summary-panel-row"),
       )
     : [];
-  const row = rows.find((node) => (node.textContent || "").includes("Web search"));
+
+  const envList =
+    environment?.querySelector("motion.div, div.flex.flex-col.gap-px.px-4") ||
+    environment?.querySelector("motion.div, div.relative.z-0.overflow-hidden > div");
+
   return {
-    sectionClass: sources?.className || "",
-    headerHtml: sources?.querySelector("header")?.outerHTML?.slice(0, 500) || "",
-    listClass: row?.parentElement?.className || "",
-    rowHtml: row?.outerHTML?.slice(0, 900) || "",
-    rowCount: rows.length,
+    environment: {
+      sectionClass: environment?.className || "",
+      listClass: envList?.className || "",
+      listHtml: envList?.outerHTML?.slice(0, 900) || "",
+      rows: envRows.slice(0, 6).map(rowInfo),
+    },
+    sources: {
+      sectionClass: sources?.className || "",
+      row: rowInfo(
+        sources?.querySelector("[class*='summary-panel-row']") || null,
+      ),
+    },
+    portForward: {
+      sectionClass: portForward?.className || "",
+      row: rowInfo(
+        portForward?.querySelector("[class*='summary-panel-row']") || null,
+      ),
+    },
   };
 })()`;
 
