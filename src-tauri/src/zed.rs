@@ -470,6 +470,9 @@ pub fn fallback_open_request_response(_payload: &Value) -> Value {
 
 pub fn resolve_ssh_target_response(payload: &Value) -> Value {
     let host_id = string_value(payload.get("hostId"));
+    if host_id.is_empty() {
+        return json!({"status": "failed", "message": "Remote host id is required"});
+    }
     match resolve_ssh_target_for_host_id(&host_id, None) {
         Ok(target) => json!({
             "status": "ok",
