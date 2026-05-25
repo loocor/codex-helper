@@ -147,6 +147,12 @@ function installHelperStyles() {
       [${helperNativeSettingsPageAttribute}] .codex-helper-settings-compact-text {
         min-width: 0;
         flex: 1 1 auto;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-settings-compact-title {
+        min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -154,7 +160,10 @@ function installHelperStyles() {
         color: inherit;
       }
       [${helperNativeSettingsPageAttribute}] .codex-helper-settings-compact-meta {
-        flex-shrink: 0;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
         font-size: 12px;
         color: color-mix(in srgb, currentColor 55%, transparent);
       }
@@ -294,6 +303,31 @@ function installHelperStyles() {
       [${helperPageAttribute}] [data-codex-helper-backups] {
         display: contents;
       }
+      .codex-helper-chat-search {
+        padding: 8px 12px;
+        border-top: 0.5px solid color-mix(in srgb, currentColor 10%, transparent);
+      }
+      .codex-helper-chat-search-input {
+        width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+        border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+        border-radius: 6px;
+        padding: 7px 9px;
+        background: color-mix(in srgb, currentColor 4%, transparent);
+        color: inherit;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        font-size: 12px;
+        line-height: 1.35;
+      }
+      .codex-helper-chat-search-input:focus-visible {
+        outline: 2px solid var(--color-token-focus-border, rgb(48, 145, 255));
+        outline-offset: 1px;
+      }
+      .codex-helper-chat-search-input:disabled {
+        cursor: not-allowed;
+        opacity: 0.6;
+      }
       [${helperPageAttribute}] .codex-helper-action {
         border-color: transparent;
       }
@@ -348,6 +382,12 @@ function installHelperStyles() {
       [${helperPageAttribute}] .codex-helper-settings-compact-text {
         min-width: 0;
         flex: 1 1 auto;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      [${helperPageAttribute}] .codex-helper-settings-compact-title {
+        min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -355,7 +395,10 @@ function installHelperStyles() {
         color: inherit;
       }
       [${helperPageAttribute}] .codex-helper-settings-compact-meta {
-        flex-shrink: 0;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
         font-size: 12px;
         color: color-mix(in srgb, currentColor 55%, transparent);
       }

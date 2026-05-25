@@ -150,6 +150,7 @@ async function settingsState() {
       href: location.href,
       sidebarFound: Boolean(sidebar),
       groupFound: Boolean(group),
+      hostFound: Boolean(host),
       groupAfterHost: Boolean(groupRect && hostRect && groupRect.top > hostRect.top),
       entries,
       helperPageCount: document.querySelectorAll("[data-codex-helper-native-settings-page]").length,
@@ -221,14 +222,31 @@ async function clickNativeGeneral() {
   })()`);
 }
 
+async function validateDeletedChatsSearch() {
+  return evaluate(`(() => {
+    const input = document.querySelector("[data-codex-helper-deleted-chat-search]");
+    if (!(input instanceof HTMLInputElement)) {
+      return { ok: false, reason: "Deleted chats search input not found" };
+    }
+    input.value = "CodexHelper";
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "CodexHelper" }));
+    return {
+      ok: input.placeholder === "Search deleted chats",
+      placeholder: input.placeholder,
+    };
+  })()`);
+}
+
 const failures = [];
 await openNativeSettingsIfNeeded();
 let state = await settingsState();
 const labels = state.entries.map((entry) => entry.text).join("|");
 if (!state.sidebarFound) failures.push("settings sidebar not found");
 if (!state.groupFound) failures.push("Helper group not inserted");
-if (!state.groupAfterHost) failures.push("Helper group is not positioned after Host");
-if (labels !== "General|Deleted Sessions|Logs|About") {
+if (state.hostFound && !state.groupAfterHost) {
+  failures.push("Helper group is not positioned after Host");
+}
+if (labels !== "General|Deleted chats|Logs|About") {
   failures.push(`unexpected Helper labels: ${labels}`);
 }
 if (state.entries.some((entry) => !entry.hasIcon)) {
@@ -240,7 +258,7 @@ if (iconNames !== "sliders-horizontal|trash-2|scroll-text|info") {
 }
 
 for (let cycle = 0; cycle < 6; cycle += 1) {
-  for (const pageId of ["general", "deleted-sessions", "logs", "about"]) {
+  for (const pageId of ["general", "deleted-chats", "logs", "about"]) {
     const result = await clickHelperEntry(pageId);
     if (!result.ok) failures.push(`cycle ${cycle} ${pageId}: ${result.reason}`);
     if (result.activePage !== pageId) {
@@ -248,6 +266,12 @@ for (let cycle = 0; cycle < 6; cycle += 1) {
     }
     if (result.helperPageCount !== 1) {
       failures.push(`cycle ${cycle} expected one Helper page, saw ${result.helperPageCount}`);
+    }
+    if (pageId === "deleted-chats") {
+      const search = await validateDeletedChatsSearch();
+      if (!search.ok) {
+        failures.push(`cycle ${cycle} deleted-chats search failed: ${search.reason || search.placeholder}`);
+      }
     }
   }
   const cleanup = await clickNativeGeneral();

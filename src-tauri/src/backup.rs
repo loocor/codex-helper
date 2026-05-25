@@ -1,5 +1,4 @@
 use anyhow::Context;
-use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::json;
 use std::fs;
@@ -7,12 +6,15 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+use crate::chat_time::{system_time_rfc3339, thread_time_from_json};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DeletedSessionBackup {
     pub token: String,
     pub session_id: String,
     pub title: String,
     pub cwd: Option<String>,
+    pub time: Option<String>,
     pub deleted_at: String,
     pub backup_path: String,
 }
@@ -145,16 +147,17 @@ fn deleted_session_backup_from_payload(
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string);
+    let time = thread.and_then(thread_time_from_json);
     let deleted_at = modified
-        .map(DateTime::<Utc>::from)
-        .unwrap_or_else(|| DateTime::<Utc>::from(SystemTime::UNIX_EPOCH))
-        .to_rfc3339();
+        .map(system_time_rfc3339)
+        .unwrap_or_else(|| system_time_rfc3339(SystemTime::UNIX_EPOCH));
 
     Ok(DeletedSessionBackup {
         token: token.to_string(),
         session_id: session_id.to_string(),
         title,
         cwd,
+        time,
         deleted_at,
         backup_path: path.to_string_lossy().to_string(),
     })
@@ -178,6 +181,7 @@ mod tests {
                         "id": "thread-1",
                         "title": "Deleted Thread",
                         "cwd": "/repo",
+                        "updated_at_ms": 2000,
                         "rollout_path": "/tmp/rollout.jsonl"
                     }]
                 }),
@@ -191,6 +195,10 @@ mod tests {
         assert_eq!(backups[0].session_id, "thread-1");
         assert_eq!(backups[0].title, "Deleted Thread");
         assert_eq!(backups[0].cwd.as_deref(), Some("/repo"));
+        assert_eq!(
+            backups[0].time.as_deref(),
+            Some("1970-01-01T00:00:02+00:00")
+        );
     }
 
     #[test]

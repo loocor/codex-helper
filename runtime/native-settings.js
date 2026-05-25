@@ -17,11 +17,11 @@ function nativeHelperSettingsPageDefinitions() {
       hidden: true,
     },
     {
-      id: "deleted-sessions",
-      label: "Deleted Sessions",
+      id: "deleted-chats",
+      label: "Deleted chats",
       standardIconName: "trash-2",
       description:
-        "Review deleted local session backups and restore them when needed.",
+        "Search deleted local chat backups and restore them when needed.",
     },
     {
       id: "logs",
@@ -511,7 +511,7 @@ function nativeSettingsPageContent(pageId) {
       ${nativeSettingsListFooter("data-codex-helper-scripts-status")}
     `);
   }
-  if (pageId === "deleted-sessions") {
+  if (pageId === "deleted-chats") {
     return nativeSettingsListSection(
       nativeSettingsPathHeader(
         "data-codex-helper-backups-path",
@@ -519,6 +519,9 @@ function nativeSettingsPageContent(pageId) {
         "refresh",
       ),
       nativeSettingsPanel(`
+        <div class="codex-helper-chat-search">
+          <input class="codex-helper-chat-search-input" data-codex-helper-deleted-chat-search type="search" placeholder="Search deleted chats" autocomplete="off" spellcheck="false" aria-label="Search deleted chats">
+        </div>
         <div class="codex-helper-settings-scroll" data-codex-helper-backups></div>
         ${nativeSettingsListFooter("data-codex-helper-backups-status")}
       `),

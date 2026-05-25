@@ -3,6 +3,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use crate::cdp::{list_targets, pick_codex_page_target, CdpTarget};
+use crate::chat_search::search_chats_response;
 use crate::logging::DiagnosticLogger;
 use crate::ports::{
     discover_remote_listening_ports, discovery_request_from_payload, request_from_payload,
@@ -71,6 +72,7 @@ pub async fn handle_bridge_request(ctx: BridgeContext, path: &str, payload: Valu
         "/undo" => undo_delete_response(&ctx.state_dir, &payload),
         "/backups/list" => deleted_sessions_response(&ctx.state_dir),
         "/backups/restore" => restore_deleted_session_response(&ctx.state_dir, &payload),
+        "/chats/search" => search_chats_response(&ctx.state_dir, &payload),
         "/export-markdown" => export_markdown_response(&payload),
         "/move-thread-workspace" => move_thread_workspace_response(&ctx.state_dir, &payload),
         "/ports/list" => ctx.port_manager.list().await,
