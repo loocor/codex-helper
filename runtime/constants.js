@@ -36,6 +36,7 @@ let helperContentHost = null;
 let helperContentStash = null;
 let pendingSessionMenuContext = null;
 let sessionContextMenuMapRestore = null;
+let sessionContextMenuReplayInFlight = false;
 let pendingPortScan = 0;
 let maintainPortsPanelTimer = 0;
 let refreshPortsPanelTimer = 0;

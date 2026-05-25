@@ -64,6 +64,11 @@
     }, 2500);
   }
 
+  function clearPendingSessionMenuContext() {
+    pendingSessionMenuContext = null;
+    if (sessionContextMenuMapRestore) sessionContextMenuMapRestore();
+  }
+
   function displayProjectName(path) {
     if (!path) return "Project";
     const normalized = path.replace(/\\/g, "/");
@@ -371,25 +376,37 @@
       !Array.isArray(items) ||
       !context?.row?.isConnected ||
       !context?.ref?.session_id ||
-      Date.now() - context.openedAt >= 2500 ||
+      Date.now() - context.openedAt >= 2500
+    ) {
+      clearPendingSessionMenuContext();
+      return;
+    }
+    if (
       hasHelperSessionMenuItem(items) ||
       !looksLikeCodexSessionMenuItems(items) ||
       !hasNativeSessionMenuLabels(items)
     ) {
+      if (hasHelperSessionMenuItem(items)) clearPendingSessionMenuContext();
       return;
     }
     const actions = enabledSessionActions();
     if (actions.length > 0)
       items.push(...buildHelperSessionMenuModelItems(actions, context));
-    pendingSessionMenuContext = null;
-    if (sessionContextMenuMapRestore) sessionContextMenuMapRestore();
+    clearPendingSessionMenuContext();
   }
 
   function installSessionContextMenuBridge() {
     if (sessionContextMenuMapRestore) return;
     const originalArrayMap = Array.prototype.map;
     const patchedArrayMap = function patchedArrayMap(callback, thisArg) {
-      appendHelperSessionMenuItems(this);
+      try {
+        appendHelperSessionMenuItems(this);
+      } catch (error) {
+        clearPendingSessionMenuContext();
+        logDiagnostic("session_menu_patch_failed", {
+          error: error?.message || String(error),
+        });
+      }
       return originalArrayMap.call(this, callback, thisArg);
     };
     Object.defineProperty(Array.prototype, "map", {

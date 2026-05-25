@@ -13,7 +13,9 @@ test("session context menu patches Codex native menu instead of rebuilding it", 
   expect(source).toContain("hasNativeSessionMenuLabels(items)");
   expect(source).toContain("nativeLabel: labels[action] || action");
   expect(source).not.toContain("label: labels[action] || action");
-  expect(source).toContain("pendingSessionMenuContext = null;\n    if (sessionContextMenuMapRestore) sessionContextMenuMapRestore();");
+  expect(source).toMatch(
+    /pendingSessionMenuContext = null;\s*if \(sessionContextMenuMapRestore\) sessionContextMenuMapRestore\(\);/,
+  );
   expect(source).toContain("handleSessionAction(action, context.row, context.ref)");
   expect(source).not.toContain("buildHelperSessionNativeMenuItems");
   expect(source).not.toContain("buildCodexSessionNativeMenuItems");
@@ -23,11 +25,31 @@ test("session context menu patches Codex native menu instead of rebuilding it", 
 });
 
 test("session context menu hook is scoped to a pending right click", () => {
-  expect(source).toContain("installSessionContextMenuBridge();\n    pendingSessionMenuContext = {");
+  expect(source).toMatch(
+    /installSessionContextMenuBridge\(\);\s*pendingSessionMenuContext = \{/,
+  );
   expect(source).toContain("const openedAt = Date.now();");
   expect(source).toContain("pendingSessionMenuContext?.openedAt === openedAt");
   expect(source).toContain("if (sessionContextMenuMapRestore) sessionContextMenuMapRestore();");
-  expect(source).not.toContain("installSessionContextMenuBridge();\ninstallHelperStyles();");
+  expect(source).not.toMatch(
+    /installSessionContextMenuBridge\(\);\s*installHelperStyles\(\);/,
+  );
+});
+
+test("session context menu waits for initial settings before replaying", () => {
+  expect(source).toContain("function replaySessionContextMenu(event, target)");
+  expect(source).toContain("!featureSettingsLoaded");
+  expect(source).toContain("sessionContextMenuReplayInFlight");
+  expect(source).toContain("event.preventDefault()");
+  expect(source).toContain("event.stopImmediatePropagation()");
+  expect(source).toMatch(/refreshFeatureSettings\(\)[\s\S]*replaySessionContextMenu/);
+});
+
+test("session context menu map hook restores on terminal paths", () => {
+  expect(source).toContain("clearPendingSessionMenuContext()");
+  expect(source).toMatch(/hasHelperSessionMenuItem\(items\)[\s\S]*clearPendingSessionMenuContext\(\);/);
+  expect(source).toMatch(/try \{[\s\S]*appendHelperSessionMenuItems\(this\);[\s\S]*\} catch \(error\) \{/);
+  expect(source).toContain('logDiagnostic("session_menu_patch_failed"');
 });
 
 test("session context menu does not reconstruct Codex native action ids", () => {
