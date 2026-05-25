@@ -2,6 +2,7 @@ mod app;
 mod backup;
 mod bridge;
 mod cdp;
+pub mod chat_search;
 mod codex_control;
 mod debug_port;
 mod launcher;

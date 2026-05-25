@@ -1,3 +1,4 @@
+use codex_helper::chat_search::search_chats_response;
 use codex_helper::session_actions::{
     delete_session_response, deleted_sessions_response, export_markdown_response,
     move_thread_workspace_response, restore_deleted_session_response, undo_delete_response,
@@ -33,6 +34,7 @@ fn main() {
         "/undo" => undo_delete_response(&state_dir, &payload),
         "/backups/list" => deleted_sessions_response(&state_dir),
         "/backups/restore" => restore_deleted_session_response(&state_dir, &payload),
+        "/chats/search" => search_chats_response(&state_dir, &payload),
         "/export-markdown" => export_markdown_response(&payload),
         "/move-thread-workspace" => move_thread_workspace_response(&state_dir, &payload),
         _ => json!({

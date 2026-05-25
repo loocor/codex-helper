@@ -13,6 +13,7 @@ pub struct DeletedSessionBackup {
     pub session_id: String,
     pub title: String,
     pub cwd: Option<String>,
+    pub time: Option<String>,
     pub deleted_at: String,
     pub backup_path: String,
 }
@@ -145,6 +146,7 @@ fn deleted_session_backup_from_payload(
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string);
+    let time = thread.and_then(chat_time_from_thread);
     let deleted_at = modified
         .map(DateTime::<Utc>::from)
         .unwrap_or_else(|| DateTime::<Utc>::from(SystemTime::UNIX_EPOCH))
@@ -155,9 +157,35 @@ fn deleted_session_backup_from_payload(
         session_id: session_id.to_string(),
         title,
         cwd,
+        time,
         deleted_at,
         backup_path: path.to_string_lossy().to_string(),
     })
+}
+
+fn chat_time_from_thread(thread: &serde_json::Value) -> Option<String> {
+    thread
+        .get("updated_at_ms")
+        .and_then(serde_json::Value::as_i64)
+        .or_else(|| {
+            thread
+                .get("updated_at")
+                .and_then(serde_json::Value::as_i64)
+                .map(|value| value * 1000)
+        })
+        .or_else(|| {
+            thread
+                .get("created_at_ms")
+                .and_then(serde_json::Value::as_i64)
+        })
+        .or_else(|| {
+            thread
+                .get("created_at")
+                .and_then(serde_json::Value::as_i64)
+                .map(|value| value * 1000)
+        })
+        .and_then(DateTime::<Utc>::from_timestamp_millis)
+        .map(|date| date.to_rfc3339())
 }
 
 #[cfg(test)]
@@ -178,6 +206,7 @@ mod tests {
                         "id": "thread-1",
                         "title": "Deleted Thread",
                         "cwd": "/repo",
+                        "updated_at_ms": 2000,
                         "rollout_path": "/tmp/rollout.jsonl"
                     }]
                 }),
@@ -191,6 +220,10 @@ mod tests {
         assert_eq!(backups[0].session_id, "thread-1");
         assert_eq!(backups[0].title, "Deleted Thread");
         assert_eq!(backups[0].cwd.as_deref(), Some("/repo"));
+        assert_eq!(
+            backups[0].time.as_deref(),
+            Some("1970-01-01T00:00:02+00:00")
+        );
     }
 
     #[test]

@@ -20,6 +20,7 @@ const RUST_BRIDGE_PATHS = new Set([
 	"/undo",
 	"/backups/list",
 	"/backups/restore",
+	"/chats/search",
 ]);
 
 export function isRustBridgePath(path: string): boolean {
