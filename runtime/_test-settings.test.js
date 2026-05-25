@@ -83,16 +83,104 @@ test("settings page groups options by feature area", () => {
   expect(source).not.toContain('">Other</div>');
 });
 
-test("settings dialog close control uses icon button", () => {
-  expect(source).toContain('data-codex-helper-dialog-close aria-label="Close"');
-  expect(source).toContain('codex-helper-settings-dialog-close');
-  expect(source).not.toContain("data-codex-helper-dialog-close>Close</button>");
+test("account menu no longer exposes helper settings dialog entry", () => {
+  expect(source).toContain("Helper Settings");
+  expect(source).not.toContain("data-codex-helper-account-settings-entry");
+  expect(source).not.toContain("data-codex-helper-settings-dialog");
+  expect(source).not.toContain("function showHelperSettingsDialog(");
+  expect(source).not.toContain("installAccountSettingsMenuItems");
 });
 
-test("account menu exposes helper settings dialog entry", () => {
-  expect(source).toContain("Helper Settings");
-  expect(source).toContain("data-codex-helper-account-settings-entry");
-  expect(source).toContain("data-codex-helper-settings-dialog");
+test("native settings exposes a dedicated Helper group", () => {
+  expect(source).toContain("data-codex-helper-native-settings-group");
+  expect(source).toContain("data-codex-helper-native-settings-entry");
+  expect(source).toContain("data-codex-helper-native-settings-page");
+  expect(source).toContain('label: "User Scripts"');
+  expect(source).toContain("hidden: true");
+  expect(source).toContain('label: "Deleted Sessions"');
+  expect(source).toContain('label: "Logs"');
+  expect(source).toContain('label: "About"');
+  expect(source).toContain("installNativeHelperSettingsGroup");
+  expect(source).toContain("heading-base text-token-text-primary");
+  expect(source).toContain("codex-helper-native-settings-page-description");
+});
+
+test("native settings pages follow worktree-style sparse list layout", () => {
+  expect(source).toContain("nativeSettingsPathHeader");
+  expect(source).toContain("nativeSettingsListFooter");
+  expect(source).toContain("codex-helper-native-settings-icon-button");
+  expect(source).toContain("data-codex-helper-scripts-path");
+  expect(source).toContain("data-codex-helper-backups-path");
+  expect(source).toContain("data-codex-helper-log-status");
+  expect(source).toContain("codex-helper-native-settings-log-panel");
+  expect(source).toContain('"open-log-file": "/diagnostics/reveal-log"');
+  expect(source).not.toContain("codex-helper-native-settings-list-status");
+  expect(source).not.toContain('nativeSettingsSection("User Scripts"');
+  expect(source).not.toContain('nativeSettingsSection("Deleted Sessions"');
+  expect(source).not.toContain('nativeSettingsSection("Logs"');
+});
+
+test("native settings sidebar uses contextual helper icons", () => {
+  expect(source).toContain("nativeSettingsStandardIconSvg");
+  expect(source).toContain("setNativeSettingsEntryIcon");
+  expect(source).toContain("codex-helper-native-settings-sidebar-icon");
+  expect(source).toContain('data-lucide="${iconName}"');
+  expect(source).toContain('standardIconName: "sliders-horizontal"');
+  expect(source).toContain('standardIconName: "file-code-2"');
+  expect(source).toContain('standardIconName: "trash-2"');
+  expect(source).toContain('standardIconName: "scroll-text"');
+  expect(source).toContain('standardIconName: "info"');
+  expect(source).toContain('case "external-link"');
+});
+
+test("native settings about page is independent from general", () => {
+  expect(source).toContain('pageId === "about"');
+  expect(source).toContain("Codex Helper");
+  expect(source).toContain("Last updated");
+  expect(source).toContain("A local runtime helper for Codex settings");
+  expect(source).toContain("Project repository");
+  expect(source).not.toContain('nativeSettingsExternalLinkRow(\n        "Project repository"');
+});
+
+test("native settings surface has independent ownership markers", () => {
+  expect(source).toContain("helperNativeSettingsPageAttribute");
+  expect(source).toContain("helperNativeSettingsGroupAttribute");
+  expect(source).toContain("helperNativeSettingsContentHostAttribute");
+  expect(source).toContain("clearNativeHelperSettingsPage");
+  expect(source).toContain("stashNativeSettingsContent");
+  expect(source).toContain("restoreNativeSettingsContent");
+  expect(source).toContain("findNativeSettingsContentRoot");
+  expect(source).toContain("findNativeSettingsScrollContentRoot");
+});
+
+test("native settings open failures surface explicit errors", () => {
+  expect(source).toContain('throw new Error("Native Settings sidebar not found")');
+  expect(source).toContain('throw new Error("Native Settings content root not found")');
+  expect(source).toContain('throw new Error("Helper settings group could not be installed")');
+  expect(source).toContain('logDiagnostic("settings_open_failed"');
+  expect(source).not.toContain('if (!openNativeHelperSettingsPage(pageId || "general"))');
+});
+
+test("native settings opener can use an existing Settings menu item or trigger candidates", () => {
+  expect(source).toContain("function nativeSettingsMenuTriggerCandidates(");
+  expect(source).toContain("function nativeSettingsMenuTriggerScore(");
+  expect(source).toContain("function isNativeSettingsAccountMenu(");
+  expect(source).toContain("function nativeSettingsAccountMenuCandidates(");
+  expect(source).toContain("const existingMenuItem = findNativeSettingsMenuItem()");
+  expect(source).toContain("for (const trigger of nativeSettingsMenuTriggerCandidates())");
+  expect(source).toContain('node.hasAttribute("aria-haspopup")');
+  expect(source).toContain('label.includes("account")');
+  expect(source).toContain('label.includes("profile")');
+  expect(source).toContain('text.includes("Usage")');
+  expect(source).toContain('text.includes("Log out")');
+  expect(source).toContain("closeNativeSettingsCandidateMenus()");
+});
+
+test("standalone helper settings dialog is not bundled", () => {
+  expect(source).not.toContain("function showHelperSettingsDialog(");
+  expect(source).not.toContain("helperDialogRoot = renderHelperPage(body,");
+  expect(source).not.toContain("pageAttribute: helperDialogPageAttribute");
+  expect(source).not.toContain("helperDialogRoot = renderNativeHelperSettingsPage");
 });
 
 test("startup does not eagerly mount inline General settings page", () => {

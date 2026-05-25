@@ -1,5 +1,5 @@
 // Injected stylesheet for Helper UI
-// biome-ignore-all lint/correctness/noUnusedVariables: called from bootstrap.js, account.js, and sessions.js in the bundled runtime
+// biome-ignore-all lint/correctness/noUnusedVariables: called from bootstrap.js and sessions.js in the bundled runtime
 function installHelperStyles() {
   let style = document.getElementById("codex-helper-runtime-style");
   if (!(style instanceof HTMLStyleElement)) {
@@ -8,7 +8,8 @@ function installHelperStyles() {
     document.head.appendChild(style);
   }
   style.textContent = `
-      [${helperEntryAttribute}][data-active="true"] {
+      [${helperEntryAttribute}][data-active="true"],
+      [${helperNativeSettingsEntryAttribute}][data-active="true"] {
         background: color-mix(in srgb, currentColor 10%, transparent) !important;
       }
       [data-codex-helper-muted-selected="true"] {
@@ -21,6 +22,264 @@ function installHelperStyles() {
       [${helperContentHostAttribute}][data-codex-helper-active="true"] {
         min-height: 0 !important;
         overflow: auto !important;
+      }
+      [${helperNativeSettingsContentHostAttribute}][data-codex-helper-active="true"] > :not([${helperNativeSettingsPageAttribute}]) {
+        display: none !important;
+      }
+      [${helperNativeSettingsContentHostAttribute}][data-codex-helper-active="true"] {
+        min-height: 0 !important;
+      }
+      [${helperNativeSettingsGroupAttribute}] {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        margin-top: 18px;
+      }
+      [${helperNativeSettingsGroupAttribute}] .codex-helper-native-settings-group-label {
+        padding: 4px 10px;
+        font-size: 12px;
+        color: color-mix(in srgb, currentColor 55%, transparent);
+      }
+      [${helperNativeSettingsGroupAttribute}] .codex-helper-native-settings-sidebar-icon {
+        width: 16px;
+        height: 16px;
+        flex: 0 0 16px;
+      }
+      [${helperNativeSettingsPageAttribute}] {
+        box-sizing: border-box;
+        display: block;
+        width: 100%;
+        min-height: 100%;
+        color: inherit;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] {
+        height: 100%;
+        min-height: 0;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-page-inner {
+        max-width: 42rem;
+        margin: 0 auto;
+        min-height: 100%;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-page-inner {
+        height: 100%;
+        min-height: 0;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-page-content {
+        padding-top: var(--padding-panel, 20px);
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-page-content {
+        flex: 1 1 auto;
+        min-height: 0;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-page-description {
+        line-height: 1.45;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-panel {
+        background-color: var(--color-background-panel, var(--color-token-bg-fog));
+      }
+      [${helperNativeSettingsPageAttribute}] [data-codex-helper-backups] {
+        display: contents;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-action {
+        border-color: transparent;
+      }
+      [${helperNativeSettingsPageAttribute}] a.codex-helper-external-link {
+        text-decoration: none;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-switch {
+        position: relative;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-switch input {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+        pointer-events: none;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-switch input:focus-visible + span {
+        outline: 2px solid var(--color-token-focus-border, rgb(48, 145, 255));
+        outline-offset: 2px;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-switch input:checked + span {
+        background-color: var(--color-token-charts-blue, rgb(48, 145, 255));
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-switch input:checked + span > span {
+        transform: translateX(14px);
+      }
+      [${helperNativeSettingsPageAttribute}] pre[data-codex-helper-log] {
+        margin: 0;
+        padding: 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-settings-scroll {
+        max-height: min(420px, 52vh);
+        overflow: auto;
+        min-height: 0;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-settings-scroll {
+        max-height: none;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-log-panel {
+        flex: 1 1 auto;
+        min-height: 0;
+        height: clamp(360px, calc(100vh - 260px), 900px);
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] pre[data-codex-helper-log] {
+        flex: 1 1 auto;
+        min-height: 0;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-settings-compact-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-width: 0;
+        padding: 8px 12px;
+        border-top: 0.5px solid color-mix(in srgb, currentColor 10%, transparent);
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-settings-compact-row:first-child {
+        border-top: 0;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-settings-compact-text {
+        min-width: 0;
+        flex: 1 1 auto;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 13px;
+        color: inherit;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-settings-compact-meta {
+        flex-shrink: 0;
+        font-size: 12px;
+        color: color-mix(in srgb, currentColor 55%, transparent);
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-settings-scroll-empty {
+        padding: 12px;
+        font-size: 13px;
+        color: color-mix(in srgb, currentColor 55%, transparent);
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-settings-section-heading {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 0 2px;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-settings-section-title {
+        padding: 0;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-list-section {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        min-width: 0;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-section {
+        flex: 1 1 auto;
+        min-height: 0;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-list-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        min-width: 0;
+        padding: 0 4px;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-path-line {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+        flex: 1 1 auto;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-path {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+        font-size: 13px;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-icon-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 28px;
+        width: 28px;
+        height: 28px;
+        border: 0;
+        border-radius: 8px;
+        padding: 0;
+        background: transparent;
+        color: color-mix(in srgb, currentColor 62%, transparent);
+        cursor: pointer;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-icon-button:hover,
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-icon-button:focus-visible {
+        background: color-mix(in srgb, currentColor 8%, transparent);
+        color: inherit;
+        outline: none;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-icon-button svg {
+        width: 14px;
+        height: 14px;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-list-footer {
+        min-height: 28px;
+        padding: 7px 12px 8px;
+        border-top: 0.5px solid color-mix(in srgb, currentColor 10%, transparent);
+        text-align: left;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-about-header,
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-about-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-width: 0;
+        padding: 12px;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-about-hero {
+        justify-content: flex-start;
+        padding: 0;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-about-row {
+        border-top: 0.5px solid color-mix(in srgb, currentColor 10%, transparent);
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-about-row:first-child {
+        border-top: 0;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-about-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 32px;
+        width: 32px;
+        height: 32px;
+        border-radius: 9px;
+        opacity: 0.75;
+        transition: opacity 160ms ease-out;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-about-icon:hover {
+        opacity: 1;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-about-icon svg {
+        width: 32px;
+        height: 32px;
+        display: block;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-about-logo {
+        border-radius: 9px;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-about-name {
+        font-size: 15px;
+        font-weight: 600;
       }
       [${helperPageAttribute}] {
         display: flex;
@@ -38,8 +297,7 @@ function installHelperStyles() {
       [${helperPageAttribute}] .codex-helper-action {
         border-color: transparent;
       }
-      [${helperPageAttribute}] a.codex-helper-external-link,
-      [${helperDialogPageAttribute}] a.codex-helper-external-link {
+      [${helperPageAttribute}] a.codex-helper-external-link {
         text-decoration: none;
       }
       [${helperPageAttribute}] .codex-helper-switch {
@@ -62,8 +320,7 @@ function installHelperStyles() {
       [${helperPageAttribute}] .codex-helper-switch input:checked + span > span {
         transform: translateX(14px);
       }
-      [${helperPageAttribute}] pre[data-codex-helper-log],
-      [${helperDialogPageAttribute}] pre[data-codex-helper-log] {
+      [${helperPageAttribute}] pre[data-codex-helper-log] {
         margin: 0;
         padding: 12px;
         white-space: pre-wrap;
@@ -71,14 +328,12 @@ function installHelperStyles() {
         font-size: 12px;
         line-height: 1.45;
       }
-      [${helperPageAttribute}] .codex-helper-settings-scroll,
-      [${helperDialogPageAttribute}] .codex-helper-settings-scroll {
+      [${helperPageAttribute}] .codex-helper-settings-scroll {
         max-height: 160px;
         overflow: auto;
         min-height: 0;
       }
-      [${helperPageAttribute}] .codex-helper-settings-compact-row,
-      [${helperDialogPageAttribute}] .codex-helper-settings-compact-row {
+      [${helperPageAttribute}] .codex-helper-settings-compact-row {
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -87,12 +342,10 @@ function installHelperStyles() {
         padding: 8px 12px;
         border-top: 0.5px solid color-mix(in srgb, currentColor 10%, transparent);
       }
-      [${helperPageAttribute}] .codex-helper-settings-compact-row:first-child,
-      [${helperDialogPageAttribute}] .codex-helper-settings-compact-row:first-child {
+      [${helperPageAttribute}] .codex-helper-settings-compact-row:first-child {
         border-top: 0;
       }
-      [${helperPageAttribute}] .codex-helper-settings-compact-text,
-      [${helperDialogPageAttribute}] .codex-helper-settings-compact-text {
+      [${helperPageAttribute}] .codex-helper-settings-compact-text {
         min-width: 0;
         flex: 1 1 auto;
         overflow: hidden;
@@ -101,40 +354,27 @@ function installHelperStyles() {
         font-size: 13px;
         color: inherit;
       }
-      [${helperPageAttribute}] .codex-helper-settings-compact-meta,
-      [${helperDialogPageAttribute}] .codex-helper-settings-compact-meta {
+      [${helperPageAttribute}] .codex-helper-settings-compact-meta {
         flex-shrink: 0;
         font-size: 12px;
         color: color-mix(in srgb, currentColor 55%, transparent);
       }
-      [${helperPageAttribute}] .codex-helper-settings-scroll-empty,
-      [${helperDialogPageAttribute}] .codex-helper-settings-scroll-empty {
+      [${helperPageAttribute}] .codex-helper-settings-scroll-empty {
         padding: 12px;
         font-size: 13px;
         color: color-mix(in srgb, currentColor 55%, transparent);
       }
-      [${helperDialogPageAttribute}] {
-        display: flex;
-        flex-direction: column;
-        color: inherit;
-      }
-      [${helperDialogPageAttribute}] .codex-helper-panel {
-        background-color: var(--color-background-panel, var(--color-token-bg-fog));
-      }
-      [${helperPageAttribute}] .codex-helper-settings-section-title,
-      [${helperDialogPageAttribute}] .codex-helper-settings-section-title {
+      [${helperPageAttribute}] .codex-helper-settings-section-title {
         padding: 0;
       }
-      [${helperPageAttribute}] .codex-helper-settings-section-heading,
-      [${helperDialogPageAttribute}] .codex-helper-settings-section-heading {
+      [${helperPageAttribute}] .codex-helper-settings-section-heading {
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 8px;
         padding: 0 2px;
       }
-      [${helperPageAttribute}] .codex-helper-settings-section-link,
-      [${helperDialogPageAttribute}] .codex-helper-settings-section-link {
+      [${helperPageAttribute}] .codex-helper-settings-section-link {
         display: inline-flex;
         align-items: center;
         justify-content: center;
@@ -146,104 +386,17 @@ function installHelperStyles() {
         color: color-mix(in srgb, currentColor 70%, transparent);
         cursor: pointer;
       }
-      [${helperPageAttribute}] .codex-helper-settings-section-link:hover,
-      [${helperDialogPageAttribute}] .codex-helper-settings-section-link:hover {
+      [${helperPageAttribute}] .codex-helper-settings-section-link:hover {
         background: color-mix(in srgb, currentColor 8%, transparent);
         color: inherit;
       }
-      [${helperPageAttribute}] .codex-helper-settings-section-link:focus-visible,
-      [${helperDialogPageAttribute}] .codex-helper-settings-section-link:focus-visible {
+      [${helperPageAttribute}] .codex-helper-settings-section-link:focus-visible {
         outline: 2px solid var(--color-token-focus-border, rgb(48, 145, 255));
         outline-offset: 2px;
       }
-      [${helperPageAttribute}] .codex-helper-settings-section-link svg,
-      [${helperDialogPageAttribute}] .codex-helper-settings-section-link svg {
+      [${helperPageAttribute}] .codex-helper-settings-section-link svg {
         width: 14px;
         height: 14px;
-      }
-      [${helperDialogPageAttribute}] .codex-helper-action {
-        border-color: transparent;
-      }
-      [${helperDialogPageAttribute}] .codex-helper-switch {
-        position: relative;
-      }
-      [${helperDialogPageAttribute}] .codex-helper-switch input {
-        position: absolute;
-        width: 1px;
-        height: 1px;
-        opacity: 0;
-        pointer-events: none;
-      }
-      [${helperDialogPageAttribute}] .codex-helper-switch input:focus-visible + span {
-        outline: 2px solid var(--color-token-focus-border, rgb(48, 145, 255));
-        outline-offset: 2px;
-      }
-      [${helperDialogPageAttribute}] .codex-helper-switch input:checked + span {
-        background-color: var(--color-token-charts-blue, rgb(48, 145, 255));
-      }
-      [${helperDialogPageAttribute}] .codex-helper-switch input:checked + span > span {
-        transform: translateX(14px);
-      }
-      [${helperSettingsDialogAttribute}] {
-        position: fixed;
-        inset: 0;
-        z-index: 2147483646;
-        display: grid;
-        place-items: center;
-        padding: 24px;
-        background: rgba(0, 0, 0, 0.28);
-        color: CanvasText;
-      }
-      [${helperSettingsDialogAttribute}] .codex-helper-settings-dialog-panel {
-        width: min(760px, calc(100vw - 48px));
-        max-height: min(820px, calc(100vh - 48px));
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
-        border-radius: 12px;
-        border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
-        background: Canvas;
-        box-shadow: 0 24px 80px color-mix(in srgb, black 28%, transparent);
-      }
-      [${helperSettingsDialogAttribute}] .codex-helper-settings-dialog-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 16px;
-        padding: 16px 18px;
-        border-bottom: 1px solid color-mix(in srgb, currentColor 10%, transparent);
-      }
-      [${helperSettingsDialogAttribute}] .codex-helper-settings-dialog-title {
-        font-size: 16px;
-        font-weight: 600;
-      }
-      [${helperSettingsDialogAttribute}] .codex-helper-settings-dialog-close {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 28px;
-        height: 28px;
-        border: 0;
-        border-radius: 8px;
-        padding: 0;
-        background: transparent;
-        color: inherit;
-        cursor: pointer;
-      }
-      [${helperSettingsDialogAttribute}] .codex-helper-settings-dialog-close:hover {
-        background: color-mix(in srgb, currentColor 8%, transparent);
-      }
-      [${helperSettingsDialogAttribute}] .codex-helper-settings-dialog-close:focus-visible {
-        outline: 2px solid var(--color-token-focus-border, rgb(48, 145, 255));
-        outline-offset: 2px;
-      }
-      [${helperSettingsDialogAttribute}] .codex-helper-settings-dialog-close svg {
-        width: 16px;
-        height: 16px;
-      }
-      [${helperSettingsDialogAttribute}] .codex-helper-settings-dialog-body {
-        overflow: auto;
-        padding: 18px;
       }
       [data-codex-helper-port-row][data-codex-helper-port-row-menu-open="true"]
         [class*="summary-panel-row-accessory"] {
@@ -467,10 +620,6 @@ function installHelperStyles() {
       [data-codex-helper-port-dialog] .codex-helper-port-dialog-actions button:focus-visible {
         background: color-mix(in srgb, currentColor 12%, transparent);
         outline: none;
-      }
-      [${helperSettingsDialogAttribute}] [${helperDialogPageAttribute}] {
-        border-top: 0;
-        padding-top: 0;
       }
       [${helperToastAttribute}] {
         position: fixed;

@@ -2783,7 +2783,7 @@ async function handlePortCommand(button) {
   }
   if (command === "open-settings") {
     closePortForwardRowMenu();
-    showHelperSettingsDialog({ focusSection: "port-forwarding" });
+    await openNativeHelperSettingsFromApp("general");
     return;
   }
   if (command === "show-mapping-menu") {
