@@ -103,7 +103,7 @@ test("pinned ports section clones Environment summary list structure", () => {
   expect(findSummaryRowTemplate).toContain("summary-panel-row-accessory");
 });
 
-test("pinned port forward settings button opens Helper Settings dialog", () => {
+test("pinned port forward settings button opens native Helper settings", () => {
   expect(source).toContain('helperPortCommandAttribute, "show-settings-menu"');
   expect(source).toContain("function openPortForwardSettingsMenu(");
   expect(source).toContain("createPortSettingsToggleMenuItem(");
@@ -111,7 +111,8 @@ test("pinned port forward settings button opens Helper Settings dialog", () => {
   expect(source).toContain("portSameLocalPort");
   expect(source).toContain("portAutoForwardWeb");
   expect(source).toContain('createPortMenuItem("open-settings", "Helper Settings"');
-  expect(source).toContain('showHelperSettingsDialog({ focusSection: "port-forwarding" })');
+  expect(source).toContain('await openNativeHelperSettingsFromApp("general")');
+  expect(source).not.toContain("showHelperSettingsDialog");
   expect(source).toContain("data-codex-helper-port-settings-button");
 });
 

@@ -15,6 +15,8 @@ const RUNTIME_FOOTER = `
 `;
 
 const NON_MODULE_FILES = new Set(["bundle.ts", "index.json"]);
+const BUILD_DATE_PLACEHOLDER = "__CODEX_HELPER_BUILD_DATE__";
+const BUILD_DATE_PLACEHOLDER_LITERAL = `"${BUILD_DATE_PLACEHOLDER}"`;
 
 function isRuntimeTestFile(fileName: string): boolean {
 	return fileName.startsWith("_test");
@@ -36,13 +38,28 @@ function standaloneModulePaths(): string[] {
 		.sort();
 }
 
+function runtimeBuildDate(): string {
+	const configured = process.env.CODEX_HELPER_BUILD_DATE?.trim();
+	if (configured) return configured;
+	return new Date().toLocaleDateString("en-US", {
+		month: "long",
+		day: "numeric",
+		year: "numeric",
+		timeZone: "UTC",
+	});
+}
+
 export function buildRuntimeBundle(): string {
 	const body = bundleModules
 		.map((fileName) => {
 			const absolutePath = join(runtimeSrcDir, fileName);
 			return readFileSync(absolutePath, "utf8").trimEnd();
 		})
-		.join("\n\n");
+		.join("\n\n")
+		.replaceAll(
+			BUILD_DATE_PLACEHOLDER_LITERAL,
+			JSON.stringify(runtimeBuildDate()),
+		);
 	return `${RUNTIME_HEADER}${body}${RUNTIME_FOOTER}`;
 }
 

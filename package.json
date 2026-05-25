@@ -7,7 +7,8 @@
     "check": "tsc --noEmit",
     "bundle:runtime": "bun runtime/bundle.ts",
     "test:runtime": "bun test ./runtime",
-    "launch": "bun src/launch.ts",
+    "build:bridge": "env RUSTC_WRAPPER= cargo build --manifest-path src-tauri/Cargo.toml --bin codex-helper-bridge",
+    "launch": "bun run build:bridge && bun src/launch.ts",
     "build": "bun build src/launch.ts --target=bun --outdir=dist",
     "build:app": "./scripts/build-macos-app.sh"
   },

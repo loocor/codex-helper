@@ -26,17 +26,89 @@ export function isRustBridgePath(path: string): boolean {
 	return RUST_BRIDGE_PATHS.has(path);
 }
 
-export function rustBridgeBinaryPath(): string {
-	const root = join(import.meta.dir, "..");
-	for (const subpath of [
-		"src-tauri/target/debug/codex-helper-bridge",
-		"src-tauri/target/release/codex-helper-bridge",
-	]) {
-		const binary = join(root, subpath);
+function repoRoot(): string {
+	return join(import.meta.dir, "..");
+}
+
+function bridgeBinaryName(): string {
+	return process.platform === "win32"
+		? "codex-helper-bridge.exe"
+		: "codex-helper-bridge";
+}
+
+function absolutePath(path: string): boolean {
+	return (
+		path.startsWith("/") ||
+		path.startsWith("\\\\") ||
+		path.startsWith("//") ||
+		/^[A-Za-z]:[\\/]/.test(path)
+	);
+}
+
+function configuredBridgeBinaryPath(root = repoRoot()): string | null {
+	const configured = process.env.CODEX_HELPER_BRIDGE_BIN?.trim();
+	if (!configured) return null;
+	return absolutePath(configured) ? configured : join(root, configured);
+}
+
+export function rustBridgeCandidatePaths(root = repoRoot()): string[] {
+	const binaryName = bridgeBinaryName();
+	const candidates: string[] = [];
+	const configured = configuredBridgeBinaryPath(root);
+	if (configured) candidates.push(configured);
+	const cargoTargetDir = process.env.CARGO_TARGET_DIR?.trim();
+	if (cargoTargetDir) {
+		const targetRoot = absolutePath(cargoTargetDir)
+			? cargoTargetDir
+			: join(root, cargoTargetDir);
+		candidates.push(
+			join(targetRoot, "debug", binaryName),
+			join(targetRoot, "release", binaryName),
+		);
+	}
+	candidates.push(
+		join(root, "src-tauri", "target", "debug", binaryName),
+		join(root, "src-tauri", "target", "release", binaryName),
+		join(root, "target", "debug", binaryName),
+		join(root, "target", "release", binaryName),
+	);
+	return Array.from(new Set(candidates));
+}
+
+function shellQuote(value: string): string {
+	return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function rustBridgeBuildCommand(root = repoRoot()): string {
+	const manifestPath = shellQuote(join(root, "src-tauri", "Cargo.toml"));
+	if (process.platform === "win32") {
+		return [
+			"cargo build",
+			`--manifest-path ${manifestPath}`,
+			"--bin codex-helper-bridge",
+		].join(" ");
+	}
+	return [
+		"env RUSTC_WRAPPER=",
+		"cargo build",
+		`--manifest-path ${manifestPath}`,
+		"--bin codex-helper-bridge",
+	].join(" ");
+}
+
+export function rustBridgeBinaryPath(root = repoRoot()): string {
+	const configured = configuredBridgeBinaryPath(root);
+	const candidates = rustBridgeCandidatePaths(root);
+	if (configured && !existsSync(configured)) {
+		throw new Error(
+			`Configured Rust bridge binary not found: ${configured}. Build it with: ${rustBridgeBuildCommand(root)}`,
+		);
+	}
+	for (const binary of candidates) {
 		if (existsSync(binary)) return binary;
 	}
 	throw new Error(
-		"Rust bridge binary not found. Run: env RUSTC_WRAPPER= cargo build --manifest-path src-tauri/Cargo.toml --bin codex-helper-bridge",
+		`Rust bridge binary not found. Build it with: ${rustBridgeBuildCommand(root)}. Checked: ${candidates.join(", ")}`,
 	);
 }
 

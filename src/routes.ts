@@ -225,7 +225,11 @@ export async function handleBridgeRequest(
 			return { status: "ok" };
 		}
 		case "/runtime/user-scripts":
-			return { status: "ok", scripts: listUserScripts() };
+			return {
+				status: "ok",
+				path: helperScriptsDir(),
+				scripts: listUserScripts(),
+			};
 		case "/settings/get":
 			return { status: "ok", settings: readSettings() };
 		case "/settings/set":

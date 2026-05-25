@@ -36,7 +36,11 @@ pub fn undo_delete_response(state_dir: &StateDir, payload: &Value) -> Value {
 
 pub fn deleted_sessions_response(state_dir: &StateDir) -> Value {
     match BackupStore::new(state_dir.backups_dir.clone()).list_deleted_sessions() {
-        Ok(backups) => json!({ "status": "ok", "backups": backups }),
+        Ok(backups) => json!({
+            "status": "ok",
+            "backups_path": state_dir.backups_dir.to_string_lossy(),
+            "backups": backups,
+        }),
         Err(error) => json!({ "status": "failed", "message": error.to_string() }),
     }
 }

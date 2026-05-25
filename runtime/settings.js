@@ -1,4 +1,4 @@
-// Helper Settings page, dialog content, and commands
+// Helper Settings page content and commands
 function setEntryActive(active) {
   void active;
 }
@@ -170,7 +170,6 @@ function restoreStashedContent() {
 
 function clearHelperSettingsPage() {
   for (const node of document.querySelectorAll(`[${helperPageAttribute}]`)) {
-    if (node.closest(`[${helperSettingsDialogAttribute}]`)) continue;
     node.remove();
   }
   restoreNativeSettingsPanels();
@@ -187,7 +186,7 @@ function clearHelperSettingsPage() {
 }
 
 function helperSettingsRoots() {
-  return [helperPageRoot, helperDialogRoot].filter(
+  return [helperPageRoot, helperNativeSettingsRoot].filter(
     (root) => root instanceof HTMLElement && root.isConnected,
   );
 }
@@ -197,10 +196,7 @@ function focusHelperSettingsSection(sectionId) {
   for (const root of helperSettingsRoots()) {
     const section = root.querySelector(selector);
     if (!(section instanceof HTMLElement)) continue;
-    const scrollParent =
-      section.closest(".codex-helper-settings-dialog-body") ||
-      section.closest(`[${helperSettingsDialogAttribute}]`) ||
-      root;
+    const scrollParent = root;
     if (scrollParent instanceof HTMLElement) {
       const parentTop = scrollParent.getBoundingClientRect().top;
       const sectionTop = section.getBoundingClientRect().top;
@@ -243,6 +239,10 @@ async function refreshHelperPage() {
     log?.path || "Log path unavailable",
   );
   setHelperText(
+    "[data-codex-helper-log-status]",
+    log?.status === "ok" ? "Latest diagnostic log" : resultText(log),
+  );
+  setHelperText(
     "[data-codex-helper-log]",
     log?.contents || "No diagnostic records yet",
   );
@@ -257,6 +257,10 @@ function renderLoadedScripts(result) {
         : "No user scripts found"
       : resultText(result);
   setHelperText("[data-codex-helper-scripts-status]", statusText);
+  setHelperText(
+    "[data-codex-helper-scripts-path]",
+    result?.path || "Scripts path unavailable",
+  );
   const lists = helperSettingsRoots()
     .map((root) => root.querySelector("[data-codex-helper-scripts-list]"))
     .filter((panel) => panel instanceof HTMLElement);
@@ -268,7 +272,11 @@ function renderLoadedScripts(result) {
     }
     if (scriptList.length === 0) {
       list.appendChild(
-        createScrollEmptyMessage("No user scripts found in ~/.codex-helper/scripts."),
+        createScrollEmptyMessage(
+          list.closest(`[${helperNativeSettingsPageAttribute}]`)
+            ? "No user scripts found."
+            : "No user scripts found in ~/.codex-helper/scripts.",
+        ),
       );
       continue;
     }
@@ -296,6 +304,10 @@ function renderDeletedSessionBackupsPanel(panel, result) {
     return;
   }
   const backups = Array.isArray(result.backups) ? result.backups : [];
+  setHelperText(
+    "[data-codex-helper-backups-path]",
+    result?.backups_path || "Backups path unavailable",
+  );
   setHelperText(
     "[data-codex-helper-backups-status]",
     backups.length
@@ -432,6 +444,7 @@ async function handleHelperCommand(command) {
     "open-devtools": "/devtools/open",
     "open-scripts-dir": "/scripts/reveal",
     "open-backups-dir": "/backups/reveal",
+    "open-log-file": "/diagnostics/reveal-log",
     "open-logs-dir": "/logs/reveal",
   }[command];
   if (command === "refresh") {

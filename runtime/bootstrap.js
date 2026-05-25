@@ -7,37 +7,17 @@ if (typeof window.__codexHelperRuntimeCleanup === "function") {
   }
 }
 
-function closeOpenMenus() {
-  document.dispatchEvent(
-    new KeyboardEvent("keydown", {
-      key: "Escape",
-      code: "Escape",
-      keyCode: 27,
-      which: 27,
-      bubbles: true,
-      cancelable: true,
-    }),
-  );
-  window.dispatchEvent(
-    new KeyboardEvent("keydown", {
-      key: "Escape",
-      code: "Escape",
-      keyCode: 27,
-      which: 27,
-      bubbles: true,
-      cancelable: true,
-    }),
-  );
-}
-
 function installObserver() {
   if (observerInstalled) return;
   observerInstalled = true;
   const observer = new MutationObserver(() => {
     maintainPortsPanel();
-    installAccountSettingsMenuItems();
+    installNativeHelperSettingsGroup();
     if (helperPageRoot && !helperPageRoot.isConnected) {
       clearHelperSettingsPage();
+    }
+    if (helperNativeSettingsRoot && !helperNativeSettingsRoot.isConnected) {
+      clearNativeHelperSettingsPage();
     }
   });
   observer.observe(document.documentElement, {
@@ -68,15 +48,29 @@ function onHelperRuntimeClick(event) {
   ) {
     closePortForwardRowMenu();
   }
-  const accountSettingsEntry = target.closest(
-    `[${helperAccountSettingsEntryAttribute}]`,
+  const nativeSettingsEntry = target.closest(
+    `[${helperNativeSettingsEntryAttribute}]`,
   );
-  if (accountSettingsEntry instanceof HTMLElement) {
+  if (nativeSettingsEntry instanceof HTMLElement) {
     event.preventDefault();
     event.stopPropagation();
-    closeOpenMenus();
-    showHelperSettingsDialog();
+    event.stopImmediatePropagation();
+    const pageId =
+      nativeSettingsEntry.getAttribute(helperNativeSettingsEntryAttribute) ||
+      "general";
+    try {
+      openNativeHelperSettingsPage(pageId);
+    } catch (error) {
+      showHelperToast(error?.message || String(error));
+      logDiagnostic("settings_open_failed", {
+        page: pageId,
+        error: error?.message || String(error),
+      });
+    }
     return;
+  }
+  if (helperNativeSettingsRoot && isNativeSettingsNavigationClick(target)) {
+    clearNativeHelperSettingsPage();
   }
   const portCommand = target.closest(`[${helperPortCommandAttribute}]`);
   if (portCommand instanceof HTMLElement) {
@@ -161,8 +155,6 @@ function onHelperRuntimeKeydown(event) {
     closePortForwardDialog();
     return;
   }
-  if (!document.querySelector(`[${helperSettingsDialogAttribute}]`)) return;
-  closeHelperSettingsDialog();
 }
 
 function onHelperRuntimeChange(event) {
@@ -209,6 +201,7 @@ window.__codexHelperRuntimeCleanup = () => {
   if (helperRuntimeObserver) helperRuntimeObserver.disconnect();
   closePortForwardRowMenu();
   closePortForwardDialog();
+  clearNativeHelperSettingsPage();
   removeHelperRuntimeEventListeners();
   pendingPortScan = 0;
   maintainPortsPanelTimer = 0;
@@ -222,7 +215,7 @@ installHelperRuntimeEventListeners();
 installHelperStyles();
 removeLegacyPortsBottomPanelUi();
 maintainPortsPanel();
-installAccountSettingsMenuItems();
+installNativeHelperSettingsGroup();
 refreshFeatureSettings().catch((error) => {
   logDiagnostic("settings_feature_refresh_failed", {
     error: error?.message || String(error),

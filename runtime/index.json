@@ -3,8 +3,8 @@
   "core.js",
   "styles.js",
   "settings.js",
+  "native-settings.js",
   "sessions.js",
   "ports.js",
-  "account.js",
   "bootstrap.js"
 ]

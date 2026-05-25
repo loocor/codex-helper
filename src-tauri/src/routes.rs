@@ -44,7 +44,11 @@ pub async fn handle_bridge_request(ctx: BridgeContext, path: &str, payload: Valu
             }
         }
         "/runtime/user-scripts" => match user_script_inventory(&ctx.state_dir) {
-            Ok(scripts) => json!({ "status": "ok", "scripts": scripts }),
+            Ok(scripts) => json!({
+                "status": "ok",
+                "path": ctx.state_dir.scripts_dir.to_string_lossy(),
+                "scripts": scripts,
+            }),
             Err(error) => json!({ "status": "failed", "message": error.to_string() }),
         },
         "/settings/get" => match read_settings(&ctx.state_dir.config_path) {
