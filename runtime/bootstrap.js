@@ -13,7 +13,14 @@ function installObserver() {
   const observer = new MutationObserver(() => {
     maintainPortsPanel();
     installNativeHelperSettingsGroup();
-    installArchivedChatsSearch();
+    if (
+      archivedCleanupTicksRemaining > 0 &&
+      removeArchivedChatsSearchArtifacts() > 0
+    ) {
+      archivedCleanupTicksRemaining = ARCHIVED_CLEANUP_BUDGET;
+    } else if (archivedCleanupTicksRemaining > 0) {
+      archivedCleanupTicksRemaining -= 1;
+    }
     if (helperPageRoot && !helperPageRoot.isConnected) {
       clearHelperSettingsPage();
     }
@@ -211,10 +218,6 @@ function onHelperRuntimeInput(event) {
   if (!(target instanceof HTMLInputElement)) return;
   if (target.hasAttribute("data-codex-helper-deleted-chat-search")) {
     scheduleDeletedChatSearch(target);
-    return;
-  }
-  if (target.hasAttribute("data-codex-helper-archived-chat-search")) {
-    scheduleArchivedChatSearch(target);
   }
 }
 
@@ -241,7 +244,6 @@ window.__codexHelperRuntimeCleanup = () => {
   if (refreshPortsPanelTimer) clearTimeout(refreshPortsPanelTimer);
   if (pinnedSummaryHideTimer) clearTimeout(pinnedSummaryHideTimer);
   if (deletedChatSearchTimer) clearTimeout(deletedChatSearchTimer);
-  if (archivedChatSearchTimer) clearTimeout(archivedChatSearchTimer);
   stopPortScanLoop();
   if (helperRuntimeObserver) helperRuntimeObserver.disconnect();
   closePortForwardRowMenu();
@@ -254,7 +256,6 @@ window.__codexHelperRuntimeCleanup = () => {
   refreshPortsPanelTimer = 0;
   pinnedSummaryHideTimer = 0;
   deletedChatSearchTimer = 0;
-  archivedChatSearchTimer = 0;
   observerInstalled = false;
   helperRuntimeObserver = null;
 };
@@ -264,7 +265,8 @@ installHelperStyles();
 removeLegacyPortsBottomPanelUi();
 maintainPortsPanel();
 installNativeHelperSettingsGroup();
-installArchivedChatsSearch();
+archivedCleanupTicksRemaining = ARCHIVED_CLEANUP_BUDGET;
+removeArchivedChatsSearchArtifacts();
 refreshFeatureSettings().catch((error) => {
   logDiagnostic("settings_feature_refresh_failed", {
     error: error?.message || String(error),

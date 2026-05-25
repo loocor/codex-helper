@@ -1,3 +1,12 @@
+// Chat search backend for the `/chats/search` bridge route.
+//
+// Two scopes are supported:
+//   * "deleted"  — drives the Helper > Deleted chats UI (runtime/settings.js).
+//   * "archived" — kept as a backend-only entry point. The runtime UI for
+//                  Archived chats search was removed pending a redesign; the
+//                  Rust code and integration tests are retained so the feature
+//                  can be re-enabled without redoing backend work. See
+//                  runtime/settings.js::searchChats for the matching note.
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
@@ -61,6 +70,8 @@ pub fn search_chats_response(state_dir: &StateDir, payload: &Value) -> Value {
         });
     }
     let result = match scope {
+        // "archived" has no runtime UI consumer right now; the branch is kept
+        // so future work can re-enable the feature without a backend change.
         "archived" => default_codex_db_path().and_then(|path| search_archived_chats(path, query)),
         "deleted" => search_deleted_chats(&state_dir.backups_dir, query),
         _ => Err(anyhow::anyhow!("Unknown chat search scope: {scope}")),

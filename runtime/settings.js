@@ -1,4 +1,5 @@
 // Helper Settings page content and commands
+// biome-ignore-all lint/correctness/noUnusedVariables: called from bootstrap.js, sessions.js, and native-settings.js in the bundled runtime
 function setEntryActive(active) {
   void active;
 }
@@ -400,6 +401,10 @@ function backupDetail(backup) {
 }
 
 async function searchChats(scope, query) {
+  // The bridge route also handles scope === "archived" (see
+  // src-tauri/src/chat_search.rs), but no runtime caller emits it today —
+  // Archived chats search is intentionally backend-only until the UI is
+  // reintroduced. Keep the `scope` argument so re-enabling stays trivial.
   return bridge("/chats/search", { scope, query });
 }
 
@@ -458,127 +463,23 @@ function renderDeletedChatSearchResults(result) {
   }
 }
 
-function installArchivedChatsSearch() {
-  const root = findArchivedChatsRoot();
-  if (!(root instanceof HTMLElement)) return false;
-  if (root.querySelector("[data-codex-helper-archived-chat-search]")) return true;
-  const heading = findArchivedChatsHeading(root);
-  if (!(heading instanceof HTMLElement)) return false;
-  const search = document.createElement("div");
-  search.className = "codex-helper-chat-search";
-  const remote = archivedChatsRootLooksRemote(root);
-  search.innerHTML = `
-    <input class="codex-helper-chat-search-input" data-codex-helper-archived-chat-search type="search" placeholder="${remote ? "Search is available for local archived chats only." : "Search archived chats"}" autocomplete="off" spellcheck="false" aria-label="Search archived chats"${remote ? " disabled" : ""}>
-    <div data-codex-helper-archived-chat-results></div>
-  `;
-  heading.insertAdjacentElement("afterend", search);
-  return true;
-}
-
-function findArchivedChatsHeading(root = document) {
-  return Array.from(root.querySelectorAll("h1, h2, h3, [role='heading'], div"))
-    .filter((node) => node instanceof HTMLElement && isVisibleElement(node))
-    .find((node) => exactText(node, "Archived chats")) || null;
-}
-
-function findArchivedChatsRoot() {
-  const heading = findArchivedChatsHeading(document);
-  if (!(heading instanceof HTMLElement)) return null;
-  let current = heading.parentElement;
-  for (let depth = 0; current instanceof HTMLElement && depth < 6; depth += 1) {
-    const text = textOf(current);
-    if (text.includes("Archived chats") && current.querySelector("button, a, input, [role='button']")) {
-      return current;
-    }
-    current = current.parentElement;
+function removeArchivedChatsSearchArtifacts() {
+  // Defensive sweep for any leftover Archived chats search UI created by
+  // earlier runtime builds. Returns the number of unique nodes removed so
+  // callers (the MutationObserver in bootstrap.js) can decide whether to
+  // keep running the sweep.
+  const removed = new Set();
+  for (const node of document.querySelectorAll(
+    "[data-codex-helper-archived-chat-search], [data-codex-helper-archived-chat-results]",
+  )) {
+    if (!(node instanceof HTMLElement)) continue;
+    const container = node.closest(".codex-helper-chat-search");
+    const target = container instanceof HTMLElement ? container : node;
+    if (removed.has(target)) continue;
+    removed.add(target);
+    target.remove();
   }
-  return heading.parentElement;
-}
-
-function archivedChatsRootLooksRemote(root) {
-  const text = textOf(root).toLowerCase();
-  return (
-    text.includes("ssh") ||
-    text.includes("remote host") ||
-    text.includes("remote project")
-  );
-}
-
-function scheduleArchivedChatSearch(input) {
-  if (archivedChatSearchTimer) clearTimeout(archivedChatSearchTimer);
-  archivedChatSearchTimer = window.setTimeout(() => {
-    archivedChatSearchTimer = 0;
-    runArchivedChatSearch(input).catch((error) => {
-      renderArchivedChatSearchError(input, error?.message || String(error));
-      logDiagnostic("archived_chat_search_failed", {
-        error: error?.message || String(error),
-      });
-    });
-  }, 250);
-}
-
-async function runArchivedChatSearch(input) {
-  const query = String(input?.value || "").trim();
-  const requestId = ++archivedChatSearchRequestId;
-  if (!query) {
-    renderArchivedChatSearchResults(input, { status: "ok", matches: [] });
-    return;
-  }
-  const result = await searchChats("archived", query);
-  if (requestId !== archivedChatSearchRequestId) return;
-  renderArchivedChatSearchResults(input, result);
-}
-
-function archivedChatResultsPanel(input) {
-  const search = input?.closest?.(".codex-helper-chat-search");
-  return search?.querySelector?.("[data-codex-helper-archived-chat-results]") || null;
-}
-
-function renderArchivedChatSearchError(input, message) {
-  const panel = archivedChatResultsPanel(input);
-  if (!(panel instanceof HTMLElement)) return;
-  panel.textContent = "";
-  panel.appendChild(createScrollEmptyMessage(message));
-}
-
-function renderArchivedChatSearchResults(input, result) {
-  const panel = archivedChatResultsPanel(input);
-  if (!(panel instanceof HTMLElement)) return;
-  panel.textContent = "";
-  if (!String(input?.value || "").trim()) return;
-  if (result?.status !== "ok") {
-    panel.appendChild(createScrollEmptyMessage(resultText(result)));
-    return;
-  }
-  const matches = Array.isArray(result.matches) ? result.matches : [];
-  if (matches.length === 0) {
-    panel.appendChild(createScrollEmptyMessage("No archived chats match this search."));
-    return;
-  }
-  const list = document.createElement("div");
-  list.className = "codex-helper-panel";
-  for (const match of matches) {
-    list.appendChild(createArchivedChatResultRow(match));
-  }
-  panel.appendChild(list);
-}
-
-function createArchivedChatResultRow(chat) {
-  const link = document.createElement("a");
-  link.className = "codex-helper-settings-compact-row";
-  link.href = `/local/${String(chat.session_id || "").replace(/^local:/, "")}`;
-  const text = document.createElement("div");
-  text.className = "codex-helper-settings-compact-text";
-  const title = document.createElement("div");
-  title.className = "codex-helper-settings-compact-title";
-  title.textContent = chat.title || chat.session_id || "Untitled chat";
-  const meta = document.createElement("div");
-  meta.className = "codex-helper-settings-compact-meta";
-  meta.textContent = backupSummaryLine(chat);
-  text.appendChild(title);
-  if (meta.textContent) text.appendChild(meta);
-  link.appendChild(text);
-  return link;
+  return removed.size;
 }
 
 function formatDateTime(value) {
