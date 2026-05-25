@@ -8,7 +8,6 @@
 //                  can be re-enabled without redoing backend work. See
 //                  runtime/settings.js::searchChats for the matching note.
 use anyhow::Context;
-use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -17,6 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::chat_time::{system_time_rfc3339, thread_time_from_columns, thread_time_from_json};
 use crate::state_dir::StateDir;
 
 const CHAT_SEARCH_RESULT_LIMIT: usize = 100;
@@ -47,7 +47,13 @@ struct ChatSearchEntry {
     cwd: Option<String>,
     time: Option<String>,
     token: Option<String>,
-    content: Option<String>,
+    content: ChatSearchContent,
+}
+
+#[derive(Debug)]
+enum ChatSearchContent {
+    RolloutPath(PathBuf),
+    DeletedBackup { path: PathBuf, payload: Value },
 }
 
 pub fn search_chats_response(state_dir: &StateDir, payload: &Value) -> Value {
@@ -61,6 +67,14 @@ pub fn search_chats_response(state_dir: &StateDir, payload: &Value) -> Value {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .trim();
+    if !matches!(scope, "archived" | "deleted") {
+        return json!({
+            "status": "failed",
+            "scope": scope,
+            "query": query,
+            "message": format!("Unknown chat search scope: {scope}"),
+        });
+    }
     if query.is_empty() {
         return json!({
             "status": "ok",
@@ -136,7 +150,7 @@ pub fn search_archived_chats(
             row.get::<_, String>(3)?,
             row.get::<_, String>(4)?,
             row.get::<_, Option<String>>(5)?,
-            timestamp_from_columns(
+            thread_time_from_columns(
                 row.get::<_, Option<i64>>(6)?,
                 row.get::<_, Option<i64>>(7)?,
                 row.get::<_, Option<i64>>(8)?,
@@ -158,15 +172,13 @@ pub fn search_archived_chats(
         if !archived_thread_is_local(&source, thread_source.as_deref()) {
             continue;
         }
-        let content = read_rollout_content(Path::new(&rollout_path))
-            .with_context(|| format!("failed to read rollout {}", rollout_path))?;
         entries.push(ChatSearchEntry {
             session_id,
             title,
             cwd,
             time,
             token: None,
-            content: Some(content),
+            content: ChatSearchContent::RolloutPath(PathBuf::from(rollout_path)),
         });
     }
     collect_matches(entries, &query)
@@ -201,19 +213,19 @@ pub fn search_deleted_chats(
             .with_context(|| format!("failed to read backup {}", path.to_string_lossy()))?;
         let payload: Value = serde_json::from_str(&text)
             .with_context(|| format!("failed to parse backup {}", path.to_string_lossy()))?;
-        entries.push(
-            deleted_entry_from_payload(&payload, metadata.and_then(|m| m.modified().ok()))
-                .with_context(|| {
-                    format!("failed to read backup content {}", path.to_string_lossy())
-                })?,
-        );
+        entries.push(deleted_entry_from_payload(
+            path,
+            payload,
+            metadata.and_then(|m| m.modified().ok()),
+        )?);
     }
     entries.sort_by(|a, b| b.time.cmp(&a.time).then(a.title.cmp(&b.title)));
     collect_matches(entries, &query)
 }
 
 fn deleted_entry_from_payload(
-    payload: &Value,
+    path: PathBuf,
+    payload: Value,
     modified: Option<SystemTime>,
 ) -> anyhow::Result<ChatSearchEntry> {
     let session_id = payload
@@ -241,7 +253,7 @@ fn deleted_entry_from_payload(
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string);
     let time = thread
-        .and_then(chat_time_from_thread)
+        .and_then(thread_time_from_json)
         .or_else(|| modified.map(system_time_rfc3339));
     Ok(ChatSearchEntry {
         session_id,
@@ -249,7 +261,7 @@ fn deleted_entry_from_payload(
         cwd,
         time,
         token,
-        content: deleted_backup_content(payload)?,
+        content: ChatSearchContent::DeletedBackup { path, payload },
     })
 }
 
@@ -260,10 +272,7 @@ fn collect_matches(
     let mut matches = Vec::new();
     for entry in entries {
         let mut fields = metadata_matches(&entry, query);
-        let content_matches = entry
-            .content
-            .as_deref()
-            .is_some_and(|content| contains_literal(content, query));
+        let content_matches = fields.is_empty() && entry_content_matches(&entry, query)?;
         if fields.is_empty() && content_matches {
             fields.push("content".to_string());
         }
@@ -289,6 +298,23 @@ fn collect_matches(
         }
     }
     Ok(matches)
+}
+
+fn entry_content_matches(entry: &ChatSearchEntry, query: &str) -> anyhow::Result<bool> {
+    match &entry.content {
+        ChatSearchContent::RolloutPath(path) => {
+            let content = read_rollout_content(path)
+                .with_context(|| format!("failed to read rollout {}", path.to_string_lossy()))?;
+            Ok(contains_literal(&content, query))
+        }
+        ChatSearchContent::DeletedBackup { path, payload } => deleted_backup_content(payload)
+            .with_context(|| format!("failed to read backup content {}", path.to_string_lossy()))
+            .map(|content| {
+                content
+                    .as_deref()
+                    .is_some_and(|content| contains_literal(content, query))
+            }),
+    }
 }
 
 fn archived_thread_is_local(source: &str, thread_source: Option<&str>) -> bool {
@@ -426,36 +452,6 @@ fn append_message_content(output: &mut String, event: &Value) {
     }
 }
 
-fn chat_time_from_thread(thread: &Value) -> Option<String> {
-    timestamp_from_columns(
-        thread.get("updated_at_ms").and_then(Value::as_i64),
-        thread.get("updated_at").and_then(Value::as_i64),
-        thread.get("created_at_ms").and_then(Value::as_i64),
-        thread.get("created_at").and_then(Value::as_i64),
-    )
-}
-
-fn timestamp_from_columns(
-    updated_at_ms: Option<i64>,
-    updated_at: Option<i64>,
-    created_at_ms: Option<i64>,
-    created_at: Option<i64>,
-) -> Option<String> {
-    updated_at_ms
-        .or_else(|| updated_at.map(|value| value * 1000))
-        .or(created_at_ms)
-        .or_else(|| created_at.map(|value| value * 1000))
-        .and_then(timestamp_ms_rfc3339)
-}
-
-fn timestamp_ms_rfc3339(value: i64) -> Option<String> {
-    DateTime::<Utc>::from_timestamp_millis(value).map(|date| date.to_rfc3339())
-}
-
-fn system_time_rfc3339(value: SystemTime) -> String {
-    DateTime::<Utc>::from(value).to_rfc3339()
-}
-
 fn display_title(value: &str) -> String {
     let title = value.split_whitespace().collect::<Vec<_>>().join(" ");
     if title.is_empty() {
@@ -539,6 +535,65 @@ mod tests {
         assert_eq!(matches[0].title, "Refactor settings page");
         assert_eq!(matches[0].match_kind, ChatMatchKind::Metadata);
         assert!(matches[0].matched_fields.contains(&"title".to_string()));
+    }
+
+    #[test]
+    fn archived_search_does_not_read_rollout_for_metadata_match() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let db_path = temp_dir.path().join("state_5.sqlite");
+        let missing_rollout_path = temp_dir.path().join("missing-rollout.jsonl");
+        create_codex_db(&db_path);
+        let db = Connection::open(&db_path).expect("db");
+        db.execute(
+            "INSERT INTO threads (id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, sandbox_policy, approval_mode, archived, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, 1, 2, 'local', 'openai', '/repo/CodexHelper', 'Metadata Needle', 'workspace-write', 'on-request', 1, 1000, 2000)",
+            (&"metadata-thread", &missing_rollout_path.to_string_lossy().to_string()),
+        )
+        .expect("insert");
+
+        let matches = search_archived_chats(&db_path, "needle").expect("search");
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].session_id, "metadata-thread");
+        assert_eq!(matches[0].match_kind, ChatMatchKind::Metadata);
+    }
+
+    #[test]
+    fn archived_search_stops_before_reading_after_result_limit() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let db_path = temp_dir.path().join("state_5.sqlite");
+        create_codex_db(&db_path);
+        let db = Connection::open(&db_path).expect("db");
+        for index in 0..CHAT_SEARCH_RESULT_LIMIT {
+            let rollout_path = temp_dir.path().join(format!("rollout-{index}.jsonl"));
+            write_rollout(&rollout_path, "unrelated body");
+            db.execute(
+                "INSERT INTO threads (id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, sandbox_policy, approval_mode, archived, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, 1, 2, 'local', 'openai', '/repo/CodexHelper', ?3, 'workspace-write', 'on-request', 1, 1000, ?4)",
+                (
+                    &format!("thread-{index:03}"),
+                    &rollout_path.to_string_lossy().to_string(),
+                    &format!("Needle metadata {index:03}"),
+                    &(2000 + (CHAT_SEARCH_RESULT_LIMIT - index) as i64),
+                ),
+            )
+            .expect("insert");
+        }
+        let bad_rollout_path = temp_dir.path().join("bad-rollout.jsonl");
+        fs::write(&bad_rollout_path, "{not-json}\n").expect("bad rollout");
+        db.execute(
+            "INSERT INTO threads (id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, sandbox_policy, approval_mode, archived, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, 1, 2, 'local', 'openai', '/repo/CodexHelper', 'No metadata match', 'workspace-write', 'on-request', 1, 1000, 1)",
+            (&"after-limit-thread", &bad_rollout_path.to_string_lossy().to_string()),
+        )
+        .expect("insert bad");
+
+        let matches = search_archived_chats(&db_path, "needle").expect("search");
+
+        assert_eq!(matches.len(), CHAT_SEARCH_RESULT_LIMIT);
+        assert!(!matches
+            .iter()
+            .any(|entry| entry.session_id == "after-limit-thread"));
     }
 
     #[test]
@@ -647,5 +702,57 @@ mod tests {
         assert_eq!(metadata_matches[0].match_kind, ChatMatchKind::Metadata);
         assert_eq!(content_matches.len(), 1);
         assert_eq!(content_matches[0].match_kind, ChatMatchKind::Content);
+    }
+
+    #[test]
+    fn deleted_search_does_not_decode_transcript_for_metadata_match() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let backups_dir = temp_dir.path().join("backups");
+        fs::create_dir_all(&backups_dir).expect("backups dir");
+        let payload = json!({
+            "token": "token-2",
+            "session_id": "thread-4",
+            "tables": {
+                "threads": [{
+                    "id": "thread-4",
+                    "title": "Needle deleted chat",
+                    "cwd": "/repo/CodexHelper",
+                    "updated_at_ms": 2000,
+                    "created_at_ms": 1000
+                }],
+                "__files": [{
+                    "path": "/tmp/rollout.jsonl",
+                    "content_b64": "not-valid-base64"
+                }]
+            }
+        });
+        fs::write(
+            backups_dir.join("token-2.json"),
+            serde_json::to_string_pretty(&payload).expect("json"),
+        )
+        .expect("backup");
+
+        let matches = search_deleted_chats(&backups_dir, "needle").expect("search");
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].session_id, "thread-4");
+        assert_eq!(matches[0].match_kind, ChatMatchKind::Metadata);
+    }
+
+    #[test]
+    fn search_response_rejects_unknown_scope_before_empty_query_shortcut() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let state_dir = StateDir::init_at(temp_dir.path().join("state")).expect("state dir");
+
+        let response = search_chats_response(
+            &state_dir,
+            &json!({
+                "scope": "unknown",
+                "query": ""
+            }),
+        );
+
+        assert_eq!(response["status"], "failed");
+        assert_eq!(response["message"], "Unknown chat search scope: unknown");
     }
 }

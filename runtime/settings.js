@@ -229,7 +229,7 @@ async function refreshHelperPage() {
   setHelperText("[data-codex-helper-backend]", resultText(backend));
   applySettings(settings);
   renderLoadedScripts(scripts);
-  renderDeletedSessionBackups(backups);
+  await renderDeletedSessionBackupsAfterRefresh(backups);
   setHelperText(
     "[data-codex-helper-zed-status]",
     zed?.status === "ok"
@@ -250,6 +250,28 @@ async function refreshHelperPage() {
     "[data-codex-helper-log]",
     log?.contents || "No diagnostic records yet",
   );
+}
+
+async function renderDeletedSessionBackupsAfterRefresh(result) {
+  const activeDeletedSearchInput = activeDeletedChatSearchInput();
+  if (activeDeletedSearchInput) {
+    await runDeletedChatSearch(activeDeletedSearchInput);
+    return;
+  }
+  renderDeletedSessionBackups(result);
+}
+
+function activeDeletedChatSearchInput() {
+  for (const root of helperSettingsRoots()) {
+    const input = root.querySelector("[data-codex-helper-deleted-chat-search]");
+    if (
+      input instanceof HTMLInputElement &&
+      String(input.value || "").trim()
+    ) {
+      return input;
+    }
+  }
+  return null;
 }
 
 function renderLoadedScripts(result) {
@@ -325,7 +347,7 @@ function renderDeletedSessionBackupsPanel(panel, result) {
     );
     return;
   }
-  for (const backup of backups) {
+  for (const backup of backups.slice(0, DELETED_CHAT_BACKUP_RENDER_LIMIT)) {
     panel.appendChild(createCompactBackupRow(backup, restoreButtonForChat(backup)));
   }
 }

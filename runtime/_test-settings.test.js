@@ -133,6 +133,17 @@ test("settings page groups options by feature area", () => {
   expect(source).not.toContain('">Other</div>');
 });
 
+test("deleted chats full list keeps a bounded render cap", () => {
+  expect(source).toContain("DELETED_CHAT_BACKUP_RENDER_LIMIT");
+  expect(source).toContain("backups.slice(0, DELETED_CHAT_BACKUP_RENDER_LIMIT)");
+});
+
+test("deleted chats refresh preserves active search results", () => {
+  expect(source).toContain("function activeDeletedChatSearchInput(");
+  expect(source).toContain("runDeletedChatSearch(activeDeletedSearchInput)");
+  expect(source).not.toContain("renderDeletedSessionBackups(backups);");
+});
+
 test("account menu no longer exposes helper settings dialog entry", () => {
   expect(source).toContain("Helper Settings");
   expect(source).not.toContain("data-codex-helper-account-settings-entry");

@@ -45,6 +45,7 @@ let refreshPortsPanelTimer = 0;
 let pinnedSummaryHideTimer = 0;
 let deletedChatSearchTimer = 0;
 let deletedChatSearchRequestId = 0;
+const DELETED_CHAT_BACKUP_RENDER_LIMIT = 20;
 const ARCHIVED_CLEANUP_BUDGET = 20;
 let archivedCleanupTicksRemaining = ARCHIVED_CLEANUP_BUDGET;
 let portScanIntervalId = 0;

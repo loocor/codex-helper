@@ -1,11 +1,12 @@
 use anyhow::Context;
-use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+
+use crate::chat_time::{system_time_rfc3339, thread_time_from_json};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DeletedSessionBackup {
@@ -146,11 +147,10 @@ fn deleted_session_backup_from_payload(
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string);
-    let time = thread.and_then(chat_time_from_thread);
+    let time = thread.and_then(thread_time_from_json);
     let deleted_at = modified
-        .map(DateTime::<Utc>::from)
-        .unwrap_or_else(|| DateTime::<Utc>::from(SystemTime::UNIX_EPOCH))
-        .to_rfc3339();
+        .map(system_time_rfc3339)
+        .unwrap_or_else(|| system_time_rfc3339(SystemTime::UNIX_EPOCH));
 
     Ok(DeletedSessionBackup {
         token: token.to_string(),
@@ -161,31 +161,6 @@ fn deleted_session_backup_from_payload(
         deleted_at,
         backup_path: path.to_string_lossy().to_string(),
     })
-}
-
-fn chat_time_from_thread(thread: &serde_json::Value) -> Option<String> {
-    thread
-        .get("updated_at_ms")
-        .and_then(serde_json::Value::as_i64)
-        .or_else(|| {
-            thread
-                .get("updated_at")
-                .and_then(serde_json::Value::as_i64)
-                .map(|value| value * 1000)
-        })
-        .or_else(|| {
-            thread
-                .get("created_at_ms")
-                .and_then(serde_json::Value::as_i64)
-        })
-        .or_else(|| {
-            thread
-                .get("created_at")
-                .and_then(serde_json::Value::as_i64)
-                .map(|value| value * 1000)
-        })
-        .and_then(DateTime::<Utc>::from_timestamp_millis)
-        .map(|date| date.to_rfc3339())
 }
 
 #[cfg(test)]
