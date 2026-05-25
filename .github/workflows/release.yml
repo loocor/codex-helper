@@ -105,6 +105,7 @@ jobs:
           echo "APPLE_API_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
 
       - name: Build DMG
+        timeout-minutes: 45
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -112,6 +113,7 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           REQUIRE_SIGNING: "1"
           REQUIRE_NOTARIZE: "1"
+          NOTARY_WAIT_TIMEOUT: "30m"
           OUTPUT_DIR: ${{ github.workspace }}/dist/macos
         run: |
           chmod +x scripts/build-macos-dmg.sh

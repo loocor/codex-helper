@@ -8,6 +8,7 @@ VERSION="${1:-$(jq -r '.version' "${ROOT}/package.json")}"
 TARGET="${2:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-${ROOT}/dist/macos}"
 APP_NAME="CodexHelper"
+NOTARY_WAIT_TIMEOUT="${NOTARY_WAIT_TIMEOUT:-30m}"
 
 if [[ -z "$TARGET" ]]; then
   case "$(uname -m)" in
@@ -122,10 +123,10 @@ fi
 
 if [[ "${SKIP_NOTARIZE:-}" != "1" ]]; then
   if [[ -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_ISSUER:-}" && -n "${APPLE_API_KEY_PATH:-}" ]]; then
-    xcrun notarytool submit "$DMG" --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait
+    xcrun notarytool submit "$DMG" --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait --timeout "$NOTARY_WAIT_TIMEOUT"
     xcrun stapler staple "$DMG"
   elif [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
-    xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_PASSWORD" --wait
+    xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_PASSWORD" --wait --timeout "$NOTARY_WAIT_TIMEOUT"
     xcrun stapler staple "$DMG"
   elif [[ "${REQUIRE_NOTARIZE:-}" == "1" ]]; then
     echo "notarization credentials are required unless SKIP_NOTARIZE=1" >&2
