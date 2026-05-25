@@ -332,16 +332,17 @@ test("startup does not eagerly mount inline General settings page", () => {
 });
 
 test("session context menu extends Codex native electronBridge menu", () => {
-  expect(source).toContain("showExtendedSessionContextMenu");
-  expect(source).toContain("buildCodexSessionNativeMenuItems");
+  expect(source).toContain("installSessionContextMenuBridge");
+  expect(source).toContain("sessionContextMenuMapRestore");
+  expect(source).toContain("appendHelperSessionMenuItems");
+  expect(source).toContain("Array.prototype.map");
+  expect(source).toContain("buildHelperSessionMenuModelItems");
   expect(source).toContain("openProjectMoveMenu");
   expect(source).toContain("nativeProjectTargets");
   expect(source).toContain("helperSessionMenuIcon");
   expect(source).toContain("Move Session");
-  expect(source).toContain("window.electronBridge");
-  expect(source).toContain("open-thread-new-window");
   expect(source).toContain("codex-helper-session-");
-  expect(source).toContain("stopImmediatePropagation");
+  expect(source).toContain("trackSessionContextMenu(row)");
   expect(source).not.toContain("installSessionContextMenuItems");
   expect(source).not.toContain("installElectronContextMenuHook");
   expect(source).not.toContain("promptMoveTargetPath");

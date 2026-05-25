@@ -132,17 +132,6 @@ function onHelperRuntimeContextMenu(event) {
   const row = sessionRowFromTarget(target);
   if (!(row instanceof HTMLElement)) return;
   trackSessionContextMenu(row);
-  if (enabledSessionActions().length === 0) return;
-  event.preventDefault();
-  event.stopImmediatePropagation();
-  const ref = sessionRefFromRow(row);
-  if (!ref.session_id) return;
-  showExtendedSessionContextMenu(row, ref).catch((error) => {
-    showHelperToast(error?.message || String(error));
-    logDiagnostic("session_menu_open_failed", {
-      error: error?.message || String(error),
-    });
-  });
 }
 
 function onHelperRuntimeKeydown(event) {
@@ -202,6 +191,7 @@ window.__codexHelperRuntimeCleanup = () => {
   closePortForwardRowMenu();
   closePortForwardDialog();
   clearNativeHelperSettingsPage();
+  if (sessionContextMenuMapRestore) sessionContextMenuMapRestore();
   removeHelperRuntimeEventListeners();
   pendingPortScan = 0;
   maintainPortsPanelTimer = 0;
