@@ -108,9 +108,12 @@ function renderHelperPage(host, options = {}) {
             `)}
           </section>
           <section class="codex-helper-settings-section flex flex-col gap-1.5">
-            ${sectionHeading("Deleted sessions", "open-backups-dir", "Open deleted sessions folder")}
+            ${sectionHeading("Deleted chats", "open-backups-dir", "Open deleted chats folder")}
             ${settingsPanel(`
             ${sectionToolbar("data-codex-helper-backups-status", "refresh")}
+            <div class="codex-helper-chat-search">
+              <input class="codex-helper-chat-search-input" data-codex-helper-deleted-chat-search type="search" placeholder="Search deleted chats" autocomplete="off" spellcheck="false" aria-label="Search deleted chats">
+            </div>
             <div class="codex-helper-settings-scroll" data-codex-helper-backups></div>
             `)}
           </section>
@@ -287,6 +290,7 @@ function renderLoadedScripts(result) {
 }
 
 function renderDeletedSessionBackups(result) {
+  deletedChatBackupsResult = result;
   const panels = helperSettingsRoots()
     .map((root) => root.querySelector("[data-codex-helper-backups]"))
     .filter((panel) => panel instanceof HTMLElement);
@@ -311,24 +315,17 @@ function renderDeletedSessionBackupsPanel(panel, result) {
   setHelperText(
     "[data-codex-helper-backups-status]",
     backups.length
-      ? `${backups.length} deleted session${backups.length === 1 ? "" : "s"}`
-      : "No deleted sessions",
+      ? `${backups.length} deleted chat${backups.length === 1 ? "" : "s"}`
+      : "No deleted chats",
   );
   if (backups.length === 0) {
     panel.appendChild(
-      createScrollEmptyMessage("Deleted session backups will appear here."),
+      createScrollEmptyMessage("Deleted chat backups will appear here."),
     );
     return;
   }
-  for (const backup of backups.slice(0, 20)) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = "Restore";
-    button.setAttribute(
-      "data-codex-helper-restore-token",
-      backup.token || "",
-    );
-    panel.appendChild(createCompactBackupRow(backup, button));
+  for (const backup of backups) {
+    panel.appendChild(createCompactBackupRow(backup, restoreButtonForChat(backup)));
   }
 }
 
@@ -357,8 +354,15 @@ function createCompactBackupRow(backup, control) {
   text.className = "codex-helper-settings-compact-text";
   const title = backup.title || backup.session_id || "Untitled session";
   const summary = backupSummaryLine(backup);
-  text.textContent = summary ? `${title} · ${summary}` : title;
-  text.title = backupDetail(backup) || text.textContent;
+  const titleNode = document.createElement("div");
+  titleNode.className = "codex-helper-settings-compact-title";
+  titleNode.textContent = title;
+  const meta = document.createElement("div");
+  meta.className = "codex-helper-settings-compact-meta";
+  meta.textContent = summary || backup.session_id || "";
+  text.title = backupDetail(backup) || [title, summary].filter(Boolean).join(" · ");
+  text.appendChild(titleNode);
+  if (meta.textContent) text.appendChild(meta);
   row.appendChild(text);
   if (control instanceof HTMLElement) {
     if (control.tagName === "BUTTON") control.className = helperActionClass;
@@ -367,9 +371,20 @@ function createCompactBackupRow(backup, control) {
   return row;
 }
 
+function restoreButtonForChat(chat) {
+  if (!chat?.token) return null;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Restore";
+  button.setAttribute("data-codex-helper-restore-token", chat.token || "");
+  return button;
+}
+
 function backupSummaryLine(backup) {
   const parts = [];
-  if (backup.deleted_at) parts.push(formatDateTime(backup.deleted_at));
+  if (backup.time || backup.deleted_at) {
+    parts.push(formatDateTime(backup.time || backup.deleted_at));
+  }
   if (backup.cwd) parts.push(displayProjectName(backup.cwd));
   return parts.filter(Boolean).join(" · ");
 }
@@ -377,10 +392,193 @@ function backupSummaryLine(backup) {
 
 function backupDetail(backup) {
   const parts = [];
-  if (backup.deleted_at) parts.push(formatDateTime(backup.deleted_at));
+  if (backup.time) parts.push(formatDateTime(backup.time));
+  if (backup.deleted_at) parts.push(`Deleted ${formatDateTime(backup.deleted_at)}`);
   if (backup.cwd) parts.push(backup.cwd);
   if (backup.session_id) parts.push(backup.session_id);
   return parts.filter(Boolean).join(" · ");
+}
+
+async function searchChats(scope, query) {
+  return bridge("/chats/search", { scope, query });
+}
+
+function scheduleDeletedChatSearch(input) {
+  if (deletedChatSearchTimer) clearTimeout(deletedChatSearchTimer);
+  deletedChatSearchTimer = window.setTimeout(() => {
+    deletedChatSearchTimer = 0;
+    runDeletedChatSearch(input).catch((error) => {
+      setHelperText("[data-codex-helper-backups-status]", error?.message || String(error));
+      logDiagnostic("deleted_chat_search_failed", {
+        error: error?.message || String(error),
+      });
+    });
+  }, 250);
+}
+
+async function runDeletedChatSearch(input) {
+  const query = String(input?.value || "").trim();
+  const requestId = ++deletedChatSearchRequestId;
+  if (!query) {
+    if (deletedChatBackupsResult) renderDeletedSessionBackups(deletedChatBackupsResult);
+    return;
+  }
+  setHelperText("[data-codex-helper-backups-status]", "Searching deleted chats");
+  const result = await searchChats("deleted", query);
+  if (requestId !== deletedChatSearchRequestId) return;
+  renderDeletedChatSearchResults(result);
+}
+
+function renderDeletedChatSearchResults(result) {
+  const panels = helperSettingsRoots()
+    .map((root) => root.querySelector("[data-codex-helper-backups]"))
+    .filter((panel) => panel instanceof HTMLElement);
+  for (const panel of panels) {
+    panel.textContent = "";
+    if (result?.status !== "ok") {
+      const message = resultText(result);
+      setHelperText("[data-codex-helper-backups-status]", message);
+      panel.appendChild(createScrollEmptyMessage(message));
+      continue;
+    }
+    const matches = Array.isArray(result.matches) ? result.matches : [];
+    setHelperText(
+      "[data-codex-helper-backups-status]",
+      matches.length
+        ? `${matches.length} deleted chat match${matches.length === 1 ? "" : "es"}`
+        : "No deleted chat matches",
+    );
+    if (matches.length === 0) {
+      panel.appendChild(createScrollEmptyMessage("No deleted chats match this search."));
+      continue;
+    }
+    for (const match of matches) {
+      panel.appendChild(createCompactBackupRow(match, restoreButtonForChat(match)));
+    }
+  }
+}
+
+function installArchivedChatsSearch() {
+  const root = findArchivedChatsRoot();
+  if (!(root instanceof HTMLElement)) return false;
+  if (root.querySelector("[data-codex-helper-archived-chat-search]")) return true;
+  const heading = findArchivedChatsHeading(root);
+  if (!(heading instanceof HTMLElement)) return false;
+  const search = document.createElement("div");
+  search.className = "codex-helper-chat-search";
+  const remote = archivedChatsRootLooksRemote(root);
+  search.innerHTML = `
+    <input class="codex-helper-chat-search-input" data-codex-helper-archived-chat-search type="search" placeholder="${remote ? "Search is available for local archived chats only." : "Search archived chats"}" autocomplete="off" spellcheck="false" aria-label="Search archived chats"${remote ? " disabled" : ""}>
+    <div data-codex-helper-archived-chat-results></div>
+  `;
+  heading.insertAdjacentElement("afterend", search);
+  return true;
+}
+
+function findArchivedChatsHeading(root = document) {
+  return Array.from(root.querySelectorAll("h1, h2, h3, [role='heading'], div"))
+    .filter((node) => node instanceof HTMLElement && isVisibleElement(node))
+    .find((node) => exactText(node, "Archived chats")) || null;
+}
+
+function findArchivedChatsRoot() {
+  const heading = findArchivedChatsHeading(document);
+  if (!(heading instanceof HTMLElement)) return null;
+  let current = heading.parentElement;
+  for (let depth = 0; current instanceof HTMLElement && depth < 6; depth += 1) {
+    const text = textOf(current);
+    if (text.includes("Archived chats") && current.querySelector("button, a, input, [role='button']")) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return heading.parentElement;
+}
+
+function archivedChatsRootLooksRemote(root) {
+  const text = textOf(root).toLowerCase();
+  return (
+    text.includes("ssh") ||
+    text.includes("remote host") ||
+    text.includes("remote project")
+  );
+}
+
+function scheduleArchivedChatSearch(input) {
+  if (archivedChatSearchTimer) clearTimeout(archivedChatSearchTimer);
+  archivedChatSearchTimer = window.setTimeout(() => {
+    archivedChatSearchTimer = 0;
+    runArchivedChatSearch(input).catch((error) => {
+      renderArchivedChatSearchError(input, error?.message || String(error));
+      logDiagnostic("archived_chat_search_failed", {
+        error: error?.message || String(error),
+      });
+    });
+  }, 250);
+}
+
+async function runArchivedChatSearch(input) {
+  const query = String(input?.value || "").trim();
+  const requestId = ++archivedChatSearchRequestId;
+  if (!query) {
+    renderArchivedChatSearchResults(input, { status: "ok", matches: [] });
+    return;
+  }
+  const result = await searchChats("archived", query);
+  if (requestId !== archivedChatSearchRequestId) return;
+  renderArchivedChatSearchResults(input, result);
+}
+
+function archivedChatResultsPanel(input) {
+  const search = input?.closest?.(".codex-helper-chat-search");
+  return search?.querySelector?.("[data-codex-helper-archived-chat-results]") || null;
+}
+
+function renderArchivedChatSearchError(input, message) {
+  const panel = archivedChatResultsPanel(input);
+  if (!(panel instanceof HTMLElement)) return;
+  panel.textContent = "";
+  panel.appendChild(createScrollEmptyMessage(message));
+}
+
+function renderArchivedChatSearchResults(input, result) {
+  const panel = archivedChatResultsPanel(input);
+  if (!(panel instanceof HTMLElement)) return;
+  panel.textContent = "";
+  if (!String(input?.value || "").trim()) return;
+  if (result?.status !== "ok") {
+    panel.appendChild(createScrollEmptyMessage(resultText(result)));
+    return;
+  }
+  const matches = Array.isArray(result.matches) ? result.matches : [];
+  if (matches.length === 0) {
+    panel.appendChild(createScrollEmptyMessage("No archived chats match this search."));
+    return;
+  }
+  const list = document.createElement("div");
+  list.className = "codex-helper-panel";
+  for (const match of matches) {
+    list.appendChild(createArchivedChatResultRow(match));
+  }
+  panel.appendChild(list);
+}
+
+function createArchivedChatResultRow(chat) {
+  const link = document.createElement("a");
+  link.className = "codex-helper-settings-compact-row";
+  link.href = `/local/${String(chat.session_id || "").replace(/^local:/, "")}`;
+  const text = document.createElement("div");
+  text.className = "codex-helper-settings-compact-text";
+  const title = document.createElement("div");
+  title.className = "codex-helper-settings-compact-title";
+  title.textContent = chat.title || chat.session_id || "Untitled chat";
+  const meta = document.createElement("div");
+  meta.className = "codex-helper-settings-compact-meta";
+  meta.textContent = backupSummaryLine(chat);
+  text.appendChild(title);
+  if (meta.textContent) text.appendChild(meta);
+  link.appendChild(text);
+  return link;
 }
 
 function formatDateTime(value) {

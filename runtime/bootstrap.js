@@ -13,6 +13,7 @@ function installObserver() {
   const observer = new MutationObserver(() => {
     maintainPortsPanel();
     installNativeHelperSettingsGroup();
+    installArchivedChatsSearch();
     if (helperPageRoot && !helperPageRoot.isConnected) {
       clearHelperSettingsPage();
     }
@@ -205,11 +206,24 @@ function onHelperRuntimeChange(event) {
   });
 }
 
+function onHelperRuntimeInput(event) {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement)) return;
+  if (target.hasAttribute("data-codex-helper-deleted-chat-search")) {
+    scheduleDeletedChatSearch(target);
+    return;
+  }
+  if (target.hasAttribute("data-codex-helper-archived-chat-search")) {
+    scheduleArchivedChatSearch(target);
+  }
+}
+
 function removeHelperRuntimeEventListeners() {
   document.removeEventListener("click", onHelperRuntimeClick, true);
   document.removeEventListener("contextmenu", onHelperRuntimeContextMenu, true);
   document.removeEventListener("keydown", onHelperRuntimeKeydown, true);
   document.removeEventListener("change", onHelperRuntimeChange, true);
+  document.removeEventListener("input", onHelperRuntimeInput, true);
 }
 
 function installHelperRuntimeEventListeners() {
@@ -218,6 +232,7 @@ function installHelperRuntimeEventListeners() {
   document.addEventListener("contextmenu", onHelperRuntimeContextMenu, true);
   document.addEventListener("keydown", onHelperRuntimeKeydown, true);
   document.addEventListener("change", onHelperRuntimeChange, true);
+  document.addEventListener("input", onHelperRuntimeInput, true);
 }
 
 window.__codexHelperRuntimeCleanup = () => {
@@ -225,6 +240,8 @@ window.__codexHelperRuntimeCleanup = () => {
   if (maintainPortsPanelTimer) clearTimeout(maintainPortsPanelTimer);
   if (refreshPortsPanelTimer) clearTimeout(refreshPortsPanelTimer);
   if (pinnedSummaryHideTimer) clearTimeout(pinnedSummaryHideTimer);
+  if (deletedChatSearchTimer) clearTimeout(deletedChatSearchTimer);
+  if (archivedChatSearchTimer) clearTimeout(archivedChatSearchTimer);
   stopPortScanLoop();
   if (helperRuntimeObserver) helperRuntimeObserver.disconnect();
   closePortForwardRowMenu();
@@ -236,6 +253,8 @@ window.__codexHelperRuntimeCleanup = () => {
   maintainPortsPanelTimer = 0;
   refreshPortsPanelTimer = 0;
   pinnedSummaryHideTimer = 0;
+  deletedChatSearchTimer = 0;
+  archivedChatSearchTimer = 0;
   observerInstalled = false;
   helperRuntimeObserver = null;
 };
@@ -245,6 +264,7 @@ installHelperStyles();
 removeLegacyPortsBottomPanelUi();
 maintainPortsPanel();
 installNativeHelperSettingsGroup();
+installArchivedChatsSearch();
 refreshFeatureSettings().catch((error) => {
   logDiagnostic("settings_feature_refresh_failed", {
     error: error?.message || String(error),

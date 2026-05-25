@@ -68,7 +68,8 @@ test("settings page groups options by feature area", () => {
   expect(source).toContain('codex-helper-settings-section-title text-sm font-medium text-token-text-primary">Sessions</div>');
   expect(source).toContain('codex-helper-settings-section-title text-sm font-medium text-token-text-primary">Port forwarding</div>');
   expect(source).toContain('sectionHeading("Loaded scripts"');
-  expect(source).toContain('sectionHeading("Deleted sessions"');
+  expect(source).toContain('sectionHeading("Deleted chats"');
+  expect(source).not.toContain('sectionHeading("Deleted sessions"');
   expect(source).toContain('sectionHeading("Log files"');
   expect(source).toContain("https://github.com/loocor/codex-helper");
   expect(source).toContain('externalLinkRow("Project repository"');
@@ -81,6 +82,14 @@ test("settings page groups options by feature area", () => {
   expect(source).not.toContain("Helper directory");
   expect(source).toContain("codex-helper-settings-scroll");
   expect(source).toContain("createCompactBackupRow");
+  expect(source).toContain("codex-helper-chat-search-input");
+  expect(source).toContain("data-codex-helper-deleted-chat-search");
+  expect(source).toContain("data-codex-helper-archived-chat-search");
+  expect(source).toContain("installArchivedChatsSearch");
+  expect(source).toContain("searchChats");
+  expect(source).toContain('bridge("/chats/search"');
+  expect(source).toContain("codex-helper-settings-compact-title");
+  expect(source).toContain("codex-helper-settings-compact-meta");
   expect(source).toContain('move: "Move Session"');
   expect(source).toContain('const order = ["export", "move", "delete"]');
   expect(source).toContain("helperSessionMenuIcon");
@@ -103,7 +112,7 @@ test("native settings exposes a dedicated Helper group", () => {
   expect(source).toContain("data-codex-helper-native-settings-page");
   expect(source).toContain('label: "User Scripts"');
   expect(source).toContain("hidden: true");
-  expect(source).toContain('label: "Deleted Sessions"');
+  expect(source).toContain('label: "Deleted chats"');
   expect(source).toContain('label: "Logs"');
   expect(source).toContain('label: "About"');
   expect(source).toContain("installNativeHelperSettingsGroup");
@@ -123,6 +132,7 @@ test("native settings pages follow worktree-style sparse list layout", () => {
   expect(source).not.toContain("codex-helper-native-settings-list-status");
   expect(source).not.toContain('nativeSettingsSection("User Scripts"');
   expect(source).not.toContain('nativeSettingsSection("Deleted Sessions"');
+  expect(source).not.toContain('label: "Deleted Sessions"');
   expect(source).not.toContain('nativeSettingsSection("Logs"');
 });
 
