@@ -1,7 +1,13 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { buildRuntimeBundle } from "./bundle.ts";
 
 const source = buildRuntimeBundle();
+const nativeSettingsSource = readFileSync(
+  join(import.meta.dir, "native-settings.js"),
+  "utf8",
+);
 
 test("settings sidebar detection does not scan arbitrary div containers", () => {
   expect(source).not.toContain(
@@ -142,6 +148,33 @@ test("native settings about page is independent from general", () => {
   expect(source).not.toContain('nativeSettingsExternalLinkRow(\n        "Project repository"');
 });
 
+test("runtime bundle injects the helper build date at build time", () => {
+  const previous = process.env.CODEX_HELPER_BUILD_DATE;
+  try {
+    process.env.CODEX_HELPER_BUILD_DATE = "May 26, 2026";
+    const bundled = buildRuntimeBundle();
+
+    expect(bundled).toContain('const helperBuildDate = "May 26, 2026";');
+    expect(bundled).not.toContain("__CODEX_HELPER_BUILD_DATE__");
+  } finally {
+    if (previous === undefined) delete process.env.CODEX_HELPER_BUILD_DATE;
+    else process.env.CODEX_HELPER_BUILD_DATE = previous;
+  }
+});
+
+test("runtime bundle escapes the injected helper build date", () => {
+  const previous = process.env.CODEX_HELPER_BUILD_DATE;
+  try {
+    process.env.CODEX_HELPER_BUILD_DATE = 'May "26", 2026';
+    const bundled = buildRuntimeBundle();
+
+    expect(bundled).toContain('const helperBuildDate = "May \\"26\\", 2026";');
+  } finally {
+    if (previous === undefined) delete process.env.CODEX_HELPER_BUILD_DATE;
+    else process.env.CODEX_HELPER_BUILD_DATE = previous;
+  }
+});
+
 test("native settings surface has independent ownership markers", () => {
   expect(source).toContain("helperNativeSettingsPageAttribute");
   expect(source).toContain("helperNativeSettingsGroupAttribute");
@@ -151,6 +184,116 @@ test("native settings surface has independent ownership markers", () => {
   expect(source).toContain("restoreNativeSettingsContent");
   expect(source).toContain("findNativeSettingsContentRoot");
   expect(source).toContain("findNativeSettingsScrollContentRoot");
+});
+
+test("native settings content root lookup does not require a minimum viewport size", () => {
+  expect(source).not.toContain("rect.width > 520");
+  expect(source).not.toContain("rect.height > 360");
+  expect(source).not.toContain("rect.width <= 520");
+  expect(source).not.toContain("rect.height <= 360");
+
+  class FakeElement {
+    constructor(rect, options = {}) {
+      this.rect = rect;
+      this.className = options.className || "";
+      this.style = options.style || {};
+      this.children = [];
+      this.parentElement = null;
+      this.queryResults = options.queryResults || [];
+    }
+
+    append(...children) {
+      for (const child of children) {
+        child.parentElement = this;
+        this.children.push(child);
+      }
+    }
+
+    contains(node) {
+      return node === this || this.children.some((child) => child.contains(node));
+    }
+
+    closest() {
+      return null;
+    }
+
+    querySelector() {
+      return null;
+    }
+
+    querySelectorAll() {
+      return this.queryResults;
+    }
+
+    getBoundingClientRect() {
+      return this.rect;
+    }
+  }
+
+  const sidebar = new FakeElement({
+    left: 0,
+    top: 0,
+    width: 240,
+    height: 240,
+    right: 240,
+  });
+  const compactContent = new FakeElement({
+    left: 248,
+    top: 0,
+    width: 320,
+    height: 240,
+    right: 568,
+  });
+  const compactScrollRoot = new FakeElement(
+    {
+      left: 260,
+      top: 12,
+      width: 300,
+      height: 180,
+      right: 560,
+    },
+    { className: "scrollbar-stable", style: { overflowY: "auto" } },
+  );
+  compactContent.queryResults = [compactScrollRoot];
+  const layout = new FakeElement({
+    left: 0,
+    top: 0,
+    width: 568,
+    height: 240,
+    right: 568,
+  });
+  const body = new FakeElement({
+    left: 0,
+    top: 0,
+    width: 568,
+    height: 240,
+    right: 568,
+  });
+  layout.append(sidebar, compactContent);
+  body.append(layout);
+
+  const factory = new Function(
+    "HTMLElement",
+    "document",
+    "getComputedStyle",
+    `
+      const helperNativeSettingsGroupAttribute = "data-codex-helper-native-settings-group";
+      const helperNativeSettingsEntryAttribute = "data-codex-helper-native-settings-entry";
+      function isVisibleElement(node) {
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      }
+      ${nativeSettingsSource}
+      return { findNativeSettingsContentRoot };
+    `,
+  );
+  const { findNativeSettingsContentRoot } = factory(
+    FakeElement,
+    { body },
+    (node) => node.style,
+  );
+
+  expect(findNativeSettingsContentRoot(sidebar)).toBe(compactScrollRoot);
 });
 
 test("native settings open failures surface explicit errors", () => {

@@ -222,8 +222,8 @@ function findNativeSettingsContentRoot(sidebar) {
       )
       .sort(
         (a, b) =>
-          b.getBoundingClientRect().width * b.getBoundingClientRect().height -
-          a.getBoundingClientRect().width * a.getBoundingClientRect().height,
+          nativeSettingsContentRootScore(b, sidebarRect) -
+          nativeSettingsContentRootScore(a, sidebarRect),
       )[0];
     if (root instanceof HTMLElement) {
       return findNativeSettingsScrollContentRoot(root, sidebar, sidebarRect) || root;
@@ -241,10 +241,22 @@ function findNativeSettingsScrollContentRoot(root, sidebar, sidebarRect) {
       )
       .sort(
         (a, b) =>
-          b.getBoundingClientRect().width * b.getBoundingClientRect().height -
-          a.getBoundingClientRect().width * a.getBoundingClientRect().height,
+          nativeSettingsContentRootScore(b, sidebarRect) -
+          nativeSettingsContentRootScore(a, sidebarRect),
       )[0] || null
   );
+}
+
+function nativeSettingsContentRootScore(root, sidebarRect) {
+  const rect = root.getBoundingClientRect();
+  const style = getComputedStyle(root);
+  const className = String(root.className || "");
+  let score = rect.width * rect.height;
+  if (rect.left >= sidebarRect.right - 8) score += 1_000_000_000;
+  if (className.includes("p-panel")) score += 20_000;
+  if (className.includes("scrollbar-stable")) score += 10_000;
+  if (style.overflowY === "auto" || style.overflowY === "scroll") score += 5_000;
+  return score;
 }
 
 function isValidNativeSettingsScrollContentRoot(root, sidebar, sidebarRect) {
@@ -254,12 +266,7 @@ function isValidNativeSettingsScrollContentRoot(root, sidebar, sidebarRect) {
   if (root.querySelector(`[${helperNativeSettingsEntryAttribute}]`))
     return false;
   const rect = root.getBoundingClientRect();
-  if (
-    rect.width <= 520 ||
-    rect.height <= 360 ||
-    rect.left < sidebarRect.right - 8
-  )
-    return false;
+  if (rect.left < sidebarRect.right - 8) return false;
   const style = getComputedStyle(root);
   const className = String(root.className || "");
   return (
@@ -277,11 +284,7 @@ function isValidNativeSettingsContentRoot(root, sidebar, sidebarRect) {
   if (root.querySelector(`[${helperNativeSettingsEntryAttribute}]`))
     return false;
   const rect = root.getBoundingClientRect();
-  return (
-    rect.width > 520 &&
-    rect.height > 360 &&
-    rect.left >= sidebarRect.right - 8
-  );
+  return rect.left >= sidebarRect.right - 8;
 }
 
 function stashNativeSettingsContent(host) {

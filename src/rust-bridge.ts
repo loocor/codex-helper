@@ -37,19 +37,24 @@ function bridgeBinaryName(): string {
 }
 
 function absolutePath(path: string): boolean {
-	return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path);
+	return (
+		path.startsWith("/") ||
+		path.startsWith("\\\\") ||
+		path.startsWith("//") ||
+		/^[A-Za-z]:[\\/]/.test(path)
+	);
 }
 
-function configuredBridgeBinaryPath(): string | null {
+function configuredBridgeBinaryPath(root = repoRoot()): string | null {
 	const configured = process.env.CODEX_HELPER_BRIDGE_BIN?.trim();
 	if (!configured) return null;
-	return absolutePath(configured) ? configured : join(repoRoot(), configured);
+	return absolutePath(configured) ? configured : join(root, configured);
 }
 
 export function rustBridgeCandidatePaths(root = repoRoot()): string[] {
 	const binaryName = bridgeBinaryName();
 	const candidates: string[] = [];
-	const configured = configuredBridgeBinaryPath();
+	const configured = configuredBridgeBinaryPath(root);
 	if (configured) candidates.push(configured);
 	const cargoTargetDir = process.env.CARGO_TARGET_DIR?.trim();
 	if (cargoTargetDir) {
@@ -70,28 +75,40 @@ export function rustBridgeCandidatePaths(root = repoRoot()): string[] {
 	return Array.from(new Set(candidates));
 }
 
+function shellQuote(value: string): string {
+	return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
 function rustBridgeBuildCommand(root = repoRoot()): string {
+	const manifestPath = shellQuote(join(root, "src-tauri", "Cargo.toml"));
+	if (process.platform === "win32") {
+		return [
+			"cargo build",
+			`--manifest-path ${manifestPath}`,
+			"--bin codex-helper-bridge",
+		].join(" ");
+	}
 	return [
 		"env RUSTC_WRAPPER=",
 		"cargo build",
-		`--manifest-path ${join(root, "src-tauri", "Cargo.toml")}`,
+		`--manifest-path ${manifestPath}`,
 		"--bin codex-helper-bridge",
 	].join(" ");
 }
 
-export function rustBridgeBinaryPath(): string {
-	const configured = configuredBridgeBinaryPath();
-	const candidates = rustBridgeCandidatePaths();
+export function rustBridgeBinaryPath(root = repoRoot()): string {
+	const configured = configuredBridgeBinaryPath(root);
+	const candidates = rustBridgeCandidatePaths(root);
 	if (configured && !existsSync(configured)) {
 		throw new Error(
-			`Configured Rust bridge binary not found: ${configured}. Build it with: ${rustBridgeBuildCommand()}`,
+			`Configured Rust bridge binary not found: ${configured}. Build it with: ${rustBridgeBuildCommand(root)}`,
 		);
 	}
 	for (const binary of candidates) {
 		if (existsSync(binary)) return binary;
 	}
 	throw new Error(
-		`Rust bridge binary not found. Build it with: ${rustBridgeBuildCommand()}. Checked: ${candidates.join(", ")}`,
+		`Rust bridge binary not found. Build it with: ${rustBridgeBuildCommand(root)}. Checked: ${candidates.join(", ")}`,
 	);
 }
 

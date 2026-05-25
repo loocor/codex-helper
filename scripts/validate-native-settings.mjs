@@ -1,9 +1,10 @@
-import { writeFileSync } from "node:fs";
+import {
+  resolveScreenshotPath,
+  writeScreenshot,
+} from "./validate-native-settings-helpers.mjs";
 
 const debugPort = Number(process.env.CODEX_HELPER_DEBUG_PORT || 9229);
-const screenshotPath =
-  process.env.CODEX_HELPER_VALIDATE_SCREENSHOT ||
-  "/private/tmp/codex-helper-native-settings-logs.png";
+const screenshotPath = resolveScreenshotPath();
 
 const version = await fetch(`http://127.0.0.1:${debugPort}/json/version`).then(
   (response) => response.json(),
@@ -302,7 +303,7 @@ const screenshot = await call(
   { format: "png", captureBeyondViewport: false },
   sessionId,
 );
-writeFileSync(screenshotPath, Buffer.from(screenshot.result.data, "base64"));
+writeScreenshot(screenshotPath, screenshot.result.data);
 
 const result = {
   ok: failures.length === 0,

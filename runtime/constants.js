@@ -20,7 +20,7 @@ const helperPortsPinnedAttribute = "data-codex-helper-ports-pinned";
 let portsSurface = "none";
 const helperSettingsPanelId = "codex-helper-settings-panel";
 const helperRepoUrl = "https://github.com/loocor/codex-helper";
-const helperBuildDate = "May 25, 2026";
+const helperBuildDate = "__CODEX_HELPER_BUILD_DATE__";
 const helperActionClass =
   "codex-helper-action border-token-border user-select-none no-drag cursor-interaction flex shrink-0 items-center gap-1 border whitespace-nowrap rounded-lg px-2 py-1 text-sm text-token-foreground bg-token-foreground/5 enabled:hover:bg-token-foreground/10";
 const helperPanelClass =
