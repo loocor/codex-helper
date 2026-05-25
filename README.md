@@ -1,42 +1,39 @@
 # Codex Helper
 
-Codex Helper is a lightweight local enhancement launcher for Codex desktop.
+[中文说明](README_CN.md)
 
-It starts Codex through an external launcher and injects local enhancements at runtime through the browser debugging interface. It does not modify Codex application files, so it can be removed without repairing or reinstalling Codex.
+Codex Helper is a lightweight local launcher for Codex desktop that adds local settings, session tools, diagnostics, and port-forwarding controls without modifying the installed Codex app.
 
-The first goal is a small, inspectable app that opens Codex, installs a local runtime bridge, and loads local tweaks without requiring a separate runtime after the app is built.
+It starts Codex through `CodexHelper.app`, injects a small runtime through the browser debugging interface, and keeps all Helper-owned state under `~/.codex-helper`.
 
 ## Features
 
-- Launch Codex with runtime enhancements enabled from `CodexHelper.app`
-- Inject local renderer runtime code without patching `app.asar`
-- Load local tweaks from the project runtime directory
-- Open DevTools for inspecting injected runtime behavior
-- Keep the Codex application bundle unchanged
-- Store local logs, backups, config, state, and user scripts under `~/.codex-helper`
-- Configure tweaks from the injected `Codex Helper` page inside Codex Settings
-- Run silently as a macOS menu bar helper after launch
-
-Initial built-in tweaks:
-
-- Show diagnostics for launch, bridge, runtime, and user-script failures
-- Load local user scripts from `~/.codex-helper/scripts`
-- Restore Codex's native Zed open option for remote contexts without adding a separate button
-- Persist Settings switches for session deletion, Markdown export, and session movement
-
-Planned built-in tweaks:
-
-- Export conversations to Markdown
-- Delete local conversation records with backup support
-- Move conversations between Chat and Project contexts
+- Launch Codex with Helper runtime enhancements enabled.
+- Run silently as a macOS menu bar helper after launch.
+- Add a Helper section inside Codex Settings for configuration and diagnostics.
+- Show backend status, runtime logs, and bridge diagnostics from Codex Settings.
+- Restore Codex's native Zed open option for remote contexts.
+- Add opt-in session actions for Markdown export, session deletion, and moving sessions between workspaces.
+- Keep deleted-session backups available for restore from Codex Settings.
+- Detect and forward ports from remote Codex sessions.
+- Open DevTools for inspecting injected runtime behavior.
 
 ## Design
 
 Codex Helper uses external runtime injection instead of patching Codex app files. The Tauri app starts Codex with a local debugging endpoint, selects the Codex renderer target, installs a small bridge, and loads local enhancement scripts.
 
-The default app launch is silent. Codex Helper does not show a separate manager window during normal use. After injection succeeds, the configuration surface appears inside Codex Settings as a single `Codex Helper` sidebar item.
+The default app launch is silent. Codex Helper does not show a separate manager window during normal use. After injection succeeds, configuration appears inside Codex Settings as a Helper section with pages for General, Deleted Sessions, Logs, and About.
 
 This keeps Codex's installed application bundle unchanged. Removing Codex Helper only removes the launcher, `~/.codex-helper`, and local enhancement files.
+
+## Safety Model
+
+Codex Helper keeps its runtime and state outside the Codex application bundle.
+
+- It does not patch `app.asar`.
+- It stores Helper-owned logs, config, backups, and state under `~/.codex-helper`.
+- Session deletion creates a local backup under `~/.codex-helper/backups` before modifying local session data.
+- Feature switches are opt-in and stored in Helper config.
 
 ## Local State
 
@@ -46,12 +43,11 @@ Codex Helper owns one state directory:
 ~/.codex-helper/
   logs/
   backups/
-  scripts/
   config.json
   state.json
 ```
 
-Failures are written to `~/.codex-helper/logs/codex-helper.jsonl`. Destructive tweaks must write backups under `~/.codex-helper/backups` before modifying Codex data.
+Failures are written to `~/.codex-helper/logs/codex-helper.jsonl`.
 
 ## Development
 
@@ -65,7 +61,7 @@ bun run build:app
 
 The Tauri backend currently targets macOS `/Applications/Codex.app` by default.
 
-`Bun` is used for development scripts in this repository. A built `CodexHelper.app` runs as a Rust/Tauri application and does not require Bun at runtime; injected scripts execute inside the Codex renderer.
+Bun is used for development scripts in this repository. A built `CodexHelper.app` runs as a Rust/Tauri application and does not require Bun at runtime; injected scripts execute inside the Codex renderer.
 
 `bun run build:app` runs `scripts/build-macos-dmg.sh` and writes `dist/macos/CodexHelper-<version>-macos-<arch>.dmg`.
 
@@ -73,13 +69,9 @@ The Tauri backend currently targets macOS `/Applications/Codex.app` by default.
 
 Push a `v*` tag to build signed, notarized DMGs via GitHub Actions. See [docs/release-guide.md](docs/release-guide.md) for secrets and local signing.
 
-App and menu bar icons live in `src-tauri/icons/`:
-
-- `icon.png` — application icon (committed; used for `.app` / DMG and Tauri bundle metadata)
-- `tray.png` — menu bar template source (black on transparent; build generates `tray-menu.png`)
-
-If local Rust builds fail with `sccache: error: Operation not permitted`, run Cargo with `RUSTC_WRAPPER=` as shown above.
-
 ## Acknowledgements
 
-This project learned from the dynamic launcher approach used by BigPizzaV3/CodexPlusPlus and the tweak-oriented user experience explored by b-nnett/codex-plusplus.
+This project learned from two Codex desktop enhancement projects:
+
+- [BigPizzaV3/CodexPlusPlus](https://github.com/BigPizzaV3/CodexPlusPlus) inspired the dynamic injection approach, and Codex Helper references parts of its implementation model while keeping the installed Codex app unchanged.
+- [b-nnett/codex-plusplus](https://github.com/b-nnett/codex-plusplus) inspired the UI integration direction and User Script ideas (not yet developed in Codex Helper). Its implementation patches the Codex app directly, while Codex Helper currently uses dynamic injection, so that area remains intentionally separate.
