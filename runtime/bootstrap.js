@@ -119,6 +119,26 @@ function onHelperRuntimeClick(event) {
   });
 }
 
+function replaySessionContextMenu(event, target) {
+  target.dispatchEvent(
+    new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      screenX: event.screenX,
+      screenY: event.screenY,
+      button: event.button,
+      buttons: event.buttons,
+      ctrlKey: event.ctrlKey,
+      shiftKey: event.shiftKey,
+      altKey: event.altKey,
+      metaKey: event.metaKey,
+    }),
+  );
+}
+
 function onHelperRuntimeContextMenu(event) {
   const target = event.target;
   if (!(target instanceof Element)) return;
@@ -131,18 +151,26 @@ function onHelperRuntimeContextMenu(event) {
   }
   const row = sessionRowFromTarget(target);
   if (!(row instanceof HTMLElement)) return;
+  if (!featureSettingsLoaded && !sessionContextMenuReplayInFlight) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    sessionContextMenuReplayInFlight = true;
+    refreshFeatureSettings()
+      .catch((error) => {
+        logDiagnostic("session_menu_settings_failed", {
+          error: error?.message || String(error),
+        });
+      })
+      .finally(() => {
+        try {
+          if (target.isConnected) replaySessionContextMenu(event, target);
+        } finally {
+          sessionContextMenuReplayInFlight = false;
+        }
+      });
+    return;
+  }
   trackSessionContextMenu(row);
-  if (enabledSessionActions().length === 0) return;
-  event.preventDefault();
-  event.stopImmediatePropagation();
-  const ref = sessionRefFromRow(row);
-  if (!ref.session_id) return;
-  showExtendedSessionContextMenu(row, ref).catch((error) => {
-    showHelperToast(error?.message || String(error));
-    logDiagnostic("session_menu_open_failed", {
-      error: error?.message || String(error),
-    });
-  });
 }
 
 function onHelperRuntimeKeydown(event) {
@@ -202,6 +230,7 @@ window.__codexHelperRuntimeCleanup = () => {
   closePortForwardRowMenu();
   closePortForwardDialog();
   clearNativeHelperSettingsPage();
+  if (sessionContextMenuMapRestore) sessionContextMenuMapRestore();
   removeHelperRuntimeEventListeners();
   pendingPortScan = 0;
   maintainPortsPanelTimer = 0;
