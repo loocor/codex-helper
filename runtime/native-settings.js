@@ -447,6 +447,17 @@ function nativeSettingsSwitchRow(title, description, descKey, toggleKey, ariaLab
     </div>`;
 }
 
+function nativeSettingsNumberRow(title, description, numberKey, ariaLabel) {
+  return `
+    <div class="flex items-center justify-between gap-4 p-3">
+      <div class="flex min-w-0 flex-col gap-1">
+        <div class="min-w-0 text-sm text-token-text-primary">${title}</div>
+        <div class="text-token-text-secondary min-w-0 text-sm" data-codex-helper-setting-desc="${numberKey}">${description}</div>
+      </div>
+      <input type="number" min="1" max="20" step="1" class="codex-helper-number-input" ${helperNumberAttribute}="${numberKey}" aria-label="${ariaLabel}">
+    </div>`;
+}
+
 function nativeSettingsActionRow(title, detail, command, buttonLabel, detailAttr = "") {
   return `
     <div class="flex items-center justify-between gap-4 p-3">
@@ -528,6 +539,12 @@ function nativeSettingsPageContent(pageId) {
     ${nativeSettingsPanel(`
       ${nativeSettingsSwitchRow("Markdown export", "Export conversations as Markdown from the session menu.", "markdownExportEnabled", "markdownExportEnabled", "Markdown export")}
       ${nativeSettingsSwitchRow("Fork sessions", "Fork sessions into local, remote, or another project from the sidebar context menu.", "sessionMoveEnabled", "sessionMoveEnabled", "Fork sessions")}
+    `)}
+    ${nativeSettingsPanel(`
+      ${nativeSettingsSwitchRow("Regenerate chat title", "Show Regenerate chat title in the session context menu.", "autoRenameMenuEnabled", "autoRenameMenuEnabled", "Regenerate chat title")}
+      ${nativeSettingsSwitchRow("Friendly Markdown filenames", "Use Codex auto naming for exported Markdown filenames.", "markdownFriendlyFilenameEnabled", "markdownFriendlyFilenameEnabled", "Friendly Markdown filenames")}
+      ${nativeSettingsNumberRow("Minimum characters", "Smallest expected auto name length.", "autoNamingMinChars", "Minimum auto naming characters")}
+      ${nativeSettingsNumberRow("Maximum characters", "Largest expected auto name length; 10 works well for Chinese names.", "autoNamingMaxChars", "Maximum auto naming characters")}
     `)}
     ${nativeSettingsPanel(`
       ${nativeSettingsSwitchRow("Enable port forwarding", "Detect and forward ports from agent sessions.", "portForwardingEnabled", "portForwardingEnabled", "Enable port forwarding")}

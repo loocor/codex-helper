@@ -144,6 +144,22 @@ function onHelperRuntimeKeydown(event) {
 function onHelperRuntimeChange(event) {
   const target = event.target;
   if (!(target instanceof HTMLInputElement)) return;
+  if (target.hasAttribute(helperNumberAttribute)) {
+    event.preventDefault();
+    event.stopPropagation();
+    handleHelperNumberInput(target).catch((error) => {
+      target.disabled = false;
+      setHelperText(
+        "[data-codex-helper-backend]",
+        error?.message || String(error),
+      );
+      logDiagnostic("settings_update_failed", {
+        key: target.getAttribute(helperNumberAttribute),
+        error: error?.message || String(error),
+      });
+    });
+    return;
+  }
   if (!target.hasAttribute(helperToggleAttribute)) return;
   event.preventDefault();
   event.stopPropagation();

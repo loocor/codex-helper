@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 
 use crate::codex_app_server::{CodexAppServerClient, ThreadForker};
-use crate::markdown::{export_rollout, MarkdownExportService};
+use crate::markdown::{export_validated_rollout, validate_exportable_rollout};
 use crate::models::SessionRef;
 use crate::zed::{resolve_ssh_target_for_host_id, SshTarget};
 
@@ -15,23 +15,38 @@ pub fn export_markdown_response(payload: &Value) -> Value {
         Ok(session) => {
             let host_id = string_payload(payload, "host_id")
                 .or_else_nonempty(|| string_payload(payload, "hostId"));
-            if host_id.is_empty() {
-                return match default_codex_db_path() {
-                    Ok(db_path) => serde_json::to_value(
-                        MarkdownExportService::new(Some(db_path)).export(&session),
-                    )
-                    .unwrap_or_else(failed_value),
-                    Err(error) => failed_export_value(&session.session_id, error.to_string()),
-                };
-            }
             let result = (|| -> anyhow::Result<Value> {
-                let target = resolve_ssh_target_for_host_id(&host_id, None)?;
-                let record = remote_thread_record(&target, &session)?;
-                let rollout = download_remote_rollout(&target, &record.rollout_path)?;
-                Ok(serde_json::to_value(export_rollout(
-                    &crate::codex_app_server::normalize_thread_id(&session.session_id),
-                    &record.title.unwrap_or_else(|| session.title.clone()),
-                    rollout.path(),
+                let thread_id = crate::codex_app_server::normalize_thread_id(&session.session_id);
+                let (base_title, rollout) = if host_id.is_empty() {
+                    let db_path = default_codex_db_path()?;
+                    if !db_path.exists() {
+                        anyhow::bail!("Database does not exist:{}", db_path.to_string_lossy());
+                    }
+                    let record = local_thread_record(&db_path, &session)?;
+                    (
+                        record.title.unwrap_or_else(|| session.title.clone()),
+                        SourceRollout::Local(PathBuf::from(record.rollout_path)),
+                    )
+                } else {
+                    let target = resolve_ssh_target_for_host_id(&host_id, None)?;
+                    let record = remote_thread_record(&target, &session)?;
+                    let rollout = download_remote_rollout(&target, &record.rollout_path)?;
+                    (
+                        record.title.unwrap_or_else(|| session.title.clone()),
+                        SourceRollout::Temp(rollout),
+                    )
+                };
+                let exportable_rollout =
+                    match validate_exportable_rollout(&thread_id, rollout.path()) {
+                        Ok(exportable_rollout) => exportable_rollout,
+                        Err(result) => return Ok(serde_json::to_value(result)?),
+                    };
+                let title =
+                    friendly_title_for_export(payload, &session, &host_id)?.unwrap_or(base_title);
+                Ok(serde_json::to_value(export_validated_rollout(
+                    &thread_id,
+                    &title,
+                    &exportable_rollout,
                 ))?)
             })();
             result
@@ -39,6 +54,36 @@ pub fn export_markdown_response(payload: &Value) -> Value {
         }
         Err(error) => failed_export_value("", error.to_string()),
     }
+}
+
+pub fn auto_rename_chat_response(payload: &Value) -> Value {
+    let result = (|| -> anyhow::Result<Value> {
+        let session = session_from_payload(payload)?;
+        let options = auto_naming_options_from_payload(payload)?;
+        let host_id = string_payload(payload, "host_id")
+            .or_else_nonempty(|| string_payload(payload, "hostId"));
+        let client = app_server_client_for_host(&host_id)?;
+        let name = client.generate_thread_name(
+            &session.session_id,
+            options.min_chars,
+            options.max_chars,
+        )?;
+        client.set_thread_name(&session.session_id, &name)?;
+        Ok(json!({
+            "status": "renamed",
+            "session_id": crate::codex_app_server::normalize_thread_id(&session.session_id),
+            "name": name,
+            "source": "generated",
+            "message": format!("Regenerated chat title: {name}"),
+        }))
+    })();
+    result.unwrap_or_else(|error| {
+        json!({
+            "status": "failed",
+            "session_id": payload.get("session_id").or_else(|| payload.get("sessionId")).and_then(Value::as_str).unwrap_or(""),
+            "message": error.to_string(),
+        })
+    })
 }
 
 pub fn fork_thread_project_response(payload: &Value) -> Value {
@@ -141,6 +186,64 @@ fn string_payload(payload: &Value, key: &str) -> String {
         .to_string()
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AutoNamingOptions {
+    min_chars: u8,
+    max_chars: u8,
+}
+
+fn auto_naming_options_from_payload(payload: &Value) -> anyhow::Result<AutoNamingOptions> {
+    let min_chars = char_count_payload_alias(payload, "autoNamingMinChars", "autoNamingMinWords")?;
+    let max_chars = char_count_payload_alias(payload, "autoNamingMaxChars", "autoNamingMaxWords")?;
+    if min_chars > max_chars {
+        anyhow::bail!("autoNamingMinChars must be less than or equal to autoNamingMaxChars");
+    }
+    Ok(AutoNamingOptions {
+        min_chars,
+        max_chars,
+    })
+}
+
+fn char_count_payload(payload: &Value, key: &str) -> anyhow::Result<u8> {
+    let value = payload
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("{key} must be an integer"))?;
+    if !(1..=20).contains(&value) {
+        anyhow::bail!("{key} must be between 1 and 20");
+    }
+    Ok(value as u8)
+}
+
+fn char_count_payload_alias(payload: &Value, key: &str, legacy_key: &str) -> anyhow::Result<u8> {
+    if payload.get(key).is_some() {
+        return char_count_payload(payload, key);
+    }
+    char_count_payload(payload, legacy_key)
+}
+
+fn friendly_title_for_export(
+    payload: &Value,
+    session: &SessionRef,
+    host_id: &str,
+) -> anyhow::Result<Option<String>> {
+    if payload
+        .get("friendlyFilename")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        != true
+    {
+        return Ok(None);
+    }
+    let options = auto_naming_options_from_payload(payload)?;
+    let client = app_server_client_for_host(host_id)?;
+    Ok(Some(client.generate_thread_name(
+        &session.session_id,
+        options.min_chars,
+        options.max_chars,
+    )?))
+}
+
 #[derive(Debug, Clone)]
 struct ThreadRecord {
     title: Option<String>,
@@ -190,18 +293,48 @@ fn source_rollout_local_path(
 fn local_thread_record(db_path: &Path, session: &SessionRef) -> anyhow::Result<ThreadRecord> {
     let thread_id = crate::codex_app_server::normalize_thread_id(&session.session_id);
     let db = Connection::open(db_path)?;
-    let (title, rollout_path): (Option<String>, String) = db.query_row(
+    if !supports_codex_threads(&db)? {
+        anyhow::bail!("Current local storage structure not supported");
+    }
+    let row = db.query_row(
         "SELECT title, rollout_path FROM threads WHERE id = ?1",
         [&thread_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
+        |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+    );
+    let (title, rollout_path) = match row {
+        Ok(row) => row,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            anyhow::bail!("Corresponding session not found")
+        }
+        Err(error) => return Err(error.into()),
+    };
     if rollout_path.trim().is_empty() {
         anyhow::bail!("Session missing rollout file path for thread {thread_id}");
     }
     Ok(ThreadRecord {
         title,
-        rollout_path,
+        rollout_path: rollout_path.trim().to_string(),
     })
+}
+
+fn supports_codex_threads(db: &Connection) -> anyhow::Result<bool> {
+    let has_threads = db
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'threads'",
+            [],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if !has_threads {
+        return Ok(false);
+    }
+    let mut stmt = db.prepare("PRAGMA table_info(\"threads\")")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(["id", "title", "rollout_path"]
+        .iter()
+        .all(|column| columns.iter().any(|existing| existing == column)))
 }
 
 fn remote_thread_record(target: &SshTarget, session: &SessionRef) -> anyhow::Result<ThreadRecord> {
@@ -470,10 +603,6 @@ fn session_from_payload(payload: &Value) -> anyhow::Result<SessionRef> {
 fn default_codex_db_path() -> anyhow::Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Home directory not found"))?;
     Ok(home.join(".codex").join("state_5.sqlite"))
-}
-
-fn failed_value(error: serde_json::Error) -> Value {
-    failed_export_value("", error.to_string())
 }
 
 fn failed_export_value(session_id: &str, message: impl Into<String>) -> Value {

@@ -14,6 +14,7 @@ type JsonValue =
 	| { [key: string]: JsonValue };
 
 const RUST_BRIDGE_PATHS = new Set([
+	"/auto-rename-chat",
 	"/export-markdown",
 	"/fork-thread-project",
 	"/projects/remote-list",

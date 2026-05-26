@@ -37,6 +37,10 @@ type JsonValue =
 type HelperSettings = {
 	markdownExportEnabled: boolean;
 	sessionMoveEnabled: boolean;
+	autoRenameMenuEnabled: boolean;
+	markdownFriendlyFilenameEnabled: boolean;
+	autoNamingMinChars: number;
+	autoNamingMaxChars: number;
 	portForwardingEnabled: boolean;
 	portAutoForwardWeb: boolean;
 	portSameLocalPort: boolean;
@@ -45,6 +49,10 @@ type HelperSettings = {
 const defaultSettings: HelperSettings = {
 	markdownExportEnabled: false,
 	sessionMoveEnabled: false,
+	autoRenameMenuEnabled: false,
+	markdownFriendlyFilenameEnabled: true,
+	autoNamingMinChars: 4,
+	autoNamingMaxChars: 10,
 	portForwardingEnabled: false,
 	portAutoForwardWeb: true,
 	portSameLocalPort: true,
@@ -122,15 +130,21 @@ function readSettings(): HelperSettings {
 	const object = settings as Record<string, JsonValue>;
 	for (const [key, value] of Object.entries(object)) {
 		if (key in defaultSettings) {
-			if (typeof value !== "boolean") {
-				throw new Error(`Settings value for ${key} must be a boolean`);
+			setSettingValue(next, key, value);
+			continue;
+		}
+		const canonicalAutoNamingKey = canonicalAutoNamingSettingKey(key);
+		if (canonicalAutoNamingKey) {
+			if (Object.prototype.hasOwnProperty.call(object, canonicalAutoNamingKey)) {
+				continue;
 			}
-			(next as Record<string, boolean>)[key] = value;
+			setSettingValue(next, key, value);
 			continue;
 		}
 		if (legacySettingsKeys.has(key)) continue;
 		throw new Error(`Unknown settings key: ${key}`);
 	}
+	validateAutoNamingRange(next);
 	return next;
 }
 
@@ -139,19 +153,74 @@ function updateSettings(payload: Record<string, JsonValue>): HelperSettings {
 	const next: HelperSettings = { ...current };
 	for (const [key, value] of Object.entries(payload)) {
 		if (!(key in defaultSettings)) {
-			throw new Error(`Unknown settings key: ${key}`);
+			const canonicalAutoNamingKey = canonicalAutoNamingSettingKey(key);
+			if (!canonicalAutoNamingKey) {
+				throw new Error(`Unknown settings key: ${key}`);
+			}
+			if (Object.prototype.hasOwnProperty.call(payload, canonicalAutoNamingKey)) {
+				continue;
+			}
 		}
-		if (typeof value !== "boolean") {
-			throw new Error(`Settings value for ${key} must be a boolean`);
-		}
-		(next as Record<string, boolean>)[key] = value;
+		setSettingValue(next, key, value);
 	}
+	validateAutoNamingRange(next);
 	writeFileSync(
 		helperConfigPath(),
 		`${JSON.stringify(next, null, 2)}\n`,
 		"utf8",
 	);
 	return next;
+}
+
+function canonicalAutoNamingSettingKey(key: string): string {
+	if (key === "autoNamingMinWords") return "autoNamingMinChars";
+	if (key === "autoNamingMaxWords") return "autoNamingMaxChars";
+	return "";
+}
+
+function setSettingValue(
+	settings: HelperSettings,
+	key: string,
+	value: JsonValue,
+): void {
+	if (
+		key === "autoNamingMinChars" ||
+		key === "autoNamingMaxChars" ||
+		key === "autoNamingMinWords" ||
+		key === "autoNamingMaxWords"
+	) {
+		if (!Number.isInteger(value)) {
+			throw new Error(`Settings value for ${key} must be an integer`);
+		}
+		const count = Number(value);
+		if (count < 1 || count > 20) {
+			throw new Error(`Settings value for ${key} must be between 1 and 20`);
+		}
+		if (key === "autoNamingMinChars" || key === "autoNamingMinWords")
+			settings.autoNamingMinChars = count;
+		else settings.autoNamingMaxChars = count;
+		return;
+	}
+	if (typeof value !== "boolean") {
+		throw new Error(`Settings value for ${key} must be a boolean`);
+	}
+	if (key === "markdownExportEnabled") settings.markdownExportEnabled = value;
+	else if (key === "sessionMoveEnabled") settings.sessionMoveEnabled = value;
+	else if (key === "autoRenameMenuEnabled") settings.autoRenameMenuEnabled = value;
+	else if (key === "markdownFriendlyFilenameEnabled")
+		settings.markdownFriendlyFilenameEnabled = value;
+	else if (key === "portForwardingEnabled") settings.portForwardingEnabled = value;
+	else if (key === "portAutoForwardWeb") settings.portAutoForwardWeb = value;
+	else if (key === "portSameLocalPort") settings.portSameLocalPort = value;
+	else throw new Error(`Unknown settings key: ${key}`);
+}
+
+function validateAutoNamingRange(settings: HelperSettings): void {
+	if (settings.autoNamingMinChars > settings.autoNamingMaxChars) {
+		throw new Error(
+			"autoNamingMinChars must be less than or equal to autoNamingMaxChars",
+		);
+	}
 }
 
 function listUserScripts(): string[] {
