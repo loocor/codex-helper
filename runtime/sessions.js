@@ -1,12 +1,21 @@
-// Session context menu, actions, move, and toast UI
+// Session context menu, actions, project forks, and toast UI
   function enabledSessionActions() {
-    const order = ["export", "move", "delete"];
+    const order = ["export", "fork"];
     return order.filter((action) => {
-      if (action === "delete") return featureSettings.sessionDeleteEnabled;
       if (action === "export") return featureSettings.markdownExportEnabled;
-      if (action === "move") return featureSettings.sessionMoveEnabled;
+      if (action === "fork") return featureSettings.sessionMoveEnabled;
       return false;
     });
+  }
+
+  function sessionActionEntries(actions, row, remoteProjects = []) {
+    const entries = [];
+    for (const action of actions) {
+      if (action === "fork")
+        entries.push(...enabledForkSessionActions(row, remoteProjects));
+      else entries.push(action);
+    }
+    return entries;
   }
 
   function sessionRowFromTarget(target) {
@@ -41,12 +50,10 @@
   function trackSessionContextMenu(row) {
     const ref = sessionRefFromRow(row);
     if (!ref.session_id) return;
-    const openedAt = Date.now();
-    installSessionContextMenuBridge();
     pendingSessionMenuContext = {
       row,
       ref,
-      openedAt,
+      openedAt: Date.now(),
     };
     refreshFeatureSettings().catch((error) => {
       logDiagnostic("session_menu_settings_failed", {
@@ -54,19 +61,189 @@
       });
     });
     setTimeout(() => {
-      if (
-        pendingSessionMenuContext?.ref?.session_id === ref.session_id &&
-        pendingSessionMenuContext?.openedAt === openedAt
-      ) {
+      if (pendingSessionMenuContext?.ref?.session_id === ref.session_id) {
         pendingSessionMenuContext = null;
-        if (sessionContextMenuMapRestore) sessionContextMenuMapRestore();
       }
     }, 2500);
   }
 
-  function clearPendingSessionMenuContext() {
+  function sessionConversationPath(row, ref) {
+    const href = rowHref(row);
+    if (href) {
+      try {
+        const pathname = new URL(href, window.location.href).pathname;
+        if (pathname && pathname !== "/") return pathname;
+      } catch (_) {
+        /* ignore malformed href */
+      }
+    }
+    const sessionId = ref.session_id.replace(/^local:/, "");
+    return sessionId ? `/local/${sessionId}` : "";
+  }
+
+  function codexAppServerHostId(hostId) {
+    return sessionRemoteHostId(hostId) || "local";
+  }
+
+  function sessionRowIsPinned(row) {
+    return row.getAttribute("data-app-action-sidebar-thread-pinned") === "true";
+  }
+
+  function buildCodexSessionNativeMenuItems(row, _ref) {
+    const items = [];
+    const pinned = sessionRowIsPinned(row);
+    items.push({
+      id: pinned ? "unpin-thread" : "pin-thread",
+      label: pinned ? "Unpin chat" : "Pin chat",
+      enabled: true,
+    });
+    items.push({
+      id: "rename-thread",
+      label: "Rename chat",
+      enabled: true,
+    });
+    items.push({
+      id: "archive-thread",
+      label: "Archive chat",
+      enabled: true,
+    });
+    items.push({ type: "separator" });
+    items.push({
+      id: "open-thread-folder",
+      label: "Open in Finder",
+      enabled: true,
+    });
+    items.push({
+      id: "copy-cwd",
+      label: "Copy working directory",
+      enabled: true,
+    });
+    items.push({
+      id: "copy-session-id",
+      label: "Copy session ID",
+      enabled: true,
+    });
+    items.push({
+      id: "copy-app-link",
+      label: "Copy deeplink",
+      enabled: true,
+    });
+    items.push({ type: "separator" });
+    items.push({
+      id: "open-thread-new-window",
+      label: "Open in new window",
+      enabled: true,
+    });
+    return items;
+  }
+
+  async function copyTextToClipboard(value) {
+    if (!value) throw new Error("Nothing to copy");
+    await navigator.clipboard.writeText(value);
+  }
+
+  function clickRowAction(row, labels) {
+    const candidates = Array.from(
+      row.querySelectorAll("button, [role='button'], a"),
+    ).filter((node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      const rect = node.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      const label = textOf(node);
+      return labels.some((value) => label === value || label.includes(value));
+    });
+    return clickElement(candidates[0] instanceof HTMLElement ? candidates[0] : null);
+  }
+
+  async function forwardSessionMenuAction(id, row, ref) {
+    const path = sessionConversationPath(row, ref);
+    if (id === "copy-session-id") {
+      await copyTextToClipboard(ref.session_id);
+      showHelperToast("Copied session ID");
+      return;
+    }
+    if (id === "copy-app-link") {
+      const link = path
+        ? `${window.location.origin}${path}`
+        : ref.session_id;
+      await copyTextToClipboard(link);
+      showHelperToast("Copied deeplink");
+      return;
+    }
+    if (id === "copy-cwd") {
+      await copyTextToClipboard(sessionProjectContext(row).path);
+      showHelperToast("Copied working directory");
+      return;
+    }
+    if (id === "rename-thread") {
+      const title = row.querySelector("[data-thread-title]");
+      if (title instanceof HTMLElement) {
+        title.dispatchEvent(
+          new MouseEvent("dblclick", { bubbles: true, cancelable: true }),
+        );
+      }
+      return;
+    }
+    if (id === "archive-thread") {
+      if (
+        clickRowAction(row, ["Archive", "Archive chat"]) ||
+        clickRowAction(row, ["Delete", "Remove"])
+      ) {
+        return;
+      }
+      throw new Error("Archive control not found for this session");
+    }
+    if (id === "pin-thread" || id === "unpin-thread") {
+      if (clickRowAction(row, ["Pin", "Unpin"])) return;
+      throw new Error("Pin control not found for this session");
+    }
+    if (id === "open-thread-new-window" && path) {
+      const bridge = window.electronBridge;
+      if (typeof bridge?.sendMessageFromView !== "function") {
+        throw new Error("Open in new window is unavailable");
+      }
+      await bridge.sendMessageFromView({ type: "open-in-new-window", path });
+      return;
+    }
+    if (id === "open-thread-folder" && path) {
+      const bridge = window.electronBridge;
+      if (typeof bridge?.sendMessageFromView !== "function") {
+        throw new Error("Open in Finder is unavailable");
+      }
+      await bridge.sendMessageFromView({
+        type: "open-in-main-window",
+        path,
+      });
+      return;
+    }
+    logDiagnostic("session_menu_forward_unhandled", { id, session_id: ref.session_id });
+    showHelperToast(`Action "${id}" is not available from Helper yet`);
+  }
+
+  async function showExtendedSessionContextMenu(row, ref) {
+    await refreshFeatureSettings();
+    const actions = enabledSessionActions();
+    const bridge = window.electronBridge;
+    if (actions.length === 0 || typeof bridge?.showContextMenu !== "function") {
+      return;
+    }
+    const remoteProjects = actions.includes("fork")
+      ? await loadRemoteProjectMetadataOrEmpty()
+      : [];
+    const items = [
+      ...buildCodexSessionNativeMenuItems(row, ref),
+      ...buildHelperSessionNativeMenuItems(actions, row, remoteProjects),
+    ];
+    const result = await bridge.showContextMenu(items);
     pendingSessionMenuContext = null;
-    if (sessionContextMenuMapRestore) sessionContextMenuMapRestore();
+    const helperAction = helperSessionActionFromId(result?.id);
+    if (helperAction) {
+      await handleSessionAction(helperAction, row, ref);
+      return;
+    }
+    if (result?.id) {
+      await forwardSessionMenuAction(result.id, row, ref);
+    }
   }
 
   function displayProjectName(path) {
@@ -86,6 +263,11 @@
     return normalized || String(path || "").trim();
   }
 
+  function sessionRemoteHostId(value) {
+    const hostId = String(value || "").trim();
+    return hostId && hostId !== "local" ? hostId : "";
+  }
+
   function isRemoteProjectPath(path) {
     const value = String(path || "");
     return (
@@ -95,26 +277,68 @@
     );
   }
 
+  async function loadRemoteProjectMetadata() {
+    const result = await bridge("/projects/remote-list", {});
+    if (result?.status !== "ok") {
+      throw new Error(result?.message || "Remote project metadata unavailable");
+    }
+    return Array.isArray(result.projects) ? result.projects : [];
+  }
+
+  async function loadRemoteProjectMetadataOrEmpty() {
+    try {
+      return await loadRemoteProjectMetadata();
+    } catch (error) {
+      logDiagnostic("remote_project_metadata_unavailable", {
+        error: error?.message || String(error),
+      });
+      return [];
+    }
+  }
+
+  function remoteProjectMetadataById(remoteProjects) {
+    const map = new Map();
+    for (const project of remoteProjects || []) {
+      const id = String(project?.id || "").trim();
+      if (!id) continue;
+      map.set(id, {
+        hostId: sessionRemoteHostId(project?.hostId),
+        remotePath: normalizeWorkspacePath(project?.remotePath || ""),
+        label: String(project?.label || "").trim(),
+      });
+    }
+    return map;
+  }
+
   function projectsSection() {
     return document.querySelector(
       '[data-app-action-sidebar-section-heading="Projects"]',
     );
   }
 
-  function nativeProjectTargets() {
+  function nativeProjectTargets(remoteProjects = []) {
     const section = projectsSection();
     const targets = [];
     const seen = new Set();
-    const addTarget = (path, label) => {
-      const normalized = normalizeWorkspacePath(path);
-      if (!normalized || seen.has(normalized)) return;
-      seen.add(normalized);
-      const remote = isRemoteProjectPath(normalized);
-      const displayLabel = String(label || displayProjectName(path));
+    const remoteById = remoteProjectMetadataById(remoteProjects);
+    const addTarget = (path, label, hostId = "") => {
+      const rawPath = normalizeWorkspacePath(path);
+      const remoteProject = remoteById.get(rawPath);
+      const normalized = remoteProject?.remotePath || rawPath;
+      const normalizedHostId = sessionRemoteHostId(hostId || remoteProject?.hostId);
+      if (!normalized) return;
+      const seenKey = `${normalizedHostId || "local"}:${normalized}`;
+      if (seen.has(seenKey)) return;
+      seen.add(seenKey);
+      const remote = Boolean(normalizedHostId) || isRemoteProjectPath(normalized);
+      const displayLabel = String(
+        label || remoteProject?.label || displayProjectName(normalized),
+      );
       targets.push({
         path: normalized,
         label: remote ? `${displayLabel} (Remote)` : displayLabel,
         remote,
+        hostId: normalizedHostId,
       });
     };
     for (const row of document.querySelectorAll(
@@ -127,7 +351,12 @@
         row.getAttribute("data-app-action-sidebar-project-label") ||
         row.getAttribute("aria-label") ||
         "";
-      addTarget(path, label);
+      const hostId =
+        row.getAttribute("data-app-action-sidebar-project-host-id") ||
+        row.getAttribute("data-app-action-sidebar-thread-host-id") ||
+        row.getAttribute("data-host-id") ||
+        "";
+      addTarget(path, label, hostId);
     }
     for (const list of document.querySelectorAll(
       "[data-app-action-sidebar-project-list-id]",
@@ -135,41 +364,111 @@
       if (!(list instanceof HTMLElement)) continue;
       if (section && !section.contains(list)) continue;
       const path = list.getAttribute("data-app-action-sidebar-project-list-id") || "";
-      addTarget(path, displayProjectName(path));
+      const hostId =
+        list.getAttribute("data-app-action-sidebar-project-host-id") ||
+        list.getAttribute("data-app-action-sidebar-thread-host-id") ||
+        list.getAttribute("data-host-id") ||
+        "";
+      addTarget(path, displayProjectName(path), hostId);
     }
     return targets.sort((left, right) =>
       left.label.localeCompare(right.label, undefined, { sensitivity: "base" }),
     );
   }
 
-  function confirmMoveSession(ref, target) {
+  function sessionProjectContext(row, remoteProjects = []) {
+    const projectList =
+      typeof row?.closest === "function"
+        ? row.closest("[data-app-action-sidebar-project-list-id]")
+        : null;
+    const remoteById = remoteProjectMetadataById(remoteProjects);
+    const hostId = sessionRemoteHostId(
+      row?.getAttribute?.("data-app-action-sidebar-thread-host-id") ||
+        row?.getAttribute?.("data-app-action-sidebar-project-host-id") ||
+        "",
+    );
+    const rawPath = normalizeWorkspacePath(
+      row?.getAttribute?.("data-app-action-sidebar-thread-cwd") ||
+        row?.getAttribute?.("data-app-action-sidebar-project-list-id") ||
+        row?.getAttribute?.("data-app-action-sidebar-project-id") ||
+        projectList?.getAttribute?.("data-app-action-sidebar-project-list-id") ||
+        "",
+    );
+    const remoteProject = remoteById.get(rawPath);
+    const remoteHostId = sessionRemoteHostId(hostId || remoteProject?.hostId);
+    const path = remoteProject?.remotePath || rawPath;
+    return { hostId: remoteHostId, remote: Boolean(remoteHostId), path };
+  }
+
+  function forkActionTargetPredicate(action, context) {
+    return (target) => {
+      if (action === "forkRemoteProject") return target.remote && !!target.hostId;
+      if (action === "forkLocalProject") return !target.remote;
+      if (action !== "forkAnotherProject") return false;
+      if (context.remote) {
+        if (!target.remote) return false;
+        if (!context.hostId || target.hostId !== context.hostId) return false;
+      } else if (target.remote) {
+        return false;
+      }
+      return !context.path || target.path !== context.path;
+    };
+  }
+
+  function forkTargetsForAction(action, row, remoteProjects = []) {
+    const context = sessionProjectContext(row, remoteProjects);
+    return nativeProjectTargets(remoteProjects).filter(
+      forkActionTargetPredicate(action, context),
+    );
+  }
+
+  function enabledForkSessionActions(row, remoteProjects = []) {
+    const context = sessionProjectContext(row, remoteProjects);
+    const actions = context.remote
+      ? ["forkLocalProject", "forkAnotherProject"]
+      : ["forkRemoteProject", "forkAnotherProject"];
+    return actions.filter(
+      (action) => forkTargetsForAction(action, row, remoteProjects).length > 0,
+    );
+  }
+
+  function forkActionDialogTitle(action, context) {
+    if (action === "forkRemoteProject") return "Choose remote project";
+    if (action === "forkLocalProject") return "Choose local project";
+    return context.remote
+      ? "Choose another remote project"
+      : "Choose another local project";
+  }
+
+  function confirmForkSessionAction(ref, target) {
     const title = ref.title || ref.session_id || "Untitled session";
     const destination =
       target?.label || displayProjectName(target?.path || "") || "selected project";
-    return window.confirm(`Move "${title}" to "${destination}"?`);
+    return window.confirm(`Fork "${title}" into "${destination}"?`);
   }
 
-  function openProjectMoveMenu(ref, anchorElement) {
+  function openProjectForkMenu(ref, row, anchorElement, action, remoteProjects = []) {
     installHelperStyles();
     return new Promise((resolve) => {
       document
-        .querySelectorAll("[data-codex-helper-project-move]")
+        .querySelectorAll("[data-codex-helper-project-fork]")
         .forEach((node) => { node.remove(); });
       const overlay = document.createElement("div");
-      overlay.setAttribute("data-codex-helper-project-move", "true");
+      overlay.setAttribute("data-codex-helper-project-fork", "true");
       const panel = document.createElement("div");
-      panel.className = "codex-helper-project-move-panel";
+      panel.className = "codex-helper-project-fork-panel";
       panel.setAttribute("role", "dialog");
       panel.setAttribute("aria-modal", "true");
-      panel.setAttribute("aria-label", "Move session");
+      const context = sessionProjectContext(row, remoteProjects);
+      panel.setAttribute("aria-label", forkActionDialogTitle(action, context));
       const header = document.createElement("div");
-      header.className = "codex-helper-project-move-header";
+      header.className = "codex-helper-project-fork-header";
       const title = document.createElement("div");
-      title.className = "codex-helper-project-move-title";
-      title.textContent = `Move "${ref.title || ref.session_id}"`;
+      title.className = "codex-helper-project-fork-title";
+      title.textContent = forkActionDialogTitle(action, context);
       header.appendChild(title);
       const list = document.createElement("div");
-      list.className = "codex-helper-project-move-list";
+      list.className = "codex-helper-project-fork-list";
       panel.appendChild(header);
       panel.appendChild(list);
       overlay.appendChild(panel);
@@ -217,12 +516,12 @@
         true,
       );
       document.body.appendChild(overlay);
-      const targets = nativeProjectTargets();
+      const targets = forkTargetsForAction(action, row, remoteProjects);
       list.textContent = "";
       if (targets.length === 0) {
         const empty = document.createElement("div");
-        empty.className = "codex-helper-project-move-empty";
-        empty.textContent = "No projects found in the sidebar.";
+        empty.className = "codex-helper-project-fork-empty";
+        empty.textContent = "No matching projects found in the sidebar.";
         list.appendChild(empty);
         panel.focus();
         return;
@@ -230,12 +529,12 @@
       for (const target of targets) {
         const item = document.createElement("button");
         item.type = "button";
-        item.className = "codex-helper-project-move-item";
+        item.className = "codex-helper-project-fork-item";
         const itemTitle = document.createElement("div");
-        itemTitle.className = "codex-helper-project-move-item-title";
+        itemTitle.className = "codex-helper-project-fork-item-title";
         itemTitle.textContent = target.label;
         const itemPath = document.createElement("div");
-        itemPath.className = "codex-helper-project-move-item-path";
+        itemPath.className = "codex-helper-project-fork-item-path";
         itemPath.textContent = target.path;
         item.appendChild(itemTitle);
         item.appendChild(itemPath);
@@ -244,8 +543,8 @@
           (event) => {
             event.preventDefault();
             event.stopPropagation();
-            if (!confirmMoveSession(ref, target)) return;
-            close(target.path);
+            if (!confirmForkSessionAction(ref, target)) return;
+            close(target);
           },
           true,
         );
@@ -257,9 +556,10 @@
 
   function sessionActionMenuLabels() {
     return {
-      delete: "Delete Session",
       export: "Export Markdown",
-      move: "Move Session",
+      forkRemoteProject: "Fork into Remote Project...",
+      forkLocalProject: "Fork into Local Project...",
+      forkAnotherProject: "Fork into Another Project...",
     };
   }
 
@@ -267,10 +567,12 @@
     const svgs = {
       export:
         '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path fill="black" d="M8 2.25v6.5M5.1 6.35 8 9.25l2.9-2.9"/><path fill="black" d="M3.25 12.75h9.5v1H3.25z"/></svg>',
-      move:
+      forkRemoteProject:
         '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path fill="black" d="M3 4.5h10v1.25H3zm1.25 2.5h7.5v1.25H4.25zm1.25 2.5h5v1.25H5.5zm1.25 2.5h2.5v1.25H6.75z"/><path fill="black" d="M11.5 3.25 14.25 6l-2.75 2.75V6.5H9.25V5.5h3.75z"/></svg>',
-      delete:
-        '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path fill="black" d="M6 2.5h4l.5 1H13v1H3V3.5h2.5zm-.5 3h1v6.5H5.5zm3 0h1v6.5H8.5zm3 0h1v6.5h-1z"/></svg>',
+      forkLocalProject:
+        '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path fill="black" d="M3 4.5h10v1.25H3zm1.25 2.5h7.5v1.25H4.25zm1.25 2.5h5v1.25H5.5zm1.25 2.5h2.5v1.25H6.75z"/><path fill="black" d="M11.5 3.25 14.25 6l-2.75 2.75V6.5H9.25V5.5h3.75z"/></svg>',
+      forkAnotherProject:
+        '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path fill="black" d="M3 4.5h10v1.25H3zm1.25 2.5h7.5v1.25H4.25zm1.25 2.5h5v1.25H5.5zm1.25 2.5h2.5v1.25H6.75z"/><path fill="black" d="M11.5 3.25 14.25 6l-2.75 2.75V6.5H9.25V5.5h3.75z"/></svg>',
     };
     const svg = svgs[action];
     if (!svg) return undefined;
@@ -287,143 +589,23 @@
     return id.slice(helperSessionActionPrefix.length) || null;
   }
 
-  function buildHelperSessionMenuModelItems(actions, context) {
+  function buildHelperSessionNativeMenuItems(actions, row, remoteProjects = []) {
     if (actions.length === 0) return [];
+    const entries = sessionActionEntries(actions, row, remoteProjects);
+    if (entries.length === 0) return [];
     const labels = sessionActionMenuLabels();
     const items = [{ type: "separator" }];
-    for (const action of actions) {
+    for (const action of entries) {
       const item = {
         id: helperSessionActionId(action),
-        nativeLabel: labels[action] || action,
+        label: labels[action] || action,
         enabled: true,
-        onSelect: () => {
-          handleSessionAction(action, context.row, context.ref).catch((error) => {
-            showHelperToast(error?.message || String(error));
-            logDiagnostic("session_menu_action_failed", {
-              action,
-              error: error?.message || String(error),
-            });
-          });
-        },
       };
       const icon = helperSessionMenuIcon(action);
       if (icon) item.icon = icon;
       items.push(item);
     }
     return items;
-  }
-
-  function hasHelperSessionMenuItem(items) {
-    for (const item of items) {
-      if (
-        item?.type !== "separator" &&
-        helperSessionActionFromId(item?.id)
-      ) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  function isCodexSessionMenuItemId(id) {
-    return (
-      id === "toggle-thread-pin" ||
-      id === "pin-thread" ||
-      id === "rename-thread" ||
-      id === "archive-thread" ||
-      id === "mark-thread-unread" ||
-      id === "copy-session-id" ||
-      id === "copy-deeplink" ||
-      id === "copy-app-link" ||
-      id === "copy-conversation-path" ||
-      id === "copy-working-directory" ||
-      id === "copy-cwd" ||
-      id === "copyConversationMarkdown" ||
-      id === "openSideChat" ||
-      id === "open-in-new-window" ||
-      id === "open-thread-new-window" ||
-      id === "open-thread-folder" ||
-      id === "fork-into-local" ||
-      id === "fork-into-same-worktree" ||
-      id === "fork-into-worktree"
-    );
-  }
-
-  function looksLikeCodexSessionMenuItems(items) {
-    let sessionActionCount = 0;
-    for (const item of items) {
-      if (isCodexSessionMenuItemId(item?.id)) sessionActionCount += 1;
-    }
-    return sessionActionCount >= 2;
-  }
-
-  function hasNativeSessionMenuLabels(items) {
-    let nativeLabelCount = 0;
-    for (const item of items) {
-      if (
-        isCodexSessionMenuItemId(item?.id) &&
-        typeof item?.nativeLabel === "string"
-      ) {
-        nativeLabelCount += 1;
-      }
-    }
-    return nativeLabelCount >= 2;
-  }
-
-  function appendHelperSessionMenuItems(items) {
-    const context = pendingSessionMenuContext;
-    if (
-      !Array.isArray(items) ||
-      !context?.row?.isConnected ||
-      !context?.ref?.session_id ||
-      Date.now() - context.openedAt >= 2500
-    ) {
-      clearPendingSessionMenuContext();
-      return;
-    }
-    if (
-      hasHelperSessionMenuItem(items) ||
-      !looksLikeCodexSessionMenuItems(items) ||
-      !hasNativeSessionMenuLabels(items)
-    ) {
-      if (hasHelperSessionMenuItem(items)) clearPendingSessionMenuContext();
-      return;
-    }
-    const actions = enabledSessionActions();
-    if (actions.length > 0)
-      items.push(...buildHelperSessionMenuModelItems(actions, context));
-    clearPendingSessionMenuContext();
-  }
-
-  function installSessionContextMenuBridge() {
-    if (sessionContextMenuMapRestore) return;
-    const originalArrayMap = Array.prototype.map;
-    const patchedArrayMap = function patchedArrayMap(callback, thisArg) {
-      try {
-        appendHelperSessionMenuItems(this);
-      } catch (error) {
-        clearPendingSessionMenuContext();
-        logDiagnostic("session_menu_patch_failed", {
-          error: error?.message || String(error),
-        });
-      }
-      return originalArrayMap.call(this, callback, thisArg);
-    };
-    Object.defineProperty(Array.prototype, "map", {
-      value: patchedArrayMap,
-      writable: true,
-      configurable: true,
-    });
-    sessionContextMenuMapRestore = () => {
-      if (Array.prototype.map === patchedArrayMap) {
-        Object.defineProperty(Array.prototype, "map", {
-          value: originalArrayMap,
-          writable: true,
-          configurable: true,
-        });
-      }
-      sessionContextMenuMapRestore = null;
-    };
   }
 
   function setSessionMenuItemLabel(item, label) {
@@ -457,59 +639,6 @@
     }
   }
 
-  function isCurrentSessionRow(row, ref) {
-    const activeNode = row.closest(
-      '[aria-current="page"], [aria-selected="true"], [data-state="active"]',
-    );
-    if (activeNode instanceof HTMLElement) return true;
-    const href = rowHref(row);
-    if (href && href === window.location.href) return true;
-    return !!ref.session_id && window.location.href.includes(ref.session_id);
-  }
-
-  function visibleSessionRows(root = document) {
-    return Array.from(
-      root.querySelectorAll("[data-app-action-sidebar-thread-id]"),
-    ).filter((candidate) => {
-      if (!(candidate instanceof HTMLElement)) return false;
-      const rect = candidate.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    });
-  }
-
-  function nearestSessionRowContainer(row) {
-    let node = row.parentElement;
-    while (node && node !== document.body) {
-      if (visibleSessionRows(node).length > 1) return node;
-      node = node.parentElement;
-    }
-    return null;
-  }
-
-  function findReplacementSessionRow(deletedRow) {
-    const inSameContainer = visibleSessionRows(
-      nearestSessionRowContainer(deletedRow) || document,
-    ).filter((row) => row !== deletedRow);
-    const allRows = visibleSessionRows(document).filter(
-      (row) => row !== deletedRow,
-    );
-    const candidates = inSameContainer.length ? inSameContainer : allRows;
-    if (candidates.length === 0) return null;
-    const allBeforeDelete = visibleSessionRows(document);
-    const deletedIndex = allBeforeDelete.indexOf(deletedRow);
-    if (deletedIndex >= 0) {
-      const after = candidates.find(
-        (row) => allBeforeDelete.indexOf(row) > deletedIndex,
-      );
-      if (after) return after;
-      const before = [...candidates]
-        .reverse()
-        .find((row) => allBeforeDelete.indexOf(row) < deletedIndex);
-      if (before) return before;
-    }
-    return candidates[0] || null;
-  }
-
   function clickElement(element) {
     if (!(element instanceof HTMLElement)) return false;
     element.dispatchEvent(
@@ -522,57 +651,116 @@
     return true;
   }
 
-  function navigateToSessionRow(row) {
-    if (!(row instanceof HTMLElement)) return false;
-    const link = row.matches("a[href]") ? row : row.querySelector("a[href]");
-    if (clickElement(link instanceof HTMLElement ? link : row)) return true;
-    const href = rowHref(row);
-    if (!href) return false;
-    window.location.assign(href);
-    return true;
+  function forkedSessionPath(result, target) {
+    if (target?.hostId) return "";
+    const sessionId = String(result?.new_session_id || result?.newSessionId || "")
+      .replace(/^local:/, "")
+      .trim();
+    return sessionId ? `/local/${encodeURIComponent(sessionId)}` : "";
   }
 
-  function openNewChat() {
-    const control = Array.from(
-      document.querySelectorAll("a, button, [role='button']"),
-    ).find((node) => {
-      if (!(node instanceof HTMLElement)) return false;
-      const rect = node.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0 && exactText(node, "New chat");
-    });
-    return clickElement(control instanceof HTMLElement ? control : null);
-  }
-
-  function navigateAfterDeletedCurrentSession(replacementRow) {
+  function navigateAfterFork(result, target) {
+    const path = forkedSessionPath(result, target);
+    if (!path) return;
     window.setTimeout(() => {
-      if (navigateToSessionRow(replacementRow)) return;
-      if (openNewChat()) return;
-      logDiagnostic("delete_navigation_target_not_found", {});
+      window.location.assign(path);
     }, 0);
   }
 
-  async function handleSessionAction(action, row, ref) {
-    if (action === "delete") {
-      if (!window.confirm(`Delete "${ref.title || ref.session_id}"?`)) return;
-      const deletingCurrentSession = isCurrentSessionRow(row, ref);
-      const replacementRow = deletingCurrentSession
-        ? findReplacementSessionRow(row)
-        : null;
-      const result = await bridge("/delete", ref);
-      if (
-        result?.status === "server_deleted" ||
-        result?.status === "local_deleted"
-      ) {
-        row.remove();
-        if (deletingCurrentSession)
-          navigateAfterDeletedCurrentSession(replacementRow);
-        showHelperToast(result.message || "Deleted", result.undo_token);
+  function reactRootFiber() {
+    const root =
+      document.querySelector("#root") ||
+      document.querySelector("[data-reactroot]") ||
+      document.body?.firstElementChild;
+    if (!root) return null;
+    const key = Object.keys(root).find((name) =>
+      name.startsWith("__reactContainer$"),
+    );
+    return key ? root[key] : null;
+  }
+
+  function collectSidebarConversationManagers() {
+    const rootFiber = reactRootFiber();
+    if (!rootFiber) return [];
+    const managers = [];
+    const seenObjects = new WeakSet();
+    let visitedFibers = 0;
+    function scanValue(value, depth) {
+      if (!value || (typeof value !== "object" && typeof value !== "function"))
         return;
+      if (seenObjects.has(value) || depth > 4) return;
+      seenObjects.add(value);
+      if (
+        typeof value.refreshRecentConversations === "function" &&
+        typeof value.hostId === "string" &&
+        value.hostId.trim()
+      ) {
+        managers.push(value);
       }
-      throw new Error(result?.message || "Delete failed");
+      for (const key of Object.keys(value).slice(0, 50)) {
+        if (key.startsWith("_")) continue;
+        let child = null;
+        try {
+          child = value[key];
+        } catch {
+          continue;
+        }
+        if (typeof child === "object" || typeof child === "function") {
+          scanValue(child, depth + 1);
+        }
+      }
     }
+    function visit(fiber) {
+      if (!fiber || visitedFibers > 2000) return;
+      visitedFibers += 1;
+      scanValue(fiber.memoizedProps, 0);
+      scanValue(fiber.memoizedState, 0);
+      scanValue(fiber.stateNode, 0);
+      visit(fiber.child);
+      visit(fiber.sibling);
+    }
+    visit(rootFiber);
+    return [
+      ...new Map(
+        managers.map((manager) => [manager.hostId.trim(), manager]),
+      ).values(),
+    ];
+  }
+
+  async function refreshSidebarConversationsForHost(hostId) {
+    const normalizedHostId = codexAppServerHostId(hostId);
+    const manager = collectSidebarConversationManagers().find(
+      (candidate) => candidate.hostId === normalizedHostId,
+    );
+    if (!manager) {
+      logDiagnostic("sidebar_refresh_manager_missing", {
+        host_id: normalizedHostId,
+      });
+      return false;
+    }
+    try {
+      await manager.refreshRecentConversations({ sortKey: "updated_at" });
+      return true;
+    } catch (error) {
+      logDiagnostic("sidebar_refresh_failed", {
+        host_id: normalizedHostId,
+        message: error?.message || String(error),
+      });
+      return false;
+    }
+  }
+
+  async function refreshSidebarAfterFork(target) {
+    await refreshSidebarConversationsForHost(target?.hostId || "");
+  }
+
+  async function handleSessionAction(action, row, ref) {
     if (action === "export") {
-      const result = await bridge("/export-markdown", ref);
+      const context = sessionProjectContext(row);
+      const result = await bridge("/export-markdown", {
+        ...ref,
+        host_id: context.hostId,
+      });
       if (
         result?.status !== "exported" ||
         typeof result.markdown !== "string" ||
@@ -584,16 +772,30 @@
       showHelperToast(result.message || "Exported");
       return;
     }
-    if (action === "move") {
-      const target = await openProjectMoveMenu(ref, row);
+    if (action.startsWith("fork")) {
+      const remoteProjects = await loadRemoteProjectMetadataOrEmpty();
+      const target = await openProjectForkMenu(
+        ref,
+        row,
+        row,
+        action,
+        remoteProjects,
+      );
       if (!target) return;
-      const result = await bridge("/move-thread-workspace", {
+      const context = sessionProjectContext(row, remoteProjects);
+      const result = await bridge("/fork-thread-project", {
         ...ref,
-        target_cwd: target,
+        source_host_id: context.hostId,
+        source_cwd: context.path,
+        target_host_id: target.hostId || "",
+        target_cwd: target.path,
+        target_name: ref.title,
       });
-      if (result?.status !== "moved")
-        throw new Error(result?.message || "Move failed");
-      showHelperToast(result.message || "Moved");
+      if (result?.status !== "forked")
+        throw new Error(result?.message || "Fork failed");
+      await refreshSidebarAfterFork(target);
+      showHelperToast(result.warning || result.message || "Forked");
+      navigateAfterFork(result, target);
       return;
     }
   }
@@ -610,23 +812,13 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  function showHelperToast(message, undoToken) {
+  function showHelperToast(message) {
     document.querySelectorAll(`[${helperToastAttribute}]`).forEach((node) => {
       node.remove();
     });
     const toast = document.createElement("div");
     toast.setAttribute(helperToastAttribute, "true");
     toast.textContent = message;
-    if (undoToken) {
-      const undo = document.createElement("button");
-      undo.type = "button";
-      undo.textContent = "Undo";
-      undo.addEventListener("click", async () => {
-        const result = await bridge("/undo", { undo_token: undoToken });
-        toast.textContent = result?.message || "Undo complete";
-      });
-      toast.appendChild(undo);
-    }
     document.body.appendChild(toast);
     setTimeout(() => toast.remove(), 8000);
   }

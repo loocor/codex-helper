@@ -73,3 +73,74 @@ test("dev bridge returns helper directory paths for native settings", async () =
 		else process.env.CODEX_HELPER_HOME = previous;
 	}
 });
+
+test("dev bridge rejects malformed settings files explicitly", async () => {
+	const previous = process.env.CODEX_HELPER_HOME;
+	const root = mkdtempSync(join(tmpdir(), "codex-helper-routes-"));
+	try {
+		process.env.CODEX_HELPER_HOME = root;
+		mkdirSync(root, { recursive: true });
+		writeFileSync(
+			join(root, "config.json"),
+			'{ "markdownExportEnabled": "yes" }',
+			"utf8",
+		);
+
+		const result = await handleBridgeRequest("/settings/get", {});
+
+		expect(result).toEqual({
+			status: "failed",
+			message: "Settings value for markdownExportEnabled must be a boolean",
+		});
+	} finally {
+		if (previous === undefined) delete process.env.CODEX_HELPER_HOME;
+		else process.env.CODEX_HELPER_HOME = previous;
+	}
+});
+
+test("dev bridge accepts known removed settings keys", async () => {
+	const previous = process.env.CODEX_HELPER_HOME;
+	const root = mkdtempSync(join(tmpdir(), "codex-helper-routes-"));
+	try {
+		process.env.CODEX_HELPER_HOME = root;
+		mkdirSync(root, { recursive: true });
+		writeFileSync(
+			join(root, "config.json"),
+			'{ "markdownExportEnabled": true, "sessionDeleteEnabled": true }',
+			"utf8",
+		);
+
+		const result = await handleBridgeRequest("/settings/get", {});
+
+		expect(result).toEqual({
+			status: "ok",
+			settings: {
+				markdownExportEnabled: true,
+				sessionMoveEnabled: false,
+				portForwardingEnabled: false,
+				portAutoForwardWeb: true,
+				portSameLocalPort: true,
+			},
+		});
+	} finally {
+		if (previous === undefined) delete process.env.CODEX_HELPER_HOME;
+		else process.env.CODEX_HELPER_HOME = previous;
+	}
+});
+
+test("dev bridge no longer exposes helper session delete lifecycle routes", async () => {
+	for (const path of [
+		"/delete",
+		"/undo",
+		"/backups/list",
+		"/backups/restore",
+		"/backups/reveal",
+	]) {
+		const result = await handleBridgeRequest(path, {});
+
+		expect(result).toEqual({
+			status: "failed",
+			message: `Unknown Codex Helper bridge path: ${path}`,
+		});
+	}
+});

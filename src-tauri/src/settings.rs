@@ -6,9 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
+#[serde(rename_all = "camelCase", default)]
 pub struct HelperSettings {
-    pub session_delete_enabled: bool,
     pub markdown_export_enabled: bool,
     pub session_move_enabled: bool,
     pub port_forwarding_enabled: bool,
@@ -19,7 +18,6 @@ pub struct HelperSettings {
 impl Default for HelperSettings {
     fn default() -> Self {
         Self {
-            session_delete_enabled: false,
             markdown_export_enabled: false,
             session_move_enabled: false,
             port_forwarding_enabled: false,
@@ -28,6 +26,8 @@ impl Default for HelperSettings {
         }
     }
 }
+
+const LEGACY_SETTINGS_KEYS: &[&str] = &["sessionDeleteEnabled"];
 
 pub fn ensure_settings_file(path: &Path) -> anyhow::Result<HelperSettings> {
     if path.exists() {
@@ -41,7 +41,34 @@ pub fn ensure_settings_file(path: &Path) -> anyhow::Result<HelperSettings> {
 pub fn read_settings(path: &Path) -> anyhow::Result<HelperSettings> {
     let contents =
         fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    serde_json::from_str(&contents).with_context(|| format!("Failed to parse {}", path.display()))
+    let value: Value = serde_json::from_str(&contents)
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    settings_from_value(&value)
+        .map_err(|error| anyhow::anyhow!("Failed to parse {}: {error}", path.display()))
+}
+
+fn settings_from_value(value: &Value) -> anyhow::Result<HelperSettings> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("Settings file must contain a JSON object"))?;
+    let mut settings = HelperSettings::default();
+    for (key, value) in object {
+        let enabled = match value.as_bool() {
+            Some(enabled) => enabled,
+            None if LEGACY_SETTINGS_KEYS.contains(&key.as_str()) => continue,
+            None => anyhow::bail!("Settings value for {key} must be a boolean"),
+        };
+        match key.as_str() {
+            "markdownExportEnabled" => settings.markdown_export_enabled = enabled,
+            "sessionMoveEnabled" => settings.session_move_enabled = enabled,
+            "portForwardingEnabled" => settings.port_forwarding_enabled = enabled,
+            "portAutoForwardWeb" => settings.port_auto_forward_web = enabled,
+            "portSameLocalPort" => settings.port_same_local_port = enabled,
+            key if LEGACY_SETTINGS_KEYS.contains(&key) => {}
+            _ => anyhow::bail!("Unknown settings key: {key}"),
+        }
+    }
+    Ok(settings)
 }
 
 pub fn update_settings(path: &Path, payload: &Value) -> anyhow::Result<HelperSettings> {
@@ -55,7 +82,6 @@ pub fn update_settings(path: &Path, payload: &Value) -> anyhow::Result<HelperSet
             .as_bool()
             .ok_or_else(|| anyhow::anyhow!("Settings value for {key} must be a boolean"))?;
         match key.as_str() {
-            "sessionDeleteEnabled" => settings.session_delete_enabled = enabled,
             "markdownExportEnabled" => settings.markdown_export_enabled = enabled,
             "sessionMoveEnabled" => settings.session_move_enabled = enabled,
             "portForwardingEnabled" => settings.port_forwarding_enabled = enabled,
@@ -86,7 +112,6 @@ mod tests {
     fn default_settings_disable_session_tools() {
         let settings = HelperSettings::default();
 
-        assert!(!settings.session_delete_enabled);
         assert!(!settings.markdown_export_enabled);
         assert!(!settings.session_move_enabled);
         assert!(!settings.port_forwarding_enabled);
@@ -101,7 +126,6 @@ mod tests {
         fs::write(
             &path,
             r#"{
-  "sessionDeleteEnabled": true,
   "markdownExportEnabled": false,
   "sessionMoveEnabled": true
 }
@@ -111,12 +135,53 @@ mod tests {
 
         let settings = read_settings(&path).expect("legacy settings should load");
 
-        assert!(settings.session_delete_enabled);
         assert!(!settings.markdown_export_enabled);
         assert!(settings.session_move_enabled);
         assert!(!settings.port_forwarding_enabled);
         assert!(settings.port_auto_forward_web);
         assert!(settings.port_same_local_port);
+    }
+
+    #[test]
+    fn read_settings_ignores_known_removed_keys() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("config.json");
+        fs::write(
+            &path,
+            r#"{
+  "markdownExportEnabled": true,
+  "sessionDeleteEnabled": true
+}
+"#,
+        )
+        .expect("legacy settings");
+
+        let settings = read_settings(&path).expect("legacy settings should load");
+
+        assert!(settings.markdown_export_enabled);
+        assert!(!settings.session_move_enabled);
+    }
+
+    #[test]
+    fn read_settings_rejects_unknown_keys() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("config.json");
+        fs::write(&path, r#"{ "unknownSetting": true }"#).expect("settings");
+
+        let error = read_settings(&path).expect_err("unknown setting should fail");
+
+        assert!(error.to_string().contains("Unknown settings key"));
+    }
+
+    #[test]
+    fn read_settings_rejects_invalid_value_types() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("config.json");
+        fs::write(&path, r#"{ "markdownExportEnabled": "yes" }"#).expect("settings");
+
+        let error = read_settings(&path).expect_err("invalid setting should fail");
+
+        assert!(error.to_string().contains("must be a boolean"));
     }
 
     #[test]
@@ -128,7 +193,6 @@ mod tests {
         let settings = update_settings(
             &path,
             &serde_json::json!({
-                "sessionDeleteEnabled": true,
                 "markdownExportEnabled": true,
                 "portForwardingEnabled": true,
                 "portAutoForwardWeb": false,
@@ -138,7 +202,6 @@ mod tests {
         .expect("updated settings");
         let persisted = read_settings(&path).expect("persisted settings");
 
-        assert!(settings.session_delete_enabled);
         assert!(settings.markdown_export_enabled);
         assert!(!settings.session_move_enabled);
         assert!(settings.port_forwarding_enabled);

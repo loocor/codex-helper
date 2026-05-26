@@ -1,9 +1,7 @@
 mod app;
-mod backup;
 mod bridge;
 mod cdp;
-pub mod chat_search;
-mod chat_time;
+mod codex_app_server;
 mod codex_control;
 mod debug_port;
 mod launcher;
@@ -16,8 +14,7 @@ mod runtime;
 pub mod session_actions;
 mod settings;
 pub mod state_dir;
-mod storage;
-mod zed;
+pub mod zed;
 
 pub fn run() {
     app::run();

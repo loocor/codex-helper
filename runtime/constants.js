@@ -1,5 +1,4 @@
 // Constants and mutable runtime state
-// biome-ignore-all lint/correctness/noUnusedVariables: shared globals consumed by other runtime modules in the bundled IIFE
 const helperEntryAttribute = "data-codex-helper-settings-entry";
 const helperContentHostAttribute = "data-codex-helper-content-host";
 const helperPageAttribute = "data-codex-helper-settings-page";
@@ -35,19 +34,11 @@ let helperNativeSettingsContentStash = null;
 let helperNativeSettingsActivePage = "";
 let helperContentHost = null;
 let helperContentStash = null;
-let deletedChatBackupsResult = null;
 let pendingSessionMenuContext = null;
-let sessionContextMenuMapRestore = null;
-let sessionContextMenuReplayInFlight = false;
 let pendingPortScan = 0;
 let maintainPortsPanelTimer = 0;
 let refreshPortsPanelTimer = 0;
 let pinnedSummaryHideTimer = 0;
-let deletedChatSearchTimer = 0;
-let deletedChatSearchRequestId = 0;
-const DELETED_CHAT_BACKUP_RENDER_LIMIT = 20;
-const ARCHIVED_CLEANUP_BUDGET = 20;
-let archivedCleanupTicksRemaining = ARCHIVED_CLEANUP_BUDGET;
 let portScanIntervalId = 0;
 let remotePortSyncInFlight = false;
 let managedPortStopInFlight = false;
@@ -63,7 +54,6 @@ const detectedPorts = new Map();
 const portDiscoveryStates = new Map();
 const suppressedPortMappings = new Set();
 let featureSettings = {
-  sessionDeleteEnabled: false,
   markdownExportEnabled: false,
   sessionMoveEnabled: false,
   portForwardingEnabled: false,

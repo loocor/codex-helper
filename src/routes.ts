@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import {
 	appendFileSync,
+	existsSync,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
@@ -34,7 +35,6 @@ type JsonValue =
 	| { [key: string]: JsonValue };
 
 type HelperSettings = {
-	sessionDeleteEnabled: boolean;
 	markdownExportEnabled: boolean;
 	sessionMoveEnabled: boolean;
 	portForwardingEnabled: boolean;
@@ -43,13 +43,13 @@ type HelperSettings = {
 };
 
 const defaultSettings: HelperSettings = {
-	sessionDeleteEnabled: false,
 	markdownExportEnabled: false,
 	sessionMoveEnabled: false,
 	portForwardingEnabled: false,
 	portAutoForwardWeb: true,
 	portSameLocalPort: true,
 };
+const legacySettingsKeys = new Set(["sessionDeleteEnabled"]);
 
 const portManager = new PortForwardManager();
 
@@ -66,10 +66,6 @@ function helperLogsDir(): string {
 	return join(helperRoot(), "logs");
 }
 
-function helperBackupsDir(): string {
-	return join(helperRoot(), "backups");
-}
-
 function helperScriptsDir(): string {
 	return join(helperRoot(), "scripts");
 }
@@ -81,7 +77,6 @@ function helperConfigPath(): string {
 function ensureHelperRoot(): void {
 	mkdirSync(helperRoot(), { recursive: true });
 	mkdirSync(helperLogsDir(), { recursive: true });
-	mkdirSync(helperBackupsDir(), { recursive: true });
 	mkdirSync(helperScriptsDir(), { recursive: true });
 }
 
@@ -102,15 +97,7 @@ function appendDiagnostic(event: string, detail: JsonValue): void {
 
 function readSettings(): HelperSettings {
 	ensureHelperRoot();
-	try {
-		const settings = JSON.parse(
-			readFileSync(helperConfigPath(), "utf8"),
-		) as Partial<HelperSettings>;
-		return {
-			...defaultSettings,
-			...settings,
-		};
-	} catch {
+	if (!existsSync(helperConfigPath())) {
 		writeFileSync(
 			helperConfigPath(),
 			`${JSON.stringify(defaultSettings, null, 2)}\n`,
@@ -118,6 +105,33 @@ function readSettings(): HelperSettings {
 		);
 		return { ...defaultSettings };
 	}
+	let settings: unknown;
+	try {
+		settings = JSON.parse(readFileSync(helperConfigPath(), "utf8"));
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		appendDiagnostic("settings_read_failed", {
+			message,
+		});
+		throw new Error(`Failed to parse ${helperConfigPath()}: ${message}`);
+	}
+	if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+		throw new Error("Settings file must contain a JSON object");
+	}
+	const next: HelperSettings = { ...defaultSettings };
+	const object = settings as Record<string, JsonValue>;
+	for (const [key, value] of Object.entries(object)) {
+		if (key in defaultSettings) {
+			if (typeof value !== "boolean") {
+				throw new Error(`Settings value for ${key} must be a boolean`);
+			}
+			(next as Record<string, boolean>)[key] = value;
+			continue;
+		}
+		if (legacySettingsKeys.has(key)) continue;
+		throw new Error(`Unknown settings key: ${key}`);
+	}
+	return next;
 }
 
 function updateSettings(payload: Record<string, JsonValue>): HelperSettings {
@@ -231,7 +245,14 @@ export async function handleBridgeRequest(
 				scripts: listUserScripts(),
 			};
 		case "/settings/get":
-			return { status: "ok", settings: readSettings() };
+			try {
+				return { status: "ok", settings: readSettings() };
+			} catch (error) {
+				return {
+					status: "failed",
+					message: error instanceof Error ? error.message : String(error),
+				};
+			}
 		case "/settings/set":
 			try {
 				return { status: "ok", settings: updateSettings(payload) };
@@ -253,8 +274,6 @@ export async function handleBridgeRequest(
 			return openPath(helperLogsDir());
 		case "/scripts/reveal":
 			return openPath(helperScriptsDir());
-		case "/backups/reveal":
-			return openPath(helperBackupsDir());
 		case "/state/reveal":
 			return openPath(helperRoot());
 		case "/devtools/open":

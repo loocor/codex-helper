@@ -63,25 +63,39 @@ impl MarkdownExportService {
                     format!("Rollout file does not exist:{rollout_path}"),
                 ));
             }
-            let messages = load_messages(Path::new(&rollout_path))?;
-            if messages.is_empty() {
-                return Ok(failed(
-                    &thread_id,
-                    "No exportable user or assistant messages found",
-                ));
-            }
-            let filename = build_filename(&title, &thread_id);
-            let markdown = render_markdown(&title, &messages);
-            Ok(ExportResult {
-                status: ExportStatus::Exported,
-                session_id: thread_id.clone(),
-                message: format!("Exported as Markdown:{filename}"),
-                filename: Some(filename),
-                markdown: Some(markdown),
-            })
+            Ok(export_rollout(&thread_id, &title, Path::new(&rollout_path)))
         })();
         result.unwrap_or_else(|err| failed(&thread_id, format!("Failed to read rollout:{err}")))
     }
+}
+
+pub fn export_rollout(thread_id: &str, title: &str, rollout_path: &Path) -> ExportResult {
+    let title = display_title(title);
+    let result = (|| -> anyhow::Result<ExportResult> {
+        if !rollout_path.is_file() {
+            anyhow::bail!(
+                "Rollout file does not exist:{}",
+                rollout_path.to_string_lossy()
+            );
+        }
+        let messages = load_messages(rollout_path)?;
+        if messages.is_empty() {
+            return Ok(failed(
+                thread_id,
+                "No exportable user or assistant messages found",
+            ));
+        }
+        let filename = build_filename(&title, thread_id);
+        let markdown = render_markdown(&title, &messages);
+        Ok(ExportResult {
+            status: ExportStatus::Exported,
+            session_id: thread_id.to_string(),
+            message: format!("Exported as Markdown:{filename}"),
+            filename: Some(filename),
+            markdown: Some(markdown),
+        })
+    })();
+    result.unwrap_or_else(|err| failed(thread_id, format!("Failed to read rollout:{err}")))
 }
 
 #[derive(Debug)]

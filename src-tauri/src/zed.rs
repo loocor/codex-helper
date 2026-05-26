@@ -482,6 +482,30 @@ pub fn resolve_ssh_target_response(payload: &Value) -> Value {
     }
 }
 
+pub fn remote_projects_response(_payload: &Value) -> Value {
+    let path = codex_global_state_path();
+    let result = fs::read_to_string(path)
+        .map_err(ZedRemoteError::StateRead)
+        .and_then(|data| serde_json::from_str::<Value>(&data).map_err(ZedRemoteError::StateParse))
+        .map(|state| {
+            ordered_remote_projects_from_global_state(&state)
+                .into_iter()
+                .map(|project| {
+                    json!({
+                        "id": string_value(project.get("id")),
+                        "hostId": string_value(project.get("hostId")),
+                        "remotePath": string_value(project.get("remotePath")),
+                        "label": string_value(project.get("label")),
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+    match result {
+        Ok(projects) => json!({ "status": "ok", "projects": projects }),
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
+}
+
 pub fn open_zed_remote(payload: &Value) -> Value {
     let result = target_from_payload(payload).and_then(|target| {
         let path = string_value(payload.get("path"));
