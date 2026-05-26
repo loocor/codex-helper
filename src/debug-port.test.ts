@@ -4,6 +4,7 @@ import {
 	findFreeDebugPort,
 	PREFERRED_DEBUG_PORT,
 	reserveEphemeralPort,
+	resolveDebugPortForLaunch,
 } from "./debug-port";
 import { isPortFree, listenPidsOnPortWithCommand } from "./port";
 
@@ -22,6 +23,24 @@ test("reserveEphemeralPort holds the port until released", () => {
 	expect(isPortFree(held.port)).toBe(false);
 	held.release();
 	expect(isPortFree(held.port)).toBe(true);
+});
+
+test("default launch resolution reserves a random launch port", async () => {
+	const preferred = reserveEphemeralPort();
+	const preferredPort = preferred.port;
+	preferred.release();
+
+	const resolved = await resolveDebugPortForLaunch({
+		preferred: preferredPort,
+		scanLimit: 1,
+	});
+	try {
+		expect(resolved.mode).toBe("launch");
+		expect(resolved.portHold).toBeDefined();
+		expect(isPortFree(resolved.port)).toBe(false);
+	} finally {
+		resolved.portHold?.release();
+	}
 });
 
 test("preferred debug port range starts at 9229", () => {

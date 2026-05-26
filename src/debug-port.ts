@@ -76,14 +76,8 @@ export async function resolveDebugPort(
 	preferred = PREFERRED_DEBUG_PORT,
 	scanLimit = DEBUG_PORT_SCAN_LIMIT,
 ): Promise<DebugPortResolution> {
-	const attachPort = await findAttachableDebugPort(preferred, scanLimit);
-	if (attachPort !== null) {
-		return { port: attachPort, mode: "attach" };
-	}
-	const freePort = findFreeDebugPort(preferred, scanLimit);
-	if (freePort !== null) {
-		return { port: freePort, mode: "launch" };
-	}
+	void preferred;
+	void scanLimit;
 	const portHold = reserveEphemeralPort();
 	return { port: portHold.port, mode: "launch", portHold };
 }

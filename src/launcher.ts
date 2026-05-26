@@ -17,8 +17,29 @@ export function codexDebugArgs(debugPort: number): string[] {
 }
 
 export function isCodexRunning(): boolean {
-	const result = spawnSync("pgrep", ["-x", "Codex"], { stdio: "ignore" });
-	return result.status === 0;
+	return codexPids().length > 0;
+}
+
+export function parsePidList(output: string): number[] {
+	return output
+		.split(/\s+/)
+		.map((value) => Number(value.trim()))
+		.filter((pid) => Number.isInteger(pid) && pid > 0);
+}
+
+export function codexPids(): number[] {
+	const result = spawnSync("pgrep", ["-x", "Codex"], {
+		encoding: "utf8",
+	} as never) as {
+		status: number | null;
+		stdout?: string;
+		error?: Error;
+	};
+	if (result.error) {
+		throw new Error(`pgrep failed for Codex: ${result.error.message}`);
+	}
+	if (result.status !== 0) return [];
+	return parsePidList(String(result.stdout ?? ""));
 }
 
 export async function quitCodex(
@@ -42,15 +63,33 @@ export async function quitCodex(
 		}
 		await Bun.sleep(250);
 	}
-	throw new Error("Timed out waiting for Codex to quit");
+	const remainingPids = codexPids();
+	if (remainingPids.length === 0) return;
+	timer.stage("quit codex force start", { pids: remainingPids.join(",") });
+	for (const pid of remainingPids) {
+		await terminatePid(pid, "SIGTERM");
+	}
+	await Bun.sleep(1000);
+	const stubbornPids = codexPids();
+	for (const pid of stubbornPids) {
+		await terminatePid(pid, "SIGKILL");
+	}
+	if (stubbornPids.length > 0) {
+		timer.stage("quit codex force kill", { pids: stubbornPids.join(",") });
+		await Bun.sleep(500);
+	}
+	if (isCodexRunning()) {
+		throw new Error("Timed out waiting for Codex to quit");
+	}
+	timer.stage("quit codex force done", { waitedMs: Date.now() - startedAt });
 }
 
 export function isKillablePortBlocker(command: string): boolean {
 	const normalized = command.toLowerCase();
 	return (
 		normalized.includes("codex.app") ||
-		/\bcodex\b/.test(normalized) ||
-		normalized.includes("/codex.app/")
+		normalized.includes("/codex.app/") ||
+		normalized.includes("/contents/macos/codex")
 	);
 }
 
@@ -155,6 +194,11 @@ export async function ensureCodexLaunchedWithDebugPort(
 	mode: "attach" | "launch" = "launch",
 	portHold?: PortHold,
 ): Promise<void> {
+	let heldPort = portHold;
+	const releaseHeldPort = () => {
+		heldPort?.release();
+		heldPort = undefined;
+	};
 	try {
 		timer.stage("probe debug port", { port: debugPort, mode });
 		if (mode === "attach") {
@@ -166,18 +210,23 @@ export async function ensureCodexLaunchedWithDebugPort(
 				`Codex CDP is not ready on port ${debugPort}. Start Codex with remote debugging on that port or omit --debug-port to auto-select.`,
 			);
 		}
-		if (await isDebugPortReady(debugPort)) {
-			if (await hasCodexCdpTarget(debugPort)) {
-				timer.stage("debug port ready", { port: debugPort, path: "existing" });
-				return;
+		if (!heldPort) {
+			if (await isDebugPortReady(debugPort)) {
+				if (await hasCodexCdpTarget(debugPort)) {
+					throw new Error(
+						`Debug port ${debugPort} already exposes Codex CDP. Pass --debug-port ${debugPort} only when you intend to attach to that existing Codex, or omit --debug-port to launch a Helper-managed Codex on a random port.`,
+					);
+				}
+				throw new Error(
+					`Debug port ${debugPort} exposes a browser CDP endpoint but not Codex. Stop the other app or omit --debug-port to auto-select another port.`,
+				);
 			}
-			throw new Error(
-				`Debug port ${debugPort} exposes a browser CDP endpoint but not Codex. Stop the other app or omit --debug-port to auto-select another port.`,
-			);
 		}
 		timer.stage("debug port not ready", { port: debugPort });
 
-		await releaseBlockedDebugPort(debugPort, timer);
+		if (!heldPort) {
+			await releaseBlockedDebugPort(debugPort, timer);
+		}
 
 		const codexRunning = isCodexRunning();
 		timer.stage("check codex process", { running: codexRunning });
@@ -186,12 +235,15 @@ export async function ensureCodexLaunchedWithDebugPort(
 			await quitCodex(timer);
 			await Bun.sleep(500);
 			timer.stage("post-quit delay", { delayMs: 500 });
-			await releaseBlockedDebugPort(debugPort, timer);
+			if (!heldPort) {
+				await releaseBlockedDebugPort(debugPort, timer);
+			}
 		}
 
+		releaseHeldPort();
 		spawnCodexWithDebugPort(appPath, debugPort, timer);
 		await waitForDebugPort(debugPort, timer);
 	} finally {
-		portHold?.release();
+		releaseHeldPort();
 	}
 }
