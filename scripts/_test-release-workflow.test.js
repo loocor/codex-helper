@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 
-const releaseWorkflow = readFileSync(".github/workflows/release.yml", "utf8");
-const dmgScript = readFileSync("scripts/build-macos-dmg.sh", "utf8");
+const repoRoot = resolve(import.meta.dir, "..");
+const releaseWorkflow = readFileSync(join(repoRoot, ".github/workflows/release.yml"), "utf8");
+const dmgScript = readFileSync(join(repoRoot, "scripts/build-macos-dmg.sh"), "utf8");
 
 test("release build keeps a step-level timeout around notarization", () => {
   expect(releaseWorkflow).toContain("timeout-minutes: 45");
@@ -20,11 +22,20 @@ test("release notarization uses bounded retry attempts", () => {
 });
 
 test("release stapling runs only after a successful notary submission", () => {
-  const firstSubmit = dmgScript.indexOf("submit_notarization");
+  const apiKeySubmit = dmgScript.indexOf("submit_notarization --key");
+  const appleIdSubmit = dmgScript.indexOf("submit_notarization --apple-id");
   const firstStaple = dmgScript.indexOf("xcrun stapler staple");
+  const secondStaple = dmgScript.indexOf("xcrun stapler staple", firstStaple + 1);
 
-  expect(firstSubmit).toBeGreaterThan(-1);
-  expect(firstStaple).toBeGreaterThan(firstSubmit);
+  expect(apiKeySubmit).toBeGreaterThan(-1);
+  expect(appleIdSubmit).toBeGreaterThan(-1);
+  expect(firstStaple).toBeGreaterThan(apiKeySubmit);
+  expect(secondStaple).toBeGreaterThan(appleIdSubmit);
+});
+
+test("release notarization preserves failed submit status", () => {
+  expect(dmgScript).toContain("else\n      status=$?");
+  expect(dmgScript).not.toContain("fi\n    status=$?");
 });
 
 test("release publishing generates GitHub release notes", () => {

@@ -80,8 +80,9 @@ submit_notarization() {
     echo "Notarization attempt ${attempt}/${NOTARY_MAX_ATTEMPTS} with timeout ${NOTARY_WAIT_TIMEOUT}"
     if xcrun notarytool submit "$DMG" "${args[@]}" --wait --timeout "$NOTARY_WAIT_TIMEOUT"; then
       return 0
+    else
+      status=$?
     fi
-    status=$?
     if (( attempt >= NOTARY_MAX_ATTEMPTS )); then
       echo "Notarization failed after ${NOTARY_MAX_ATTEMPTS} attempts" >&2
       return "$status"
