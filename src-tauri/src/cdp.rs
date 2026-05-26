@@ -105,35 +105,31 @@ pub fn pick_codex_page_target(targets: &[CdpTarget]) -> anyhow::Result<CdpTarget
     selected.ok_or_else(|| anyhow::anyhow!("No injectable Codex page target found"))
 }
 
-pub fn find_codex_page_target(targets: &[CdpTarget]) -> Option<&CdpTarget> {
-    targets.iter().find(|target| {
-        target.target_type == "page"
-            && target.web_socket_debugger_url.is_some()
-            && format!(
-                "{} {}",
-                target.title.as_deref().unwrap_or_default(),
-                target.url.as_deref().unwrap_or_default()
-            )
-            .to_lowercase()
-            .contains("codex")
-    })
+pub fn codex_page_targets(targets: &[CdpTarget]) -> Vec<CdpTarget> {
+    targets
+        .iter()
+        .filter(|target| is_codex_page_target(target))
+        .cloned()
+        .collect()
 }
 
-pub async fn wait_for_codex_target(debug_port: u16) -> anyhow::Result<CdpTarget> {
-    let mut last_error = None;
-    for _ in 0..40 {
-        match list_targets(debug_port)
-            .await
-            .and_then(|targets| pick_codex_page_target(&targets))
-        {
-            Ok(target) => return Ok(target),
-            Err(error) => {
-                last_error = Some(error);
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            }
-        }
-    }
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Timed out waiting for Codex CDP target")))
+pub fn find_codex_page_target(targets: &[CdpTarget]) -> Option<&CdpTarget> {
+    targets.iter().find(|target| is_codex_page_target(target))
+}
+
+fn is_codex_page_target(target: &CdpTarget) -> bool {
+    target.target_type == "page"
+        && target
+            .web_socket_debugger_url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty())
+        && format!(
+            "{} {}",
+            target.title.as_deref().unwrap_or_default(),
+            target.url.as_deref().unwrap_or_default()
+        )
+        .to_lowercase()
+        .contains("codex")
 }
 
 pub async fn connect_cdp_websocket(
@@ -300,6 +296,27 @@ mod tests {
         let selected = pick_codex_page_target(&targets).expect("target");
 
         assert_eq!(selected.id, "two");
+    }
+
+    #[test]
+    fn cdp_returns_all_codex_page_targets() {
+        let targets = vec![
+            target("one", "page", "Codex", Some("ws://one")),
+            target("two", "page", "Codex", Some("ws://two")),
+            target("worker", "worker", "Codex", Some("ws://worker")),
+            target("missing", "page", "Codex", None),
+            target("empty", "page", "Codex", Some("")),
+        ];
+
+        let selected = codex_page_targets(&targets);
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|target| target.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["one", "two"]
+        );
     }
 
     #[test]

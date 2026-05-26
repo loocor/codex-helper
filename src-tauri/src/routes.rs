@@ -1,9 +1,10 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 use tauri_plugin_opener::{open_path, open_url, reveal_item_in_dir};
 
-use crate::cdp::{list_targets, pick_codex_page_target, CdpTarget};
+use crate::bridge::{BridgeCaller, BridgeRequest};
+use crate::cdp::{list_targets, CdpTarget};
 use crate::logging::DiagnosticLogger;
 use crate::ports::{
     discover_remote_listening_ports, discovery_request_from_payload, request_from_payload,
@@ -25,10 +26,54 @@ pub struct BridgeContext {
     pub logger: Arc<DiagnosticLogger>,
     pub debug_port: u16,
     pub port_manager: PortForwardManager,
+    pub runtime_activity: RuntimeActivity,
 }
 
-pub async fn handle_bridge_request(ctx: BridgeContext, path: &str, payload: Value) -> Value {
-    match path {
+#[derive(Clone, Default)]
+pub struct RuntimeActivity {
+    inner: Arc<Mutex<Option<RuntimeActivitySnapshot>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeActivitySnapshot {
+    pub target_id: String,
+    pub helper_instance_id: String,
+    pub href: String,
+    pub has_focus: bool,
+    pub visibility_state: String,
+}
+
+impl RuntimeActivity {
+    pub fn record(&self, caller: &BridgeCaller) {
+        if caller.target_id.trim().is_empty() || caller.helper_instance_id.trim().is_empty() {
+            return;
+        }
+        *self.inner.lock().expect("runtime activity poisoned") = Some(RuntimeActivitySnapshot {
+            target_id: caller.target_id.clone(),
+            helper_instance_id: caller.helper_instance_id.clone(),
+            href: caller.href.clone(),
+            has_focus: caller.has_focus,
+            visibility_state: caller.visibility_state.clone(),
+        });
+    }
+
+    #[cfg(test)]
+    pub fn last(&self) -> Option<RuntimeActivitySnapshot> {
+        self.inner
+            .lock()
+            .expect("runtime activity poisoned")
+            .clone()
+    }
+}
+
+pub async fn handle_bridge_request(ctx: BridgeContext, request: BridgeRequest) -> Value {
+    let BridgeRequest {
+        path,
+        payload,
+        caller,
+        ..
+    } = request;
+    let response = match path.as_str() {
         "/backend/status" => json!({
             "status": "ok",
             "message": "Codex Helper backend connected",
@@ -39,6 +84,19 @@ pub async fn handle_bridge_request(ctx: BridgeContext, path: &str, payload: Valu
                 .and_then(Value::as_str)
                 .unwrap_or("renderer.event");
             match ctx.logger.append(event, payload.clone()) {
+                Ok(()) => json!({ "status": "ok" }),
+                Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+            }
+        }
+        "/runtime/activity" => {
+            ctx.runtime_activity.record(&caller);
+            match ctx.logger.append(
+                "runtime.activity",
+                json!({
+                    "caller": caller.clone(),
+                    "payload": payload,
+                }),
+            ) {
                 Ok(()) => json!({ "status": "ok" }),
                 Err(error) => json!({ "status": "failed", "message": error.to_string() }),
             }
@@ -64,7 +122,7 @@ pub async fn handle_bridge_request(ctx: BridgeContext, path: &str, payload: Valu
         "/logs/reveal" => reveal_path_response(&ctx.state_dir.logs_dir),
         "/scripts/reveal" => reveal_path_response(&ctx.state_dir.scripts_dir),
         "/state/reveal" => reveal_path_response(&ctx.state_dir.root),
-        "/devtools/open" => open_devtools_response(ctx.debug_port).await,
+        "/devtools/open" => open_devtools_response(ctx.debug_port, &caller.target_id).await,
         "/url/open-external" => open_external_local_url_response(&payload),
         "/auto-rename-chat" => auto_rename_chat_response(&payload),
         "/export-markdown" => export_markdown_response(&payload),
@@ -106,7 +164,32 @@ pub async fn handle_bridge_request(ctx: BridgeContext, path: &str, payload: Valu
             "status": "failed",
             "message": format!("Unknown Codex Helper bridge path: {path}")
         }),
-    }
+    };
+    log_bridge_request(&ctx.logger, &path, &caller, &response);
+    response
+}
+
+fn log_bridge_request(
+    logger: &DiagnosticLogger,
+    path: &str,
+    caller: &BridgeCaller,
+    response: &Value,
+) {
+    let _ = logger.append(
+        "bridge.request",
+        bridge_request_diagnostic(path, caller, response),
+    );
+}
+
+fn bridge_request_diagnostic(path: &str, caller: &BridgeCaller, response: &Value) -> Value {
+    json!({
+        "path": path,
+        "status": response
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown"),
+        "caller": caller,
+    })
 }
 
 fn user_script_inventory(state_dir: &StateDir) -> anyhow::Result<Vec<String>> {
@@ -156,22 +239,12 @@ fn reveal_path_response(path: &std::path::Path) -> Value {
     }
 }
 
-async fn open_devtools_response(debug_port: u16) -> Value {
-    let target = match list_targets(debug_port)
-        .await
-        .and_then(|targets| pick_codex_page_target(&targets))
-    {
-        Ok(target) => target,
+async fn open_devtools_response(debug_port: u16, target_id: &str) -> Value {
+    let targets = match list_targets(debug_port).await {
+        Ok(targets) => targets,
         Err(error) => return json!({ "status": "failed", "message": error.to_string() }),
     };
-    let target_id = target.id.clone();
-    if target_id.trim().is_empty() {
-        return json!({
-            "status": "failed",
-            "message": "Codex DevTools target id is empty",
-        });
-    }
-    let url = match devtools_url(debug_port, &target) {
+    let url = match devtools_url_for_target_id(debug_port, &targets, target_id) {
         Ok(url) => url,
         Err(error) => return json!({ "status": "failed", "message": error.to_string() }),
     };
@@ -266,6 +339,22 @@ pub fn devtools_url(debug_port: u16, target: &CdpTarget) -> anyhow::Result<Strin
     ))
 }
 
+fn devtools_url_for_target_id(
+    debug_port: u16,
+    targets: &[CdpTarget],
+    target_id: &str,
+) -> anyhow::Result<String> {
+    let target_id = target_id.trim();
+    if target_id.is_empty() {
+        anyhow::bail!("Codex DevTools caller target id is empty");
+    }
+    let target = targets
+        .iter()
+        .find(|target| target.id == target_id)
+        .ok_or_else(|| anyhow::anyhow!("Codex DevTools target not found: {target_id}"))?;
+    devtools_url(debug_port, target)
+}
+
 fn normalize_devtools_frontend_url(debug_port: u16, frontend_url: &str) -> String {
     if frontend_url.starts_with("http://")
         || frontend_url.starts_with("https://")
@@ -337,6 +426,84 @@ mod tests {
             devtools_url(9229, &target).expect("devtools url"),
             "http://127.0.0.1:9229/devtools/inspector.html?ws=localhost:9229/devtools/page/target-1"
         );
+    }
+
+    #[test]
+    fn devtools_open_uses_caller_target() {
+        let targets = vec![
+            CdpTarget {
+                id: "first-target".to_string(),
+                target_type: "page".to_string(),
+                title: Some("Codex".to_string()),
+                url: Some("app://-/index.html".to_string()),
+                devtools_frontend_url: None,
+                web_socket_debugger_url: Some(
+                    "ws://127.0.0.1:9229/devtools/page/first-target".to_string(),
+                ),
+            },
+            CdpTarget {
+                id: "caller-target".to_string(),
+                target_type: "page".to_string(),
+                title: Some("Codex".to_string()),
+                url: Some("app://-/index.html".to_string()),
+                devtools_frontend_url: None,
+                web_socket_debugger_url: Some(
+                    "ws://127.0.0.1:9229/devtools/page/caller-target".to_string(),
+                ),
+            },
+        ];
+
+        assert_eq!(
+            devtools_url_for_target_id(9229, &targets, "caller-target").expect("devtools url"),
+            "http://127.0.0.1:9229/devtools/inspector.html?ws=127.0.0.1:9229/devtools/page/caller-target"
+        );
+    }
+
+    #[test]
+    fn runtime_activity_records_caller_identity() {
+        let activity = RuntimeActivity::default();
+        let caller = BridgeCaller {
+            target_id: "target-1".to_string(),
+            helper_instance_id: "helper-1".to_string(),
+            href: "app://-/index.html".to_string(),
+            has_focus: true,
+            visibility_state: "visible".to_string(),
+        };
+
+        activity.record(&caller);
+
+        assert_eq!(
+            activity.last(),
+            Some(RuntimeActivitySnapshot {
+                target_id: "target-1".to_string(),
+                helper_instance_id: "helper-1".to_string(),
+                href: "app://-/index.html".to_string(),
+                has_focus: true,
+                visibility_state: "visible".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn bridge_request_diagnostic_includes_route_status_and_caller() {
+        let caller = BridgeCaller {
+            target_id: "target-1".to_string(),
+            helper_instance_id: "helper-1".to_string(),
+            href: "app://-/index.html".to_string(),
+            has_focus: true,
+            visibility_state: "visible".to_string(),
+        };
+
+        let diagnostic =
+            bridge_request_diagnostic("/backend/status", &caller, &json!({ "status": "ok" }));
+
+        assert_eq!(diagnostic["path"], "/backend/status");
+        assert_eq!(diagnostic["status"], "ok");
+        assert_eq!(diagnostic["caller"]["targetId"], "target-1");
+        assert_eq!(diagnostic["caller"]["helperInstanceId"], "helper-1");
+        assert_eq!(diagnostic["caller"]["href"], "app://-/index.html");
+        assert_eq!(diagnostic["caller"]["hasFocus"], true);
+        assert_eq!(diagnostic["caller"]["visibilityState"], "visible");
     }
 
     #[test]

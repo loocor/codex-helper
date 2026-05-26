@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::cdp::connect_cdp_websocket;
@@ -16,19 +18,70 @@ const BRIDGE_BINDING_NAME: &str = "codexHelperBridgeV1";
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 type BridgeHandler = Arc<
-    dyn Fn(String, Value) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>>
+    dyn Fn(BridgeRequest) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>>
         + Send
         + Sync,
 >;
 
 static NEXT_MESSAGE_ID: AtomicU64 = AtomicU64::new(100);
 
-pub fn build_bridge_script(binding_name: &str) -> String {
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeCaller {
+    pub target_id: String,
+    pub helper_instance_id: String,
+    #[serde(default)]
+    pub href: String,
+    #[serde(default)]
+    pub has_focus: bool,
+    #[serde(default)]
+    pub visibility_state: String,
+}
+
+impl BridgeCaller {
+    pub fn new_for_target(target_id: &str, helper_instance_id: &str) -> Self {
+        Self {
+            target_id: target_id.to_string(),
+            helper_instance_id: helper_instance_id.to_string(),
+            href: String::new(),
+            has_focus: false,
+            visibility_state: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct BridgeRequest {
+    pub id: String,
+    pub path: String,
+    #[serde(default = "empty_payload")]
+    pub payload: Value,
+    #[serde(default)]
+    pub caller: BridgeCaller,
+}
+
+fn empty_payload() -> Value {
+    json!({})
+}
+
+fn parse_bridge_request(payload_text: &str) -> anyhow::Result<BridgeRequest> {
+    Ok(serde_json::from_str(payload_text)?)
+}
+
+pub fn build_bridge_script(binding_name: &str, caller: &BridgeCaller) -> String {
+    let caller_json = serde_json::to_string(caller).expect("bridge caller metadata must serialize");
     format!(
         r#"
 (() => {{
   window.__codexHelperCallbacks = new Map();
   window.__codexHelperSeq = 0;
+  window.__codexHelperCallerBase = {caller_json};
+  window.__codexHelperCaller = () => ({{
+    ...window.__codexHelperCallerBase,
+    href: window.location.href,
+    hasFocus: document.hasFocus(),
+    visibilityState: document.visibilityState || "",
+  }});
   window.__codexHelperResolve = (id, result) => {{
     const callback = window.__codexHelperCallbacks.get(id);
     if (!callback) return;
@@ -44,7 +97,7 @@ pub fn build_bridge_script(binding_name: &str) -> String {
   window.__codexHelperBridge = (path, payload = {{}}) => new Promise((resolve) => {{
     const id = String(++window.__codexHelperSeq);
     window.__codexHelperCallbacks.set(id, {{ resolve }});
-    window.{binding_name}(JSON.stringify({{ id, path, payload }}));
+    window.{binding_name}(JSON.stringify({{ id, path, payload, caller: window.__codexHelperCaller() }}));
   }});
 }})();
 "#
@@ -54,9 +107,10 @@ pub fn build_bridge_script(binding_name: &str) -> String {
 pub async fn install_bridge(
     websocket_url: &str,
     target_id: &str,
+    caller: BridgeCaller,
     ctx: BridgeContext,
     runtime_scripts: Vec<String>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<JoinHandle<()>> {
     let handler = bridge_handler(ctx);
     let socket = connect_cdp_websocket(websocket_url).await?;
     let mut session = BindingCdpSession::new(socket).with_handler(handler);
@@ -91,7 +145,7 @@ pub async fn install_bridge(
         )
         .await?;
 
-    let bridge_script = build_bridge_script(BRIDGE_BINDING_NAME);
+    let bridge_script = build_bridge_script(BRIDGE_BINDING_NAME, &caller);
     session
         .send_command(
             5,
@@ -126,7 +180,7 @@ pub async fn install_bridge(
             .await?;
     }
 
-    tokio::spawn(async move {
+    let binding_task = tokio::spawn(async move {
         loop {
             if session.drain_binding_queue().await.is_err() {
                 break;
@@ -138,13 +192,13 @@ pub async fn install_bridge(
         }
     });
 
-    Ok(())
+    Ok(binding_task)
 }
 
 fn bridge_handler(ctx: BridgeContext) -> BridgeHandler {
-    Arc::new(move |path, payload| {
+    Arc::new(move |request| {
         let ctx = ctx.clone();
-        Box::pin(async move { Ok(handle_bridge_request(ctx, &path, payload).await) })
+        Box::pin(async move { Ok(handle_bridge_request(ctx, request).await) })
     })
 }
 
@@ -317,7 +371,7 @@ where
                 return Ok(());
             };
 
-            let parsed: Value = match serde_json::from_str(payload_text) {
+            let request = match parse_bridge_request(payload_text) {
                 Ok(parsed) => parsed,
                 Err(error) => {
                     if let Some(request_id) = extract_string_field(payload_text, "id") {
@@ -330,29 +384,19 @@ where
                     return Ok(());
                 }
             };
-            self.route_parsed_binding_call(&handler, parsed).await
+            self.route_parsed_binding_call(&handler, request).await
         })
     }
 
     async fn route_parsed_binding_call(
         &mut self,
         handler: &BridgeHandler,
-        parsed: Value,
+        request: BridgeRequest,
     ) -> anyhow::Result<()> {
-        let Some(request_id) = parsed.get("id").and_then(Value::as_str) else {
-            return Ok(());
-        };
-        let path = parsed
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let payload = parsed.get("payload").cloned().unwrap_or_else(|| json!({}));
-
-        match handler(path, payload).await {
-            Ok(result) => self.resolve_bridge_request(request_id, &result).await?,
+        match handler(request.clone()).await {
+            Ok(result) => self.resolve_bridge_request(&request.id, &result).await?,
             Err(error) => {
-                self.reject_bridge_request(request_id, &error.to_string())
+                self.reject_bridge_request(&request.id, &error.to_string())
                     .await?
             }
         }
@@ -435,12 +479,53 @@ mod tests {
 
     #[test]
     fn bridge_script_defines_cdp_binding_bridge() {
-        let script = build_bridge_script("codexHelperBridgeV1");
+        let script = build_bridge_script(
+            "codexHelperBridgeV1",
+            &BridgeCaller::new_for_target("target-1", "instance-1"),
+        );
 
         assert!(script.contains("window.__codexHelperBridge"));
         assert!(script.contains("window.codexHelperBridgeV1"));
         assert!(script.contains("window.__codexHelperResolve"));
         assert!(script.contains("window.__codexHelperReject"));
+    }
+
+    #[test]
+    fn bridge_script_includes_caller_identity() {
+        let script = build_bridge_script(
+            "codexHelperBridgeV1",
+            &BridgeCaller::new_for_target("target-1", "instance-1"),
+        );
+
+        assert!(script.contains("\"targetId\":\"target-1\""));
+        assert!(script.contains("\"helperInstanceId\":\"instance-1\""));
+        assert!(script.contains("document.hasFocus()"));
+        assert!(script.contains("document.visibilityState"));
+    }
+
+    #[test]
+    fn bridge_request_parses_caller_identity() {
+        let request = parse_bridge_request(
+            r#"{"id":"1","path":"/devtools/open","payload":{},"caller":{"targetId":"target-1","helperInstanceId":"instance-1","href":"app://-/index.html","hasFocus":true,"visibilityState":"visible"}}"#,
+        )
+        .expect("request");
+
+        assert_eq!(request.id, "1");
+        assert_eq!(request.path, "/devtools/open");
+        assert_eq!(request.caller.target_id, "target-1");
+        assert_eq!(request.caller.helper_instance_id, "instance-1");
+        assert_eq!(request.caller.href, "app://-/index.html");
+        assert!(request.caller.has_focus);
+        assert_eq!(request.caller.visibility_state, "visible");
+    }
+
+    #[test]
+    fn bridge_request_allows_missing_caller_for_global_routes() {
+        let request = parse_bridge_request(r#"{"id":"1","path":"/backend/status","payload":{}}"#)
+            .expect("request");
+
+        assert_eq!(request.path, "/backend/status");
+        assert_eq!(request.caller, BridgeCaller::default());
     }
 
     #[test]
