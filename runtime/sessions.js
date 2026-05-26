@@ -107,11 +107,6 @@
       label: "Archive chat",
       enabled: true,
     });
-    items.push({
-      id: "mark-thread-unread",
-      label: "Mark as unread",
-      enabled: true,
-    });
     items.push({ type: "separator" });
     items.push({
       id: "open-thread-folder",
@@ -131,17 +126,6 @@
     items.push({
       id: "copy-app-link",
       label: "Copy deeplink",
-      enabled: true,
-    });
-    items.push({ type: "separator" });
-    items.push({
-      id: "fork-into-local",
-      label: "Fork into local",
-      enabled: true,
-    });
-    items.push({
-      id: "fork-into-worktree",
-      label: "Fork into new worktree",
       enabled: true,
     });
     items.push({ type: "separator" });
@@ -184,6 +168,11 @@
         : ref.session_id;
       await copyTextToClipboard(link);
       showHelperToast("Copied deeplink");
+      return;
+    }
+    if (id === "copy-cwd") {
+      await copyTextToClipboard(sessionProjectContext(row).path);
+      showHelperToast("Copied working directory");
       return;
     }
     if (id === "rename-thread") {
@@ -239,7 +228,7 @@
       return;
     }
     const remoteProjects = actions.includes("fork")
-      ? await loadRemoteProjectMetadata()
+      ? await loadRemoteProjectMetadataOrEmpty()
       : [];
     const items = [
       ...buildCodexSessionNativeMenuItems(row, ref),
@@ -294,6 +283,17 @@
       throw new Error(result?.message || "Remote project metadata unavailable");
     }
     return Array.isArray(result.projects) ? result.projects : [];
+  }
+
+  async function loadRemoteProjectMetadataOrEmpty() {
+    try {
+      return await loadRemoteProjectMetadata();
+    } catch (error) {
+      logDiagnostic("remote_project_metadata_unavailable", {
+        error: error?.message || String(error),
+      });
+      return [];
+    }
   }
 
   function remoteProjectMetadataById(remoteProjects) {
@@ -773,7 +773,7 @@
       return;
     }
     if (action.startsWith("fork")) {
-      const remoteProjects = await loadRemoteProjectMetadata();
+      const remoteProjects = await loadRemoteProjectMetadataOrEmpty();
       const target = await openProjectForkMenu(
         ref,
         row,
@@ -794,7 +794,7 @@
       if (result?.status !== "forked")
         throw new Error(result?.message || "Fork failed");
       await refreshSidebarAfterFork(target);
-      showHelperToast(result.message || "Forked");
+      showHelperToast(result.warning || result.message || "Forked");
       navigateAfterFork(result, target);
       return;
     }

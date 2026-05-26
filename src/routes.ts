@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import {
 	appendFileSync,
+	existsSync,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
@@ -48,6 +49,7 @@ const defaultSettings: HelperSettings = {
 	portAutoForwardWeb: true,
 	portSameLocalPort: true,
 };
+const legacySettingsKeys = new Set(["sessionDeleteEnabled"]);
 
 const portManager = new PortForwardManager();
 
@@ -95,16 +97,7 @@ function appendDiagnostic(event: string, detail: JsonValue): void {
 
 function readSettings(): HelperSettings {
 	ensureHelperRoot();
-	try {
-		const settings = JSON.parse(
-			readFileSync(helperConfigPath(), "utf8"),
-		) as Partial<HelperSettings>;
-		const next: HelperSettings = { ...defaultSettings };
-		for (const key of Object.keys(defaultSettings) as Array<keyof HelperSettings>) {
-			if (typeof settings[key] === "boolean") next[key] = settings[key];
-		}
-		return next;
-	} catch {
+	if (!existsSync(helperConfigPath())) {
 		writeFileSync(
 			helperConfigPath(),
 			`${JSON.stringify(defaultSettings, null, 2)}\n`,
@@ -112,6 +105,33 @@ function readSettings(): HelperSettings {
 		);
 		return { ...defaultSettings };
 	}
+	let settings: unknown;
+	try {
+		settings = JSON.parse(readFileSync(helperConfigPath(), "utf8"));
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		appendDiagnostic("settings_read_failed", {
+			message,
+		});
+		throw new Error(`Failed to parse ${helperConfigPath()}: ${message}`);
+	}
+	if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+		throw new Error("Settings file must contain a JSON object");
+	}
+	const next: HelperSettings = { ...defaultSettings };
+	const object = settings as Record<string, JsonValue>;
+	for (const [key, value] of Object.entries(object)) {
+		if (key in defaultSettings) {
+			if (typeof value !== "boolean") {
+				throw new Error(`Settings value for ${key} must be a boolean`);
+			}
+			(next as Record<string, boolean>)[key] = value;
+			continue;
+		}
+		if (legacySettingsKeys.has(key)) continue;
+		throw new Error(`Unknown settings key: ${key}`);
+	}
+	return next;
 }
 
 function updateSettings(payload: Record<string, JsonValue>): HelperSettings {
@@ -225,7 +245,14 @@ export async function handleBridgeRequest(
 				scripts: listUserScripts(),
 			};
 		case "/settings/get":
-			return { status: "ok", settings: readSettings() };
+			try {
+				return { status: "ok", settings: readSettings() };
+			} catch (error) {
+				return {
+					status: "failed",
+					message: error instanceof Error ? error.message : String(error),
+				};
+			}
 		case "/settings/set":
 			try {
 				return { status: "ok", settings: updateSettings(payload) };

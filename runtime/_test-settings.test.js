@@ -15,8 +15,50 @@ function extractFunction(name) {
   if (start === -1) throw new Error(`${name} not found`);
   const braceStart = source.indexOf("{", start);
   let depth = 0;
+  let quote = "";
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
   for (let index = braceStart; index < source.length; index += 1) {
     const char = source[index];
+    const next = source[index + 1] || "";
+    if (lineComment) {
+      if (char === "\n") lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (char === "*" && next === "/") {
+        blockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === quote) quote = "";
+      continue;
+    }
+    if (char === "/" && next === "/") {
+      lineComment = true;
+      index += 1;
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      blockComment = true;
+      index += 1;
+      continue;
+    }
+    if (char === "\"" || char === "'" || char === "`") {
+      quote = char;
+      continue;
+    }
     if (char === "{") depth += 1;
     if (char === "}") depth -= 1;
     if (depth === 0) return source.slice(start, index + 1);
@@ -412,6 +454,7 @@ test("session context menu extends Codex native electronBridge menu", () => {
   expect(source).toContain("buildCodexSessionNativeMenuItems");
   expect(source).toContain("openProjectForkMenu");
   expect(source).toContain("navigateAfterFork(result, target)");
+  expect(source).toContain("showHelperToast(result.warning || result.message || \"Forked\")");
   expect(source).toContain("window.location.assign(path)");
   expect(source).toContain("nativeProjectTargets");
   expect(source).toContain("helperSessionMenuIcon");
@@ -419,8 +462,13 @@ test("session context menu extends Codex native electronBridge menu", () => {
   expect(source).not.toContain("Move Session");
   expect(source).toContain("window.electronBridge");
   expect(source).toContain("open-thread-new-window");
+  expect(source).toContain("loadRemoteProjectMetadataOrEmpty");
+  expect(source).toContain('logDiagnostic("remote_project_metadata_unavailable"');
   expect(source).toContain("codex-helper-session-");
   expect(source).toContain("stopImmediatePropagation");
+  expect(source).not.toContain('id: "mark-thread-unread"');
+  expect(source).not.toContain('id: "fork-into-local"');
+  expect(source).not.toContain('id: "fork-into-worktree"');
   expect(source).not.toContain("installSessionContextMenuItems");
   expect(source).not.toContain("installElectronContextMenuHook");
   expect(source).not.toContain("promptMoveTargetPath");

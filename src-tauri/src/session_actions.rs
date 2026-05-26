@@ -1,10 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use rusqlite::Connection;
 use serde_json::{json, Value};
-use uuid::Uuid;
 
 use crate::codex_app_server::{CodexAppServerClient, ThreadForker};
 use crate::markdown::{export_rollout, MarkdownExportService};
@@ -28,11 +27,11 @@ pub fn export_markdown_response(payload: &Value) -> Value {
             let result = (|| -> anyhow::Result<Value> {
                 let target = resolve_ssh_target_for_host_id(&host_id, None)?;
                 let record = remote_thread_record(&target, &session)?;
-                let rollout_path = download_remote_rollout(&target, &record.rollout_path)?;
+                let rollout = download_remote_rollout(&target, &record.rollout_path)?;
                 Ok(serde_json::to_value(export_rollout(
                     &crate::codex_app_server::normalize_thread_id(&session.session_id),
                     &record.title.unwrap_or_else(|| session.title.clone()),
-                    &rollout_path,
+                    rollout.path(),
                 ))?)
             })();
             result
@@ -75,6 +74,7 @@ pub fn fork_thread_project_response(payload: &Value) -> Value {
             "message": "Conversation forked",
             "target_cwd": target_cwd.trim(),
             "target_name": target_name,
+            "warning": thread.warning,
         }),
         Err(error) => {
             json!({ "status": "failed", "session_id": session.session_id, "message": error.to_string() })
@@ -128,8 +128,8 @@ fn fork_thread_project(
             target_name,
         );
     }
-    let rollout_path = source_rollout_local_path(session, source_host_id)?;
-    target_client.fork_rollout_to_workspace(&rollout_path, target_cwd, target_name)
+    let rollout = source_rollout_local_path(session, source_host_id)?;
+    target_client.fork_rollout_to_workspace(rollout.path(), target_cwd, target_name)
 }
 
 fn string_payload(payload: &Value, key: &str) -> String {
@@ -157,17 +157,34 @@ fn app_server_client_for_host(host_id: &str) -> anyhow::Result<CodexAppServerCli
     ))
 }
 
+enum SourceRollout {
+    Local(PathBuf),
+    Temp(tempfile::NamedTempFile),
+}
+
+impl SourceRollout {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Local(path) => path,
+            Self::Temp(file) => file.path(),
+        }
+    }
+}
+
 fn source_rollout_local_path(
     session: &SessionRef,
     source_host_id: &str,
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<SourceRollout> {
     let source_host_id = source_host_id.trim();
     if source_host_id.is_empty() {
-        return rollout_path_for_session(session);
+        return Ok(SourceRollout::Local(rollout_path_for_session(session)?));
     }
     let target = resolve_ssh_target_for_host_id(source_host_id, None)?;
     let record = remote_thread_record(&target, session)?;
-    download_remote_rollout(&target, &record.rollout_path)
+    Ok(SourceRollout::Temp(download_remote_rollout(
+        &target,
+        &record.rollout_path,
+    )?))
 }
 
 fn local_thread_record(db_path: &Path, session: &SessionRef) -> anyhow::Result<ThreadRecord> {
@@ -191,17 +208,17 @@ fn remote_thread_record(target: &SshTarget, session: &SessionRef) -> anyhow::Res
     let candidates = remote_state_db_candidates(target)?;
     let mut errors = Vec::new();
     for remote_db_path in candidates {
-        let db_path = temp_file_path("remote-state", "sqlite");
+        let db_file = temp_download_file("remote-state", "sqlite")?;
         if let Err(error) = download_remote_file(
             target,
             &remote_db_path,
-            &db_path,
+            db_file.path(),
             "Remote Codex database download",
         ) {
             errors.push(format!("{remote_db_path}: {error}"));
             continue;
         }
-        match local_thread_record(&db_path, session) {
+        match local_thread_record(db_file.path(), session) {
             Ok(record) => return Ok(record),
             Err(error) => errors.push(format!("{remote_db_path}: {error}")),
         }
@@ -232,7 +249,11 @@ if [ -n "${CODEX_HOME:-}" ]; then
   printf '%s\n' "$CODEX_HOME/state_5.sqlite"
 fi
 printf '%s\n' "$HOME/.codex/state_5.sqlite"
-find "$HOME/.codex" "$HOME/Library/Application Support" -maxdepth 5 \( -name 'state_*.sqlite' -o -name 'state.sqlite' \) -type f 2>/dev/null
+for root in "$HOME/.codex" "$HOME/Library/Application Support"; do
+  if [ -d "$root" ]; then
+    find "$root" -maxdepth 5 \( -name 'state_*.sqlite' -o -name 'state.sqlite' \) -type f 2>/dev/null || true
+  fi
+done
 "#;
     let output = ssh_shell_output(target, script)?;
     if !output.status.success() {
@@ -305,13 +326,21 @@ thread_id={}
     Ok(path)
 }
 
-fn download_remote_rollout(target: &SshTarget, remote_path: &str) -> anyhow::Result<PathBuf> {
+fn download_remote_rollout(
+    target: &SshTarget,
+    remote_path: &str,
+) -> anyhow::Result<tempfile::NamedTempFile> {
     let remote_path = remote_path.trim();
     if remote_path.is_empty() {
         anyhow::bail!("Remote rollout path is empty");
     }
-    let destination = temp_file_path("remote-rollout", "jsonl");
-    download_remote_file(target, remote_path, &destination, "Remote rollout download")?;
+    let destination = temp_download_file("remote-rollout", "jsonl")?;
+    download_remote_file(
+        target,
+        remote_path,
+        destination.path(),
+        "Remote rollout download",
+    )?;
     Ok(destination)
 }
 
@@ -322,25 +351,20 @@ fn download_remote_file(
     label: &str,
 ) -> anyhow::Result<()> {
     let script = format!("cat {}", shell_quote(remote_path));
-    let output = ssh_shell_output(target, script)?;
-    write_checked_output(destination, output, label)
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = fs::File::create(destination)?;
+    let output = ssh_command(target)
+        .arg(format!("sh -lc {}", shell_quote(&script)))
+        .stdout(Stdio::from(file))
+        .stderr(Stdio::piped())
+        .output()?;
+    ensure_success_status(&output, label)
 }
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn write_checked_output(
-    destination: &Path,
-    output: std::process::Output,
-    label: &str,
-) -> anyhow::Result<()> {
-    ensure_success_status(&output, label)?;
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(destination, output.stdout)?;
-    Ok(())
 }
 
 fn ensure_success_status(output: &std::process::Output, label: &str) -> anyhow::Result<()> {
@@ -385,12 +409,11 @@ fn ssh_target_arg(target: &SshTarget) -> String {
     format!("{user_prefix}{}", target.host)
 }
 
-fn temp_file_path(prefix: &str, extension: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "{prefix}-{}.{}",
-        Uuid::new_v4().simple(),
-        extension.trim_start_matches('.')
-    ))
+fn temp_download_file(prefix: &str, extension: &str) -> anyhow::Result<tempfile::NamedTempFile> {
+    Ok(tempfile::Builder::new()
+        .prefix(&format!("{prefix}-"))
+        .suffix(&format!(".{}", extension.trim_start_matches('.')))
+        .tempfile()?)
 }
 
 trait NonEmptyStringExt {
@@ -480,6 +503,7 @@ mod tests {
         ) -> anyhow::Result<crate::codex_app_server::ForkedThread> {
             Ok(crate::codex_app_server::ForkedThread {
                 session_id: self.session_id.clone(),
+                warning: None,
             })
         }
 
@@ -491,6 +515,7 @@ mod tests {
         ) -> anyhow::Result<crate::codex_app_server::ForkedThread> {
             Ok(crate::codex_app_server::ForkedThread {
                 session_id: self.session_id.clone(),
+                warning: None,
             })
         }
     }
@@ -533,5 +558,4 @@ mod tests {
         assert_eq!(response["target_cwd"], "/tmp/project");
         assert_eq!(response["message"], "Conversation forked");
     }
-
 }

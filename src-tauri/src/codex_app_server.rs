@@ -11,6 +11,7 @@ use crate::zed::SshTarget;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForkedThread {
     pub session_id: String,
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -175,7 +176,6 @@ impl CodexAppServerClient {
             .remote_target
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Remote target is required"))?;
-        let bytes = std::fs::read(rollout_path)?;
         let filename = format!(
             "{}.jsonl",
             sanitize_remote_filename(
@@ -186,7 +186,7 @@ impl CodexAppServerClient {
             )
         );
         let script = format!(
-            "remote_file=\"$HOME/.codex-helper/fork-imports/{filename}\"; mkdir -p \"$(dirname \"$remote_file\")\"; cat > \"$remote_file\"; printf '%s\\n' \"$remote_file\""
+            "remote_dir=\"$HOME/.codex-helper/fork-imports\"; mkdir -p \"$remote_dir\"; remote_file=$(mktemp \"$remote_dir/{filename}.XXXXXX\"); cat > \"$remote_file\"; printf '%s\\n' \"$remote_file\""
         );
         let mut command = Command::new("ssh");
         if let Some(port) = target.port {
@@ -205,7 +205,8 @@ impl CodexAppServerClient {
                 .stdin
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("SSH stdin is unavailable"))?;
-            stdin.write_all(&bytes)?;
+            let mut source = std::fs::File::open(rollout_path)?;
+            std::io::copy(&mut source, stdin)?;
         }
         let output = child.wait_with_output()?;
         if !output.status.success() {
@@ -224,6 +225,48 @@ impl CodexAppServerClient {
             anyhow::bail!("Remote rollout upload did not return a path");
         }
         Ok(remote_path)
+    }
+
+    fn remove_remote_file(&self, remote_path: &str) -> anyhow::Result<()> {
+        let target = self
+            .remote_target
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Remote target is required"))?;
+        let script = format!("rm -f -- {}", shell_quote(remote_path));
+        let mut command = Command::new("ssh");
+        if let Some(port) = target.port {
+            command.arg("-p").arg(port.to_string());
+        }
+        let output = command
+            .arg(ssh_target_arg(target))
+            .arg(format!("sh -lc {}", shell_quote(&script)))
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            anyhow::bail!(
+                "{}",
+                if stderr.is_empty() {
+                    format!(
+                        "Remote rollout cleanup failed with status {}",
+                        output.status
+                    )
+                } else {
+                    stderr
+                }
+            );
+        }
+        Ok(())
+    }
+
+    fn rename_thread_best_effort(&self, thread_id: &str, name: &str) -> Option<String> {
+        let output = self.run_requests(&[
+            build_initialize_request(1),
+            build_thread_name_request(2, thread_id, name),
+        ]);
+        match output.and_then(|output| json_rpc_response_by_id(&output, 2).map(|_| ())) {
+            Ok(()) => None,
+            Err(error) => Some(format!("Conversation forked, but rename failed: {error}")),
+        }
     }
 }
 
@@ -247,13 +290,10 @@ impl ThreadForker for CodexAppServerClient {
         let output = self.run_requests(&[build_initialize_request(1), fork_request])?;
         let fork_response = json_rpc_response_by_id(&output, 2)?;
         let forked_thread_id = forked_thread_id_from_response(&fork_response)?;
-        let output = self.run_requests(&[
-            build_initialize_request(1),
-            build_thread_name_request(2, &forked_thread_id, name),
-        ])?;
-        json_rpc_response_by_id(&output, 2)?;
+        let warning = self.rename_thread_best_effort(&forked_thread_id, name);
         Ok(ForkedThread {
             session_id: forked_thread_id,
+            warning,
         })
     }
 
@@ -271,23 +311,48 @@ impl ThreadForker for CodexAppServerClient {
         if name.is_empty() {
             anyhow::bail!("Thread name is empty");
         }
-        let fork_path = if self.remote_target.is_some() {
-            self.remote_rollout_path(rollout_path)?
+        let uploaded_remote_path = if self.remote_target.is_some() {
+            Some(self.remote_rollout_path(rollout_path)?)
         } else {
-            rollout_path.to_string_lossy().into_owned()
+            None
         };
+        let fork_path = uploaded_remote_path
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| rollout_path.to_string_lossy().into_owned());
         let fork_request = build_thread_fork_from_path_request(2, &fork_path, target_cwd);
-        let output = self.run_requests(&[build_initialize_request(1), fork_request])?;
-        let fork_response = json_rpc_response_by_id(&output, 2)?;
-        let forked_thread_id = forked_thread_id_from_response(&fork_response)?;
-        let output = self.run_requests(&[
-            build_initialize_request(1),
-            build_thread_name_request(2, &forked_thread_id, name),
-        ])?;
-        json_rpc_response_by_id(&output, 2)?;
+        let fork_result = (|| -> anyhow::Result<String> {
+            let output = self.run_requests(&[build_initialize_request(1), fork_request])?;
+            let fork_response = json_rpc_response_by_id(&output, 2)?;
+            forked_thread_id_from_response(&fork_response)
+        })();
+        let cleanup_warning = uploaded_remote_path.as_deref().and_then(|path| {
+            self.remove_remote_file(path)
+                .err()
+                .map(|error| format!("Remote rollout cleanup failed: {error}"))
+        });
+        let forked_thread_id = fork_result?;
+        let warning = combine_warnings([
+            self.rename_thread_best_effort(&forked_thread_id, name),
+            cleanup_warning,
+        ]);
         Ok(ForkedThread {
             session_id: forked_thread_id,
+            warning,
         })
+    }
+}
+
+fn combine_warnings(warnings: impl IntoIterator<Item = Option<String>>) -> Option<String> {
+    let warnings = warnings
+        .into_iter()
+        .flatten()
+        .filter(|warning| !warning.trim().is_empty())
+        .collect::<Vec<_>>();
+    if warnings.is_empty() {
+        None
+    } else {
+        Some(warnings.join("; "))
     }
 }
 
@@ -676,5 +741,58 @@ done
             .expect("forked thread");
 
         assert_eq!(forked.session_id, "forked-thread");
+        assert_eq!(forked.warning, None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fork_client_reports_rename_failure_as_warning() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-helper-fake-app-server-rename-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let script = dir.join("codex-fake");
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+initialized=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"id":1,"result":{"userAgent":"fake","codexHome":"/tmp","platformFamily":"unix","platformOs":"macos"}}'
+      ;;
+    *'"method":"initialized"'*)
+      initialized=1
+      ;;
+    *'"method":"thread/fork"'*)
+      if [ "$initialized" = 1 ]; then
+        printf '%s\n' '{"id":2,"result":{"thread":{"sessionId":"forked-thread"}}}'
+      fi
+      ;;
+    *'"method":"thread/name/set"'*)
+      if [ "$initialized" = 1 ]; then
+        printf '%s\n' '{"id":2,"error":{"code":-32603,"message":"rename failed"}}'
+      fi
+      ;;
+  esac
+done
+"#,
+        )
+        .expect("script");
+        let mut permissions = fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("chmod");
+
+        let client = super::CodexAppServerClient::new(script.to_string_lossy().to_string());
+        let forked = client
+            .fork_thread_to_workspace("source-thread", "/tmp/project", "Readable name")
+            .expect("forked thread");
+
+        assert_eq!(forked.session_id, "forked-thread");
+        assert!(forked
+            .warning
+            .expect("rename warning")
+            .contains("rename failed"));
     }
 }
