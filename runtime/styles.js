@@ -640,6 +640,9 @@ function installHelperStyles() {
         right: 24px;
         bottom: 24px;
         z-index: 2147483647;
+        display: flex;
+        align-items: center;
+        gap: 8px;
         max-width: min(420px, calc(100vw - 48px));
         border-radius: 10px;
         padding: 10px 12px;
@@ -648,6 +651,15 @@ function installHelperStyles() {
         border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
         box-shadow: 0 12px 34px color-mix(in srgb, black 18%, transparent);
         font-size: 13px;
+      }
+      [${helperToastAttribute}] .codex-helper-toast-spinner {
+        width: 14px;
+        height: 14px;
+        flex: 0 0 auto;
+        border-radius: 999px;
+        border: 2px solid color-mix(in srgb, currentColor 22%, transparent);
+        border-top-color: currentColor;
+        animation: codex-helper-toast-spin 0.8s linear infinite;
       }
       [${helperToastAttribute}] button {
         margin-left: 10px;
@@ -658,6 +670,16 @@ function installHelperStyles() {
         color: inherit;
         font: inherit;
         cursor: pointer;
+      }
+      @keyframes codex-helper-toast-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        [${helperToastAttribute}] .codex-helper-toast-spinner {
+          animation: none;
+        }
       }
       [data-codex-helper-project-fork] {
         position: fixed;
