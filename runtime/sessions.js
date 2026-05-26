@@ -820,6 +820,7 @@
         host_id: context.hostId,
         ...autoNamingRangePayload(),
       };
+      const finishTaskToast = showHelperTaskToast("Regenerating chat title...");
       const result = await bridge("/auto-rename-chat", payload);
       if (result?.status !== "renamed") {
         logDiagnostic("auto_rename_chat_failed", {
@@ -839,11 +840,12 @@
         result.name || "",
       );
       await refreshSidebarConversationsForHost(context.hostId);
-      showHelperToast(result.message || "Regenerated chat title");
+      finishTaskToast(result.message || "Regenerated chat title");
       return;
     }
     if (action === "export") {
       const context = sessionProjectContext(row);
+      const finishTaskToast = showHelperTaskToast("Exporting Markdown...");
       const result = await bridge("/export-markdown", {
         ...ref,
         host_id: context.hostId,
@@ -870,7 +872,7 @@
         });
       }
       downloadMarkdown(result.filename, result.markdown);
-      showHelperToast(result.message || "Exported");
+      finishTaskToast(result.message || "Exported");
       return;
     }
     if (action.startsWith("fork")) {
@@ -884,6 +886,7 @@
       );
       if (!target) return;
       const context = sessionProjectContext(row, remoteProjects);
+      const finishTaskToast = showHelperTaskToast("Forking conversation...");
       const result = await bridge("/fork-thread-project", {
         ...ref,
         source_host_id: context.hostId,
@@ -895,7 +898,7 @@
       if (result?.status !== "forked")
         throw new Error(result?.message || "Fork failed");
       await refreshSidebarAfterFork(target);
-      showHelperToast(result.warning || result.message || "Forked");
+      finishTaskToast(result.warning || result.message || "Forked");
       navigateAfterFork(result, target);
       return;
     }
@@ -913,13 +916,31 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  function showHelperToast(message) {
+  function showHelperToast(message, options) {
+    const toastOptions = options || {};
     document.querySelectorAll(`[${helperToastAttribute}]`).forEach((node) => {
       node.remove();
     });
     const toast = document.createElement("div");
     toast.setAttribute(helperToastAttribute, "true");
-    toast.textContent = message;
+    toast.setAttribute("role", "status");
+    toast.setAttribute("aria-live", "polite");
+    if (toastOptions.loading) {
+      toast.setAttribute("data-codex-helper-toast-state", "loading");
+      const spinner = document.createElement("span");
+      spinner.className = "codex-helper-toast-spinner";
+      spinner.setAttribute("aria-hidden", "true");
+      const label = document.createElement("span");
+      label.textContent = message;
+      toast.replaceChildren(spinner, label);
+    } else {
+      toast.textContent = message;
+    }
     document.body.appendChild(toast);
-    setTimeout(() => toast.remove(), 8000);
+    if (!toastOptions.persist) setTimeout(() => toast.remove(), 8000);
+  }
+
+  function showHelperTaskToast(message) {
+    showHelperToast(message, { loading: true, persist: true });
+    return (finalMessage) => showHelperToast(finalMessage);
   }

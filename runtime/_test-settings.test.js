@@ -474,7 +474,7 @@ test("session context menu extends Codex native electronBridge menu", () => {
   expect(source).toContain("Regenerate chat title");
   expect(source).toContain("markdown_friendly_filename_succeeded");
   expect(source).toContain("markdown_friendly_filename_failed");
-  expect(source).toContain("showHelperToast(result.warning || result.message || \"Forked\")");
+  expect(source).toContain("finishTaskToast(result.warning || result.message || \"Forked\")");
   expect(source).toContain("window.location.assign(path)");
   expect(source).toContain("nativeProjectTargets");
   expect(source).toContain("helperSessionMenuIcon");
@@ -492,6 +492,37 @@ test("session context menu extends Codex native electronBridge menu", () => {
   expect(source).not.toContain("installSessionContextMenuItems");
   expect(source).not.toContain("installElectronContextMenuHook");
   expect(source).not.toContain("promptMoveTargetPath");
+});
+
+test("long session actions show a persistent task toast before bridge work", () => {
+  const toast = extractFunction("showHelperToast");
+  expect(toast).toContain("codex-helper-toast-spinner");
+  expect(toast).toContain("aria-live");
+
+  const toastTask = extractFunction("showHelperTaskToast");
+  expect(toastTask).toContain("return (finalMessage) => showHelperToast(finalMessage)");
+
+  const actionHandler = extractFunction("handleSessionAction");
+  expect(actionHandler).toContain('showHelperTaskToast("Regenerating chat title...")');
+  expect(actionHandler.indexOf('showHelperTaskToast("Regenerating chat title...")')).toBeLessThan(
+    actionHandler.indexOf('bridge("/auto-rename-chat"'),
+  );
+  expect(actionHandler).toContain('showHelperTaskToast("Exporting Markdown...")');
+  expect(actionHandler.indexOf('showHelperTaskToast("Exporting Markdown...")')).toBeLessThan(
+    actionHandler.indexOf('bridge("/export-markdown"'),
+  );
+  expect(actionHandler).toContain('showHelperTaskToast("Forking conversation...")');
+  expect(actionHandler.indexOf('showHelperTaskToast("Forking conversation...")')).toBeGreaterThan(
+    actionHandler.indexOf("if (!target) return;"),
+  );
+  expect(actionHandler.indexOf('showHelperTaskToast("Forking conversation...")')).toBeLessThan(
+    actionHandler.indexOf('bridge("/fork-thread-project"'),
+  );
+  expect(actionHandler).toContain(
+    'finishTaskToast(result.message || "Regenerated chat title")',
+  );
+  expect(actionHandler).toContain('finishTaskToast(result.message || "Exported")');
+  expect(actionHandler).toContain('finishTaskToast(result.warning || result.message || "Forked")');
 });
 
 test("helper no longer exposes its own session delete lifecycle", () => {
