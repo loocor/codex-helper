@@ -26,3 +26,7 @@ test("release stapling runs only after a successful notary submission", () => {
   expect(firstSubmit).toBeGreaterThan(-1);
   expect(firstStaple).toBeGreaterThan(firstSubmit);
 });
+
+test("release publishing generates GitHub release notes", () => {
+  expect(releaseWorkflow).toContain("generate_release_notes: true");
+});
