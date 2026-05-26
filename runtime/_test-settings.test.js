@@ -112,7 +112,7 @@ function loadSidebarRefreshHelpers(document = null) {
       extractFunction("sidebarRefreshDelay"),
       extractFunction("findSidebarConversationManager"),
       extractFunction("sidebarConversationById"),
-      extractFunction("sidebarRecentConversationHas"),
+      extractFunction("sidebarRecentConversationById"),
       extractFunction("normalizeSidebarRefreshExpectation"),
       extractFunction("sidebarRefreshExpectationMatches"),
       extractFunction("refreshSidebarStateForHost"),
@@ -921,6 +921,41 @@ test("sidebar refresh diagnostics include prior refresh errors", async () => {
       title: "",
       refresh_error_count: 1,
       last_error: "temporary refresh failure",
+    },
+  });
+});
+
+test("sidebar refresh without expectation reports refresh failures", async () => {
+  const helpers = loadSidebarRefreshHelpers();
+  helpers.setManagers([
+    {
+      hostId: "local",
+      async refreshRecentConversations() {
+        throw new Error("refresh unavailable");
+      },
+      getConversation() {
+        return null;
+      },
+      getRecentConversations() {
+        return [];
+      },
+    },
+  ]);
+
+  const result = await helpers.refreshSidebarStateForHost(
+    "",
+    undefined,
+    { retryDelays: [0] },
+  );
+
+  expect(result.ok).toBe(false);
+  expect(result.verified).toBe(false);
+  expect(result.attempts).toBe(1);
+  expect(helpers.diagnostics.at(-1)).toEqual({
+    name: "sidebar_refresh_failed",
+    payload: {
+      host_id: "local",
+      message: "refresh unavailable",
     },
   });
 });

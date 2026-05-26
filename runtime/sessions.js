@@ -759,7 +759,7 @@
     return manager.getConversation(threadId) || null;
   }
 
-  function sidebarRecentConversationHas(manager, sessionId) {
+  function sidebarRecentConversationById(manager, sessionId) {
     const threadId = codexThreadId(sessionId);
     if (!threadId || typeof manager?.getRecentConversations !== "function")
       return null;
@@ -788,7 +788,7 @@
     if (!normalized.conversationId) return true;
     const conversation =
       sidebarConversationById(manager, normalized.conversationId) ||
-      sidebarRecentConversationHas(manager, normalized.conversationId);
+      sidebarRecentConversationById(manager, normalized.conversationId);
     if (!conversation) return false;
     if (!normalized.title) return true;
     return String(conversation.title || "").trim() === normalized.title;
@@ -840,7 +840,10 @@
         lastAttemptFailed = true;
         refreshErrorCount += 1;
       }
-      if (sidebarRefreshExpectationMatches(manager, normalizedExpectation)) {
+      if (
+        !lastAttemptFailed &&
+        sidebarRefreshExpectationMatches(manager, normalizedExpectation)
+      ) {
         return {
           attempts: index + 1,
           hostId: normalizedHostId,
@@ -953,7 +956,7 @@
           ? manager.getConversation(threadId)
           : null;
       const recentConversation =
-        conversation || sidebarRecentConversationHas(manager, threadId);
+        conversation || sidebarRecentConversationById(manager, threadId);
       if (!recentConversation) {
         logDiagnostic("sidebar_title_conversation_missing", {
           host_id: normalizedHostId,
