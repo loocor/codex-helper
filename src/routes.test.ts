@@ -3,6 +3,10 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import {
+	bridgeRequestTimeoutMessage,
+	bridgeRequestTimeoutMs,
+} from "./bridge";
 import { handleBridgeRequest } from "./routes";
 
 test("dev bridge exposes port forwarding list route", async () => {
@@ -158,6 +162,56 @@ test("dev bridge accepts auto naming settings", async () => {
 		if (previous === undefined) delete process.env.CODEX_HELPER_HOME;
 		else process.env.CODEX_HELPER_HOME = previous;
 	}
+});
+
+test("dev bridge prefers canonical auto naming settings over legacy keys", async () => {
+	const previous = process.env.CODEX_HELPER_HOME;
+	const root = mkdtempSync(join(tmpdir(), "codex-helper-routes-"));
+	try {
+		process.env.CODEX_HELPER_HOME = root;
+		mkdirSync(root, { recursive: true });
+		writeFileSync(
+			join(root, "config.json"),
+			'{ "autoNamingMinWords": 12, "autoNamingMinChars": 3, "autoNamingMaxWords": 18, "autoNamingMaxChars": 7 }',
+			"utf8",
+		);
+
+		const readResult = await handleBridgeRequest("/settings/get", {});
+		const updateResult = await handleBridgeRequest("/settings/set", {
+			autoNamingMinWords: 14,
+			autoNamingMinChars: 4,
+		});
+
+		expect(readResult).toMatchObject({
+			status: "ok",
+			settings: {
+				autoNamingMinChars: 3,
+				autoNamingMaxChars: 7,
+			},
+		});
+		expect(updateResult).toMatchObject({
+			status: "ok",
+			settings: {
+				autoNamingMinChars: 4,
+				autoNamingMaxChars: 7,
+			},
+		});
+	} finally {
+		if (previous === undefined) delete process.env.CODEX_HELPER_HOME;
+		else process.env.CODEX_HELPER_HOME = previous;
+	}
+});
+
+test("dev bridge uses longer friendly timeouts for naming routes", () => {
+	expect(bridgeRequestTimeoutMs("/settings/get")).toBe(10000);
+	expect(bridgeRequestTimeoutMs("/auto-rename-chat")).toBe(120000);
+	expect(bridgeRequestTimeoutMs("/export-markdown")).toBe(120000);
+	expect(bridgeRequestTimeoutMessage("/auto-rename-chat")).toContain(
+		"Regenerate chat title is still running after 120s",
+	);
+	expect(bridgeRequestTimeoutMessage("/export-markdown")).toContain(
+		"Markdown export is still running after 120s",
+	);
 });
 
 test("dev bridge no longer exposes helper session delete lifecycle routes", async () => {

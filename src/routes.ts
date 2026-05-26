@@ -58,10 +58,6 @@ const defaultSettings: HelperSettings = {
 	portSameLocalPort: true,
 };
 const legacySettingsKeys = new Set(["sessionDeleteEnabled"]);
-const legacyAutoNamingKeys = new Set([
-	"autoNamingMinWords",
-	"autoNamingMaxWords",
-]);
 
 const portManager = new PortForwardManager();
 
@@ -137,7 +133,11 @@ function readSettings(): HelperSettings {
 			setSettingValue(next, key, value);
 			continue;
 		}
-		if (legacyAutoNamingKeys.has(key)) {
+		const canonicalAutoNamingKey = canonicalAutoNamingSettingKey(key);
+		if (canonicalAutoNamingKey) {
+			if (Object.prototype.hasOwnProperty.call(object, canonicalAutoNamingKey)) {
+				continue;
+			}
 			setSettingValue(next, key, value);
 			continue;
 		}
@@ -153,8 +153,12 @@ function updateSettings(payload: Record<string, JsonValue>): HelperSettings {
 	const next: HelperSettings = { ...current };
 	for (const [key, value] of Object.entries(payload)) {
 		if (!(key in defaultSettings)) {
-			if (!legacyAutoNamingKeys.has(key)) {
+			const canonicalAutoNamingKey = canonicalAutoNamingSettingKey(key);
+			if (!canonicalAutoNamingKey) {
 				throw new Error(`Unknown settings key: ${key}`);
+			}
+			if (Object.prototype.hasOwnProperty.call(payload, canonicalAutoNamingKey)) {
+				continue;
 			}
 		}
 		setSettingValue(next, key, value);
@@ -166,6 +170,12 @@ function updateSettings(payload: Record<string, JsonValue>): HelperSettings {
 		"utf8",
 	);
 	return next;
+}
+
+function canonicalAutoNamingSettingKey(key: string): string {
+	if (key === "autoNamingMinWords") return "autoNamingMinChars";
+	if (key === "autoNamingMaxWords") return "autoNamingMaxChars";
+	return "";
 }
 
 function setSettingValue(

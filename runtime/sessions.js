@@ -790,15 +790,9 @@
           title: name,
         });
       }
-      if (typeof manager.sendRequest === "function") {
-        await manager.sendRequest("thread/name/set", {
-          threadId,
-          name,
-        });
-      }
       return true;
     } catch (error) {
-      logDiagnostic("sidebar_title_set_failed", {
+      logDiagnostic("sidebar_title_update_failed", {
         host_id: normalizedHostId,
         session_id: threadId,
         message: error?.message || String(error),

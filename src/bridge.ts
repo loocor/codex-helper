@@ -6,7 +6,8 @@ import { handleBridgeRequest } from "./routes";
 
 const BRIDGE_BINDING_NAME = "codexHelperBridgeV1";
 const CDP_COMMAND_TIMEOUT_MS = 5000;
-const BRIDGE_REQUEST_TIMEOUT_MS = 10000;
+const DEFAULT_BRIDGE_REQUEST_TIMEOUT_MS = 10000;
+const LONG_BRIDGE_REQUEST_TIMEOUT_MS = 120000;
 
 type JsonValue =
 	| null
@@ -81,19 +82,41 @@ async function withBridgeRequestTimeout<T>(
 	path: string,
 ): Promise<T> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeoutMs = bridgeRequestTimeoutMs(path);
 	const timeoutPromise = new Promise<T>((_, reject) => {
 		timer = setTimeout(() => {
-			reject(
-				new Error(
-					`Bridge request ${path || "(unknown)"} timed out after ${BRIDGE_REQUEST_TIMEOUT_MS}ms`,
-				),
-			);
-		}, BRIDGE_REQUEST_TIMEOUT_MS);
+			reject(new Error(bridgeRequestTimeoutMessage(path, timeoutMs)));
+		}, timeoutMs);
 	});
 	try {
 		return await Promise.race([promise, timeoutPromise]);
 	} finally {
 		if (timer) clearTimeout(timer);
+	}
+}
+
+export function bridgeRequestTimeoutMs(path: string): number {
+	switch (path) {
+		case "/auto-rename-chat":
+		case "/export-markdown":
+			return LONG_BRIDGE_REQUEST_TIMEOUT_MS;
+		default:
+			return DEFAULT_BRIDGE_REQUEST_TIMEOUT_MS;
+	}
+}
+
+export function bridgeRequestTimeoutMessage(
+	path: string,
+	timeoutMs = bridgeRequestTimeoutMs(path),
+): string {
+	const seconds = Math.round(timeoutMs / 1000);
+	switch (path) {
+		case "/auto-rename-chat":
+			return `Regenerate chat title is still running after ${seconds}s. The chat may be large, the model request may be slow, or the remote host may be unreachable. Please retry when the connection is stable.`;
+		case "/export-markdown":
+			return `Markdown export is still running after ${seconds}s. The chat may be large, the model request may be slow, or the remote host may be unreachable. Please retry when the connection is stable.`;
+		default:
+			return `Bridge request ${path || "(unknown)"} timed out after ${timeoutMs}ms`;
 	}
 }
 

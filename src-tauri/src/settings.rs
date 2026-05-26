@@ -76,12 +76,13 @@ fn settings_from_value(value: &Value) -> anyhow::Result<HelperSettings> {
             "autoNamingMaxChars" => {
                 settings.auto_naming_max_chars = char_count_setting(key, value)?
             }
-            "autoNamingMinWords" => {
+            "autoNamingMinWords" if !object.contains_key("autoNamingMinChars") => {
                 settings.auto_naming_min_chars = char_count_setting("autoNamingMinChars", value)?
             }
-            "autoNamingMaxWords" => {
+            "autoNamingMaxWords" if !object.contains_key("autoNamingMaxChars") => {
                 settings.auto_naming_max_chars = char_count_setting("autoNamingMaxChars", value)?
             }
+            "autoNamingMinWords" | "autoNamingMaxWords" => {}
             "portForwardingEnabled" => settings.port_forwarding_enabled = bool_setting(key, value)?,
             "portAutoForwardWeb" => settings.port_auto_forward_web = bool_setting(key, value)?,
             "portSameLocalPort" => settings.port_same_local_port = bool_setting(key, value)?,
@@ -115,12 +116,13 @@ pub fn update_settings(path: &Path, payload: &Value) -> anyhow::Result<HelperSet
             "autoNamingMaxChars" => {
                 settings.auto_naming_max_chars = char_count_setting(key, value)?
             }
-            "autoNamingMinWords" => {
+            "autoNamingMinWords" if !object.contains_key("autoNamingMinChars") => {
                 settings.auto_naming_min_chars = char_count_setting("autoNamingMinChars", value)?
             }
-            "autoNamingMaxWords" => {
+            "autoNamingMaxWords" if !object.contains_key("autoNamingMaxChars") => {
                 settings.auto_naming_max_chars = char_count_setting("autoNamingMaxChars", value)?
             }
+            "autoNamingMinWords" | "autoNamingMaxWords" => {}
             "portForwardingEnabled" => settings.port_forwarding_enabled = bool_setting(key, value)?,
             "portAutoForwardWeb" => settings.port_auto_forward_web = bool_setting(key, value)?,
             "portSameLocalPort" => settings.port_same_local_port = bool_setting(key, value)?,
@@ -239,6 +241,28 @@ mod tests {
     }
 
     #[test]
+    fn read_settings_prefers_canonical_auto_naming_keys() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("config.json");
+        fs::write(
+            &path,
+            r#"{
+  "autoNamingMinWords": 12,
+  "autoNamingMinChars": 3,
+  "autoNamingMaxWords": 18,
+  "autoNamingMaxChars": 7
+}
+"#,
+        )
+        .expect("settings");
+
+        let settings = read_settings(&path).expect("settings should load");
+
+        assert_eq!(settings.auto_naming_min_chars, 3);
+        assert_eq!(settings.auto_naming_max_chars, 7);
+    }
+
+    #[test]
     fn read_settings_rejects_invalid_value_types() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let path = temp_dir.path().join("config.json");
@@ -299,6 +323,27 @@ mod tests {
         .expect_err("invalid range should fail");
 
         assert!(error.to_string().contains("autoNamingMinChars"));
+    }
+
+    #[test]
+    fn update_settings_prefers_canonical_auto_naming_keys() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("config.json");
+        ensure_settings_file(&path).expect("initial settings");
+
+        let settings = update_settings(
+            &path,
+            &serde_json::json!({
+                "autoNamingMinWords": 12,
+                "autoNamingMinChars": 3,
+                "autoNamingMaxWords": 18,
+                "autoNamingMaxChars": 7
+            }),
+        )
+        .expect("updated settings");
+
+        assert_eq!(settings.auto_naming_min_chars, 3);
+        assert_eq!(settings.auto_naming_max_chars, 7);
     }
 
     #[test]

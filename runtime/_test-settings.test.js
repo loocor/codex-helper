@@ -711,9 +711,9 @@ test("auto rename updates Codex sidebar manager before refreshing", () => {
   expect(source).toContain(
     "async function setSidebarConversationTitleForHost(hostId, sessionId, title)",
   );
-  expect(source).toContain('manager.sendRequest("thread/name/set"');
+  expect(source).not.toContain('manager.sendRequest("thread/name/set"');
   expect(source).toContain("manager.applyThreadTitleUpdateAndNotify({");
-  expect(source).toContain('"sidebar_title_set_failed"');
+  expect(source).toContain('"sidebar_title_update_failed"');
   expect(source).toContain("await setSidebarConversationTitleForHost(");
   expect(source).toContain("await refreshSidebarConversationsForHost(context.hostId)");
 });

@@ -1,82 +1,7 @@
-use crate::models::{ExportResult, ExportStatus, SessionRef};
-use rusqlite::Connection;
+use crate::models::{ExportResult, ExportStatus};
 use serde_json::Value;
 use std::fs;
-use std::path::{Path, PathBuf};
-
-#[derive(Debug, Clone)]
-pub struct MarkdownExportService {
-    db_path: Option<PathBuf>,
-}
-
-impl MarkdownExportService {
-    pub fn new(db_path: Option<impl Into<PathBuf>>) -> Self {
-        Self {
-            db_path: db_path.map(Into::into),
-        }
-    }
-
-    pub fn export_with_title(
-        &self,
-        session: &SessionRef,
-        title_override: Option<&str>,
-    ) -> ExportResult {
-        let Some(db_path) = &self.db_path else {
-            return failed(&session.session_id, "Local Codex database not configured");
-        };
-        if !db_path.exists() {
-            return failed(
-                &session.session_id,
-                format!("Database does not exist:{}", db_path.to_string_lossy()),
-            );
-        }
-        let thread_id = normalize_session_id(&session.session_id);
-        let result = (|| -> anyhow::Result<ExportResult> {
-            let db = Connection::open(db_path)?;
-            if !supports_codex_threads(&db)? {
-                return Ok(failed(
-                    &thread_id,
-                    "Current local storage structure not supported",
-                ));
-            }
-            let row = db.query_row(
-                "SELECT id, title, rollout_path FROM threads WHERE id = ?1",
-                [&thread_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                    ))
-                },
-            );
-            let (_, title, rollout_path) = match row {
-                Ok(row) => row,
-                Err(rusqlite::Error::QueryReturnedNoRows) => {
-                    return Ok(failed(&thread_id, "Corresponding session not found"));
-                }
-                Err(err) => return Err(err.into()),
-            };
-            let title = display_title(
-                title_override
-                    .filter(|value| !value.trim().is_empty())
-                    .or(title.as_deref())
-                    .unwrap_or(&session.title),
-            );
-            let Some(rollout_path) = rollout_path.filter(|path| !path.is_empty()) else {
-                return Ok(failed(&thread_id, "Session missing rollout file path"));
-            };
-            if !Path::new(&rollout_path).is_file() {
-                return Ok(failed(
-                    &thread_id,
-                    format!("Rollout file does not exist:{rollout_path}"),
-                ));
-            }
-            Ok(export_rollout(&thread_id, &title, Path::new(&rollout_path)))
-        })();
-        result.unwrap_or_else(|err| failed(&thread_id, format!("Failed to read rollout:{err}")))
-    }
-}
+use std::path::Path;
 
 pub fn export_rollout(thread_id: &str, title: &str, rollout_path: &Path) -> ExportResult {
     let title = display_title(title);
@@ -107,6 +32,26 @@ pub fn export_rollout(thread_id: &str, title: &str, rollout_path: &Path) -> Expo
     result.unwrap_or_else(|err| failed(thread_id, format!("Failed to read rollout:{err}")))
 }
 
+pub fn validate_exportable_rollout(thread_id: &str, rollout_path: &Path) -> Option<ExportResult> {
+    if !rollout_path.is_file() {
+        return Some(failed(
+            thread_id,
+            format!(
+                "Rollout file does not exist:{}",
+                rollout_path.to_string_lossy()
+            ),
+        ));
+    }
+    match load_messages(rollout_path) {
+        Ok(messages) if messages.is_empty() => Some(failed(
+            thread_id,
+            "No exportable user or assistant messages found",
+        )),
+        Ok(_) => None,
+        Err(error) => Some(failed(thread_id, format!("Failed to read rollout:{error}"))),
+    }
+}
+
 #[derive(Debug)]
 struct Message {
     speaker: &'static str,
@@ -122,26 +67,6 @@ fn failed(session_id: &str, message: impl Into<String>) -> ExportResult {
         filename: None,
         markdown: None,
     }
-}
-
-fn supports_codex_threads(db: &Connection) -> anyhow::Result<bool> {
-    let has_threads = db
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'threads'",
-            [],
-            |_| Ok(()),
-        )
-        .is_ok();
-    if !has_threads {
-        return Ok(false);
-    }
-    let mut stmt = db.prepare("PRAGMA table_info(\"threads\")")?;
-    let columns = stmt
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(["id", "title", "rollout_path"]
-        .iter()
-        .all(|column| columns.iter().any(|existing| existing == column)))
 }
 
 fn load_messages(path: &Path) -> anyhow::Result<Vec<Message>> {
@@ -275,13 +200,6 @@ fn render_markdown(title: &str, messages: &[Message]) -> String {
     format!("{}\n", lines.join("\n").trim_end())
 }
 
-fn normalize_session_id(session_id: &str) -> String {
-    session_id
-        .strip_prefix("local:")
-        .unwrap_or(session_id)
-        .to_string()
-}
-
 fn normalize_newlines(value: &str) -> String {
     value.replace("\r\n", "\n").replace('\r', "\n")
 }
@@ -300,4 +218,36 @@ fn replace_windows_filename_chars(value: &str, replacement: &str) -> String {
 
 fn collapse_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_exportable_rollout_rejects_empty_rollouts() {
+        let file = tempfile::NamedTempFile::new().expect("rollout");
+
+        let result = validate_exportable_rollout("thread-1", file.path())
+            .expect("empty rollout should not be exportable");
+
+        assert_eq!(result.status, ExportStatus::Failed);
+        assert!(result
+            .message
+            .contains("No exportable user or assistant messages"));
+    }
+
+    #[test]
+    fn validate_exportable_rollout_accepts_message_rollouts() {
+        let file = tempfile::NamedTempFile::new().expect("rollout");
+        fs::write(
+            file.path(),
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}"#,
+        )
+        .expect("write rollout");
+
+        let result = validate_exportable_rollout("thread-1", file.path());
+
+        assert!(result.is_none());
+    }
 }
