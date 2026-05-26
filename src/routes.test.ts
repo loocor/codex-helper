@@ -120,6 +120,38 @@ test("dev bridge accepts known removed settings keys", async () => {
 				portForwardingEnabled: false,
 				portAutoForwardWeb: true,
 				portSameLocalPort: true,
+				autoRenameMenuEnabled: false,
+				markdownFriendlyFilenameEnabled: true,
+				autoNamingMinChars: 4,
+				autoNamingMaxChars: 10,
+			},
+		});
+	} finally {
+		if (previous === undefined) delete process.env.CODEX_HELPER_HOME;
+		else process.env.CODEX_HELPER_HOME = previous;
+	}
+});
+
+test("dev bridge accepts auto naming settings", async () => {
+	const previous = process.env.CODEX_HELPER_HOME;
+	const root = mkdtempSync(join(tmpdir(), "codex-helper-routes-"));
+	try {
+		process.env.CODEX_HELPER_HOME = root;
+
+		const result = await handleBridgeRequest("/settings/set", {
+			autoRenameMenuEnabled: true,
+			markdownFriendlyFilenameEnabled: false,
+			autoNamingMinChars: 3,
+			autoNamingMaxChars: 7,
+		});
+
+		expect(result).toMatchObject({
+			status: "ok",
+			settings: {
+				autoRenameMenuEnabled: true,
+				markdownFriendlyFilenameEnabled: false,
+				autoNamingMinChars: 3,
+				autoNamingMaxChars: 7,
 			},
 		});
 	} finally {

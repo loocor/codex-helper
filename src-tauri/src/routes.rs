@@ -8,7 +8,9 @@ use crate::ports::{
     discover_remote_listening_ports, discovery_request_from_payload, request_from_payload,
     PortForwardManager,
 };
-use crate::session_actions::{export_markdown_response, fork_thread_project_response};
+use crate::session_actions::{
+    auto_rename_chat_response, export_markdown_response, fork_thread_project_response,
+};
 use crate::settings::{read_settings, update_settings};
 use crate::state_dir::StateDir;
 use crate::zed::{
@@ -63,6 +65,7 @@ pub async fn handle_bridge_request(ctx: BridgeContext, path: &str, payload: Valu
         "/state/reveal" => reveal_path_response(&ctx.state_dir.root),
         "/devtools/open" => open_devtools_response(ctx.debug_port).await,
         "/url/open-external" => open_external_local_url_response(&payload),
+        "/auto-rename-chat" => auto_rename_chat_response(&payload),
         "/export-markdown" => export_markdown_response(&payload),
         "/fork-thread-project" => fork_thread_project_response(&payload),
         "/ports/list" => ctx.port_manager.list().await,

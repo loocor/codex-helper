@@ -84,7 +84,8 @@ function loadForkProjectHelpers(document) {
       extractFunction("enabledForkSessionActions"),
       extractFunction("forkedSessionPath"),
       extractFunction("codexAppServerHostId"),
-      "return { nativeProjectTargets, forkTargetsForAction, enabledForkSessionActions, forkedSessionPath, codexAppServerHostId };",
+      extractFunction("codexThreadId"),
+      "return { nativeProjectTargets, forkTargetsForAction, enabledForkSessionActions, forkedSessionPath, sessionProjectContext, codexAppServerHostId, codexThreadId };",
     ].join("\n"),
   )(document, document.Element);
 }
@@ -183,6 +184,7 @@ test("disabling port forwarding stops managed tunnels", () => {
 
 test("settings page groups options by feature area", () => {
   expect(source).toContain('codex-helper-settings-section-title text-sm font-medium text-token-text-primary">Basic</div>');
+  expect(source).toContain('codex-helper-settings-section-title text-sm font-medium text-token-text-primary">Auto naming</div>');
   expect(source).toContain('codex-helper-settings-section-title text-sm font-medium text-token-text-primary">Sessions</div>');
   expect(source).toContain('codex-helper-settings-section-title text-sm font-medium text-token-text-primary">Port forwarding</div>');
   expect(source).toContain('sectionHeading("Loaded scripts"');
@@ -199,7 +201,13 @@ test("settings page groups options by feature area", () => {
   expect(source).toContain('forkRemoteProject: "Fork into Remote Project..."');
   expect(source).toContain('forkLocalProject: "Fork into Local Project..."');
   expect(source).toContain('forkAnotherProject: "Fork into Another Project..."');
-  expect(source).toContain('const order = ["export", "fork"]');
+  expect(source).toContain('const order = ["autoRename", "export", "fork"]');
+  expect(source).toContain('autoRename: "Regenerate chat title"');
+  expect(source).toContain('bridge("/auto-rename-chat"');
+  expect(source).toContain('logDiagnostic("auto_rename_chat_succeeded"');
+  expect(source).toContain('logDiagnostic("auto_rename_chat_failed"');
+  expect(source).toContain("await setSidebarConversationTitleForHost(");
+  expect(source).toContain("autoNamingRangePayload()");
   expect(source).not.toContain('move: "Move Session"');
   expect(source).not.toContain('copy: "Copy Session"');
   expect(source).not.toContain('const order = ["export", "copy", "move", "delete"]');
@@ -454,6 +462,9 @@ test("session context menu extends Codex native electronBridge menu", () => {
   expect(source).toContain("buildCodexSessionNativeMenuItems");
   expect(source).toContain("openProjectForkMenu");
   expect(source).toContain("navigateAfterFork(result, target)");
+  expect(source).toContain("Regenerate chat title");
+  expect(source).toContain("markdown_friendly_filename_succeeded");
+  expect(source).toContain("markdown_friendly_filename_failed");
   expect(source).toContain("showHelperToast(result.warning || result.message || \"Forked\")");
   expect(source).toContain("window.location.assign(path)");
   expect(source).toContain("nativeProjectTargets");
@@ -693,6 +704,42 @@ test("fork success refreshes sidebar through Codex recent conversations manager"
     'await manager.refreshRecentConversations({ sortKey: "updated_at" })',
   );
   expect(source).toContain('"sidebar_refresh_manager_missing"');
+});
+
+test("auto rename updates Codex sidebar manager before refreshing", () => {
+  expect(source).toContain("function codexThreadId(sessionId)");
+  expect(source).toContain(
+    "async function setSidebarConversationTitleForHost(hostId, sessionId, title)",
+  );
+  expect(source).toContain('manager.sendRequest("thread/name/set"');
+  expect(source).toContain("manager.applyThreadTitleUpdateAndNotify({");
+  expect(source).toContain('"sidebar_title_set_failed"');
+  expect(source).toContain("await setSidebarConversationTitleForHost(");
+  expect(source).toContain("await refreshSidebarConversationsForHost(context.hostId)");
+});
+
+test("auto rename preserves remote host context for sidebar title updates", () => {
+  const document = fakeProjectDocument([], "/srv/current");
+  const helpers = loadForkProjectHelpers(document);
+  const row = new document.Element({
+    "data-app-action-sidebar-thread-id": "remote:thread-1",
+    "data-app-action-sidebar-thread-cwd": "/srv/current",
+    "data-app-action-sidebar-thread-host-id": "remote-ssh-codex-managed:box",
+  });
+
+  expect(helpers.sessionProjectContext(row)).toEqual({
+    hostId: "remote-ssh-codex-managed:box",
+    remote: true,
+    path: "/srv/current",
+  });
+  expect(helpers.codexAppServerHostId("remote-ssh-codex-managed:box")).toBe(
+    "remote-ssh-codex-managed:box",
+  );
+  expect(helpers.codexThreadId("remote:thread-1")).toBe("thread-1");
+  expect(source).toContain("host_id: context.hostId");
+  expect(source).toContain(
+    "setSidebarConversationTitleForHost(\n        context.hostId",
+  );
 });
 
 test("codex app-server helpers normalize host ids", () => {

@@ -1,4 +1,6 @@
-use codex_helper::session_actions::{export_markdown_response, fork_thread_project_response};
+use codex_helper::session_actions::{
+    auto_rename_chat_response, export_markdown_response, fork_thread_project_response,
+};
 use codex_helper::zed::remote_projects_response;
 use serde_json::json;
 use std::env;
@@ -19,6 +21,7 @@ fn main() {
         json!({})
     };
     let response = match path {
+        "/auto-rename-chat" => auto_rename_chat_response(&payload),
         "/export-markdown" => export_markdown_response(&payload),
         "/fork-thread-project" => fork_thread_project_response(&payload),
         "/projects/remote-list" => remote_projects_response(&payload),

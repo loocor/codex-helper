@@ -37,6 +37,14 @@ function renderHelperPage(host, options = {}) {
                 <span class="relative inline-flex h-5 w-8 shrink-0 items-center rounded-full bg-token-foreground/20 transition-colors duration-200 ease-out"><span class="h-4 w-4 translate-x-[2px] rounded-full border border-[color:var(--gray-0)] bg-[color:var(--gray-0)] shadow-sm transition-transform duration-200 ease-out"></span></span>
               </label>
             </div>`;
+  const numberRow = (title, description, numberKey, ariaLabel) => `
+            <div class="flex items-center justify-between gap-4 p-3">
+              <div class="flex min-w-0 flex-col gap-1">
+                <div class="min-w-0 text-sm text-token-text-primary">${title}</div>
+                <div class="text-token-text-secondary min-w-0 text-sm" data-codex-helper-setting-desc="${numberKey}">${description}</div>
+              </div>
+              <input type="number" min="1" max="20" step="1" class="codex-helper-number-input" ${helperNumberAttribute}="${numberKey}" aria-label="${ariaLabel}">
+            </div>`;
   const sectionLinkIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`;
   const sectionHeading = (title, command, ariaLabel) => `
             <div class="codex-helper-settings-section-heading">
@@ -89,6 +97,15 @@ function renderHelperPage(host, options = {}) {
             ${settingsPanel(`
             ${switchRow("Markdown export", "Export conversations as Markdown from the session menu.", "markdownExportEnabled", "markdownExportEnabled", "Markdown export")}
             ${switchRow("Fork sessions", "Fork sessions into local, remote, or another project from the sidebar context menu.", "sessionMoveEnabled", "sessionMoveEnabled", "Fork sessions")}
+            `)}
+          </section>
+          <section class="codex-helper-settings-section flex flex-col gap-1.5">
+            <div class="codex-helper-settings-section-title text-sm font-medium text-token-text-primary">Auto naming</div>
+            ${settingsPanel(`
+            ${switchRow("Regenerate chat title", "Show Regenerate chat title in the session context menu.", "autoRenameMenuEnabled", "autoRenameMenuEnabled", "Regenerate chat title")}
+            ${switchRow("Friendly Markdown filenames", "Use Codex auto naming for exported Markdown filenames.", "markdownFriendlyFilenameEnabled", "markdownFriendlyFilenameEnabled", "Friendly Markdown filenames")}
+            ${numberRow("Minimum characters", "Smallest expected auto name length.", "autoNamingMinChars", "Minimum auto naming characters")}
+            ${numberRow("Maximum characters", "Largest expected auto name length; 10 works well for Chinese names.", "autoNamingMaxChars", "Maximum auto naming characters")}
             `)}
           </section>
           <section class="codex-helper-settings-section flex flex-col gap-1.5" ${helperSettingsSectionAttribute}="port-forwarding">
@@ -319,6 +336,11 @@ function applySettings(result) {
       const key = input.getAttribute(helperToggleAttribute) || "";
       input.checked = settings[key] === true;
     }
+    for (const input of root.querySelectorAll(`[${helperNumberAttribute}]`)) {
+      if (!(input instanceof HTMLInputElement)) continue;
+      const key = input.getAttribute(helperNumberAttribute) || "";
+      if (Number.isInteger(settings[key])) input.value = String(settings[key]);
+    }
   }
   maintainPortsPanel();
   if (featureSettings.portForwardingEnabled) schedulePortScan();
@@ -373,6 +395,26 @@ async function handleHelperToggle(input) {
       result?.message || "Settings update failed",
     );
     logDiagnostic("settings_update_failed", { key, result });
+    return;
+  }
+  applySettings(result);
+}
+
+async function handleHelperNumberInput(input) {
+  const key = input.getAttribute(helperNumberAttribute) || "";
+  if (!key) return;
+  const value = Number(input.value);
+  if (!Number.isInteger(value)) throw new Error(`Settings value for ${key} must be an integer`);
+  input.disabled = true;
+  const result = await bridge("/settings/set", { [key]: value });
+  input.disabled = false;
+  if (result?.status !== "ok") {
+    setHelperText(
+      "[data-codex-helper-backend]",
+      result?.message || "Settings update failed",
+    );
+    logDiagnostic("settings_update_failed", { key, result });
+    applySettings({ status: "ok", settings: featureSettings });
     return;
   }
   applySettings(result);

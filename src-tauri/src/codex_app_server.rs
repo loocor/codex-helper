@@ -259,13 +259,145 @@ impl CodexAppServerClient {
     }
 
     fn rename_thread_best_effort(&self, thread_id: &str, name: &str) -> Option<String> {
-        let output = self.run_requests(&[
-            build_initialize_request(1),
-            build_thread_name_request(2, thread_id, name),
-        ]);
-        match output.and_then(|output| json_rpc_response_by_id(&output, 2).map(|_| ())) {
+        match self.set_thread_name(thread_id, name) {
             Ok(()) => None,
             Err(error) => Some(format!("Conversation forked, but rename failed: {error}")),
+        }
+    }
+
+    pub fn set_thread_name(&self, thread_id: &str, name: &str) -> anyhow::Result<()> {
+        let thread_id = normalize_thread_id(thread_id);
+        if thread_id.is_empty() {
+            anyhow::bail!("Thread id is empty");
+        }
+        let name = name.trim();
+        if name.is_empty() {
+            anyhow::bail!("Thread name is empty");
+        }
+        let output = self.run_requests(&[
+            build_initialize_request(1),
+            build_thread_name_request(2, &thread_id, name),
+        ])?;
+        json_rpc_response_by_id(&output, 2).map(|_| ())
+    }
+
+    pub fn generate_thread_name(
+        &self,
+        thread_id: &str,
+        min_chars: u8,
+        max_chars: u8,
+    ) -> anyhow::Result<String> {
+        let thread_id = normalize_thread_id(thread_id);
+        if thread_id.is_empty() {
+            anyhow::bail!("Thread id is empty");
+        }
+        let transcript = self.thread_transcript(&thread_id)?;
+        self.generate_name_from_transcript(&transcript, min_chars, max_chars)
+    }
+
+    fn thread_transcript(&self, thread_id: &str) -> anyhow::Result<String> {
+        let output = self.run_requests(&[
+            build_initialize_request(1),
+            build_thread_read_request(2, thread_id),
+        ])?;
+        let response = json_rpc_response_by_id(&output, 2)?;
+        thread_transcript_from_read_response(&response)
+    }
+
+    fn generate_name_from_transcript(
+        &self,
+        transcript: &str,
+        min_chars: u8,
+        max_chars: u8,
+    ) -> anyhow::Result<String> {
+        let prompt = title_generation_prompt(transcript, min_chars, max_chars);
+        let mut child = self
+            .app_server_command()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Codex app-server stdout is unavailable"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Codex app-server stderr is unavailable"))?;
+        let stderr_thread = std::thread::spawn(move || {
+            let mut output = String::new();
+            let mut reader = BufReader::new(stderr);
+            let _ = reader.read_to_string(&mut output);
+            output
+        });
+        let (line_tx, line_rx) = mpsc::channel();
+        let stdout_thread = std::thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().map_while(Result::ok) {
+                if line_tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Codex app-server stdin is unavailable"))?;
+        let result = (|| -> anyhow::Result<String> {
+            let mut output = String::new();
+            send_json_line(&mut stdin, &build_initialize_request(1))?;
+            recv_json_rpc_response_by_id(&line_rx, &mut output, 1)
+                .and_then(|response| json_rpc_response_error(&response))?;
+            send_json_line(&mut stdin, &build_initialized_notification())?;
+            send_json_line(&mut stdin, &build_title_generation_thread_request(2))?;
+            let thread_response = recv_json_rpc_response_by_id(&line_rx, &mut output, 2)?;
+            json_rpc_response_error(&thread_response)?;
+            let generation_thread_id = thread_response
+                .get("result")
+                .and_then(|result| result.get("thread"))
+                .and_then(|thread| thread.get("id"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| anyhow::anyhow!("Title generation thread id is missing"))?;
+            send_json_line(
+                &mut stdin,
+                &build_title_generation_turn_request(3, generation_thread_id, &prompt),
+            )?;
+            let turn_response = recv_json_rpc_response_by_id(&line_rx, &mut output, 3)?;
+            json_rpc_response_error(&turn_response)?;
+            recv_generated_title(&line_rx)
+        })();
+        drop(stdin);
+        if result.is_err() {
+            let _ = child.kill();
+        }
+        let status = child.wait()?;
+        let _ = stdout_thread.join();
+        let stderr = stderr_thread.join().unwrap_or_default();
+        match result {
+            Ok(name) => {
+                if !status.success() {
+                    let stderr = stderr.trim().to_string();
+                    anyhow::bail!(
+                        "{}",
+                        if stderr.is_empty() {
+                            format!("Codex title generation failed with status {status}")
+                        } else {
+                            stderr
+                        }
+                    );
+                }
+                Ok(name)
+            }
+            Err(error) => {
+                let stderr = stderr.trim().to_string();
+                if !status.success() && !stderr.is_empty() {
+                    anyhow::bail!("{stderr}");
+                }
+                Err(error)
+            }
         }
     }
 }
@@ -472,6 +604,144 @@ pub fn build_thread_name_request(id: i64, thread_id: &str, name: &str) -> Value 
     })
 }
 
+pub fn build_thread_read_request(id: i64, thread_id: &str) -> Value {
+    json!({
+        "id": id,
+        "method": "thread/read",
+        "params": {
+            "threadId": thread_id,
+            "includeTurns": true
+        }
+    })
+}
+
+fn build_title_generation_thread_request(id: i64) -> Value {
+    json!({
+        "id": id,
+        "method": "thread/start",
+        "params": {
+            "cwd": "/tmp",
+            "ephemeral": true,
+            "approvalPolicy": "never",
+            "sandbox": "read-only",
+            "baseInstructions": "You generate concise, friendly, accurate chat titles. Respond with only the title."
+        }
+    })
+}
+
+fn build_title_generation_turn_request(id: i64, thread_id: &str, prompt: &str) -> Value {
+    json!({
+        "id": id,
+        "method": "turn/start",
+        "params": {
+            "threadId": thread_id,
+            "input": [{
+                "type": "text",
+                "text": prompt,
+                "text_elements": []
+            }],
+            "approvalPolicy": "never",
+            "sandboxPolicy": {
+                "type": "readOnly",
+                "networkAccess": false
+            }
+        }
+    })
+}
+
+fn title_generation_prompt(transcript: &str, min_chars: u8, max_chars: u8) -> String {
+    let transcript = compact_title_transcript(transcript);
+    format!(
+        "Generate one friendly, accurate title for this Codex chat.\n\
+Rules:\n\
+- Output only the title, with no quotes or punctuation wrapper.\n\
+- Prefer Chinese when the transcript is mainly Chinese; use English when it is mainly English.\n\
+- Target {min_chars}-{max_chars} Chinese characters, or no more than 5 English words.\n\
+- Avoid generic prompt prefixes such as \"Check the\", \"Help me\", or \"Please\".\n\
+- Capture the actual topic, project, product, or task.\n\n\
+Transcript:\n{transcript}"
+    )
+}
+
+fn compact_title_transcript(transcript: &str) -> String {
+    let cleaned = transcript
+        .replace(['\r', '\t'], " ")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let chars = cleaned.chars().collect::<Vec<_>>();
+    if chars.len() <= 6000 {
+        return cleaned;
+    }
+    let head = chars.iter().take(3000).collect::<String>();
+    let tail = chars
+        .iter()
+        .skip(chars.len().saturating_sub(3000))
+        .collect::<String>();
+    format!("{head}\n...\n{tail}")
+}
+
+fn thread_transcript_from_read_response(response: &Value) -> anyhow::Result<String> {
+    let turns = response
+        .get("result")
+        .and_then(|result| result.get("thread"))
+        .and_then(|thread| thread.get("turns"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("thread/read response missing thread turns"))?;
+    let mut messages = Vec::new();
+    for turn in turns {
+        let Some(items) = turn.get("items").and_then(Value::as_array) else {
+            continue;
+        };
+        for item in items {
+            match item.get("type").and_then(Value::as_str) {
+                Some("userMessage") => {
+                    let text = user_message_text(item);
+                    if !text.trim().is_empty() {
+                        messages.push(format!("User: {}", collapse_prompt_text(&text)));
+                    }
+                }
+                Some("agentMessage") => {
+                    let text = item.get("text").and_then(Value::as_str).unwrap_or_default();
+                    if !text.trim().is_empty() {
+                        messages.push(format!("Assistant: {}", collapse_prompt_text(text)));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let transcript = messages.join("\n");
+    if transcript.trim().is_empty() {
+        anyhow::bail!("Thread transcript is empty");
+    }
+    Ok(transcript)
+}
+
+fn user_message_text(item: &Value) -> String {
+    item.get("content")
+        .and_then(Value::as_array)
+        .map(|content| {
+            content
+                .iter()
+                .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+fn collapse_prompt_text(value: &str) -> String {
+    value
+        .replace(['\r', '\t'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 pub fn request_batch(requests: &[Value]) -> anyhow::Result<String> {
     let mut input = String::new();
@@ -516,6 +786,64 @@ fn recv_json_rpc_response_by_id(
             return Ok(response);
         }
     }
+}
+
+fn recv_generated_title(lines: &Receiver<String>) -> anyhow::Result<String> {
+    let mut latest_title = String::new();
+    loop {
+        let line = lines
+            .recv_timeout(Duration::from_secs(60))
+            .map_err(|_| anyhow::anyhow!("Codex title generation timed out"))?;
+        let response: Value = serde_json::from_str(line.trim())?;
+        if response.get("method").and_then(Value::as_str) == Some("item/completed") {
+            if let Some(item) = response.get("params").and_then(|params| params.get("item")) {
+                if item.get("type").and_then(Value::as_str) == Some("agentMessage") {
+                    latest_title = item
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                }
+            }
+        }
+        if response.get("method").and_then(Value::as_str) != Some("turn/completed") {
+            continue;
+        }
+        let status = response
+            .get("params")
+            .and_then(|params| params.get("turn"))
+            .and_then(|turn| turn.get("status"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if status != "completed" {
+            anyhow::bail!("Codex title generation turn failed");
+        }
+        return clean_generated_title(&latest_title);
+    }
+}
+
+fn clean_generated_title(value: &str) -> anyhow::Result<String> {
+    let title = value
+        .replace(['\r', '\n', '\t'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(|ch: char| {
+            ch.is_whitespace()
+                || ch == '"'
+                || ch == '\''
+                || ch == '`'
+                || ch == '“'
+                || ch == '”'
+                || ch == '‘'
+                || ch == '’'
+        })
+        .trim_matches(|ch: char| ch.is_ascii_punctuation())
+        .to_string();
+    if title.is_empty() {
+        anyhow::bail!("Codex generated title is empty");
+    }
+    Ok(title)
 }
 
 pub fn json_rpc_response_by_id(output: &str, id: i64) -> anyhow::Result<Value> {
@@ -639,6 +967,19 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn generated_title_prompt_uses_transcript_only() {
+        let prompt = super::title_generation_prompt(
+            "User: Check the current codebase.\nAssistant: Confirmed Admin preset API wiring.",
+            4,
+            10,
+        );
+
+        assert!(prompt.contains("Transcript:"));
+        assert!(prompt.contains("Confirmed Admin preset API wiring"));
+        assert!(!prompt.contains("Existing title"));
     }
 
     #[test]

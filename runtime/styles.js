@@ -104,6 +104,16 @@ function installHelperStyles() {
       [${helperNativeSettingsPageAttribute}] .codex-helper-switch input:checked + span > span {
         transform: translateX(14px);
       }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-number-input {
+        width: 64px;
+        border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+        border-radius: 6px;
+        background: transparent;
+        color: inherit;
+        padding: 3px 6px;
+        font: inherit;
+        font-size: 13px;
+      }
       [${helperNativeSettingsPageAttribute}] pre[data-codex-helper-log] {
         margin: 0;
         padding: 12px;
@@ -313,6 +323,16 @@ function installHelperStyles() {
       }
       [${helperPageAttribute}] .codex-helper-switch input:checked + span > span {
         transform: translateX(14px);
+      }
+      [${helperPageAttribute}] .codex-helper-number-input {
+        width: 64px;
+        border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+        border-radius: 6px;
+        background: transparent;
+        color: inherit;
+        padding: 3px 6px;
+        font: inherit;
+        font-size: 13px;
       }
       [${helperPageAttribute}] pre[data-codex-helper-log] {
         margin: 0;

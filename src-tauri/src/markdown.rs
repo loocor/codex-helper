@@ -16,7 +16,11 @@ impl MarkdownExportService {
         }
     }
 
-    pub fn export(&self, session: &SessionRef) -> ExportResult {
+    pub fn export_with_title(
+        &self,
+        session: &SessionRef,
+        title_override: Option<&str>,
+    ) -> ExportResult {
         let Some(db_path) = &self.db_path else {
             return failed(&session.session_id, "Local Codex database not configured");
         };
@@ -53,7 +57,12 @@ impl MarkdownExportService {
                 }
                 Err(err) => return Err(err.into()),
             };
-            let title = display_title(title.as_deref().unwrap_or(&session.title));
+            let title = display_title(
+                title_override
+                    .filter(|value| !value.trim().is_empty())
+                    .or(title.as_deref())
+                    .unwrap_or(&session.title),
+            );
             let Some(rollout_path) = rollout_path.filter(|path| !path.is_empty()) else {
                 return Ok(failed(&thread_id, "Session missing rollout file path"));
             };

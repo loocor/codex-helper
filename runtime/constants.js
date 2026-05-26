@@ -4,6 +4,7 @@ const helperContentHostAttribute = "data-codex-helper-content-host";
 const helperPageAttribute = "data-codex-helper-settings-page";
 const helperCommandAttribute = "data-codex-helper-command";
 const helperToggleAttribute = "data-codex-helper-setting-toggle";
+const helperNumberAttribute = "data-codex-helper-setting-number";
 const helperToastAttribute = "data-codex-helper-toast";
 const helperSessionActionPrefix = "codex-helper-session-";
 const helperSettingsSectionAttribute = "data-codex-helper-settings-section";
@@ -56,6 +57,10 @@ const suppressedPortMappings = new Set();
 let featureSettings = {
   markdownExportEnabled: false,
   sessionMoveEnabled: false,
+  autoRenameMenuEnabled: false,
+  markdownFriendlyFilenameEnabled: true,
+  autoNamingMinChars: 4,
+  autoNamingMaxChars: 10,
   portForwardingEnabled: false,
   portAutoForwardWeb: true,
   portSameLocalPort: true,
