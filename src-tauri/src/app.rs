@@ -3,6 +3,36 @@ use std::sync::Arc;
 use crate::codex_control::CodexController;
 use crate::ports::PortForwardManager;
 
+struct TrayMenuItemSpec {
+    id: &'static str,
+    label: &'static str,
+}
+
+fn tray_menu_item_specs() -> [TrayMenuItemSpec; 5] {
+    [
+        TrayMenuItemSpec {
+            id: "open-codex",
+            label: "Open Codex",
+        },
+        TrayMenuItemSpec {
+            id: "quit-codex",
+            label: "Quit Codex",
+        },
+        TrayMenuItemSpec {
+            id: "reload-codex",
+            label: "Reload Codex",
+        },
+        TrayMenuItemSpec {
+            id: "restart-codex",
+            label: "Restart Codex",
+        },
+        TrayMenuItemSpec {
+            id: "quit-helper",
+            label: "Quit Codex Helper",
+        },
+    ]
+}
+
 pub fn run() {
     let port_manager = PortForwardManager::new();
     let controller = CodexController::new();
@@ -40,16 +70,17 @@ fn install_menu_bar_item(
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     use tauri::tray::TrayIconBuilder;
 
-    let quit_codex = MenuItem::with_id(app, "quit-codex", "Quit Codex", true, None::<&str>)?;
-    let reload_codex = MenuItem::with_id(app, "reload-codex", "Reload Codex", true, None::<&str>)?;
-    let restart_codex =
-        MenuItem::with_id(app, "restart-codex", "Restart Codex", true, None::<&str>)?;
+    let specs = tray_menu_item_specs();
+    let open_codex = MenuItem::with_id(app, specs[0].id, specs[0].label, true, None::<&str>)?;
+    let quit_codex = MenuItem::with_id(app, specs[1].id, specs[1].label, true, None::<&str>)?;
+    let reload_codex = MenuItem::with_id(app, specs[2].id, specs[2].label, true, None::<&str>)?;
+    let restart_codex = MenuItem::with_id(app, specs[3].id, specs[3].label, true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let quit_helper =
-        MenuItem::with_id(app, "quit-helper", "Quit Codex Helper", true, None::<&str>)?;
+    let quit_helper = MenuItem::with_id(app, specs[4].id, specs[4].label, true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[
+            &open_codex,
             &quit_codex,
             &reload_codex,
             &restart_codex,
@@ -68,6 +99,14 @@ fn install_menu_bar_item(
         tray = tray.icon_as_template(true);
     }
     tray.on_menu_event(move |app, event| match event.id().as_ref() {
+        "open-codex" => {
+            let controller = controller.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = controller.open_codex().await {
+                    eprintln!("{error}");
+                }
+            });
+        }
         "quit-codex" => {
             let controller = controller.clone();
             tauri::async_runtime::spawn(async move {
@@ -100,4 +139,21 @@ fn install_menu_bar_item(
     })
     .build(app)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_menu_starts_with_open_codex() {
+        let items = tray_menu_item_specs();
+
+        assert_eq!(items[0].id, "open-codex");
+        assert_eq!(items[0].label, "Open Codex");
+        assert_eq!(items[1].id, "quit-codex");
+        assert_eq!(items[2].id, "reload-codex");
+        assert_eq!(items[3].id, "restart-codex");
+        assert_eq!(items[4].id, "quit-helper");
+    }
 }
