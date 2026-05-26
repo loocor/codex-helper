@@ -8,7 +8,7 @@ description: Local development guidance for the Codex Helper launcher.
 
 ## Language
 
-Use English for source code, comments, commit messages, filenames, and user-facing project documentation.
+Use English for source code, comments, commit messages, filenames, and user-facing project documentation. Localized README translations, such as `README_CN.md`, may use their target language when the primary README remains English.
 
 ## Package Manager
 
