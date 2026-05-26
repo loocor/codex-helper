@@ -493,7 +493,8 @@ function ensurePortScanLoop() {
   portScanIntervalId = window.setInterval(() => {
     if (
       !featureSettings.portForwardingEnabled ||
-      !hasRemoteForwardingContext()
+      !hasRemoteForwardingContext() ||
+      !helperWindowIsPortOwner()
     ) {
       stopPortScanLoop();
       return;
@@ -624,7 +625,11 @@ function shouldAutoForwardDetectedPort(entry, context) {
 }
 
 function scanTerminalWebPorts() {
-  if (!featureSettings.portForwardingEnabled || !hasRemoteForwardingContext()) {
+  if (
+    !featureSettings.portForwardingEnabled ||
+    !hasRemoteForwardingContext() ||
+    !helperWindowIsPortOwner()
+  ) {
     return;
   }
   if (pruneDetectedPortsForSessionChange()) {
@@ -942,8 +947,11 @@ function reconcileDiscoveredRemotePorts(
   discoveredRemotePorts = discoveredRemotePortSet(ports),
 ) {
   let changed = markRemotePortDiscoverySucceeded(context);
+  const canOwnPorts = helperWindowIsPortOwner();
   const activeForwardedPorts = activeForwardedPortMap(activePorts, context);
-  changed = pruneStaleDetectedPorts(context, discoveredRemotePorts) || changed;
+  changed =
+    (canOwnPorts && pruneStaleDetectedPorts(context, discoveredRemotePorts)) ||
+    changed;
   for (const port of ports) {
     const remotePort = Number(port.remotePort);
     if (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535)
@@ -981,6 +989,7 @@ function reconcileDiscoveredRemotePorts(
         existing.status === "detected" &&
         !activeForward &&
         featureSettings.portForwardingEnabled &&
+        helperWindowIsPortOwner() &&
         shouldAutoForwardDetectedPort(existing, context)
       ) {
         changed = true;
@@ -1018,6 +1027,7 @@ function reconcileDiscoveredRemotePorts(
     if (
       !activeForward &&
       featureSettings.portForwardingEnabled &&
+      helperWindowIsPortOwner() &&
       shouldAutoForwardDetectedPort(entry, context)
     ) {
       forwardDetectedPort(entry).catch((error) => {
@@ -1055,6 +1065,7 @@ function remoteForwardingContextChanged(initialSessionKey) {
 
 async function syncRemoteSessionPortsOnce() {
   if (!featureSettings.portForwardingEnabled) return;
+  if (!helperWindowIsPortOwner()) return;
   const context = await resolveRemoteForwardingContext();
   if (!remoteForwardingContextIsReady(context)) return;
   const initialSessionKey = contextSessionKey(context);
@@ -1079,6 +1090,7 @@ async function syncRemoteSessionPortsOnce() {
     activeResult?.status === "ok" && Array.isArray(activeResult.ports)
       ? activeResult.ports
       : [];
+  if (!helperWindowIsPortOwner()) return;
   const stopped = await stopStaleForwardedTunnels(
     context,
     discoveredRemotePorts,

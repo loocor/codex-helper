@@ -202,11 +202,24 @@ function onHelperRuntimeChange(event) {
   });
 }
 
+function reportHelperRuntimeActivity() {
+  bridge("/runtime/activity", helperRuntimeActivityDetail()).catch((error) => {
+    console.warn("[Codex Helper] runtime activity report failed", error);
+  });
+}
+
+function onHelperRuntimeActivity() {
+  reportHelperRuntimeActivity();
+}
+
 function removeHelperRuntimeEventListeners() {
   document.removeEventListener("click", onHelperRuntimeClick, true);
   document.removeEventListener("contextmenu", onHelperRuntimeContextMenu, true);
   document.removeEventListener("keydown", onHelperRuntimeKeydown, true);
   document.removeEventListener("change", onHelperRuntimeChange, true);
+  window.removeEventListener("focus", onHelperRuntimeActivity, true);
+  window.removeEventListener("blur", onHelperRuntimeActivity, true);
+  document.removeEventListener("visibilitychange", onHelperRuntimeActivity, true);
 }
 
 function installHelperRuntimeEventListeners() {
@@ -215,6 +228,9 @@ function installHelperRuntimeEventListeners() {
   document.addEventListener("contextmenu", onHelperRuntimeContextMenu, true);
   document.addEventListener("keydown", onHelperRuntimeKeydown, true);
   document.addEventListener("change", onHelperRuntimeChange, true);
+  window.addEventListener("focus", onHelperRuntimeActivity, true);
+  window.addEventListener("blur", onHelperRuntimeActivity, true);
+  document.addEventListener("visibilitychange", onHelperRuntimeActivity, true);
 }
 
 window.__codexHelperRuntimeCleanup = () => {
@@ -242,6 +258,8 @@ installHelperStyles();
 removeLegacyPortsBottomPanelUi();
 maintainPortsPanel();
 installNativeHelperSettingsGroup();
+logDiagnostic("runtime.ready", helperRuntimeActivityDetail());
+reportHelperRuntimeActivity();
 refreshFeatureSettings().catch((error) => {
   logDiagnostic("settings_feature_refresh_failed", {
     error: error?.message || String(error),
