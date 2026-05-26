@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const repoRoot = resolve(import.meta.dir, "..");
+const ciWorkflow = readFileSync(join(repoRoot, ".github/workflows/ci.yml"), "utf8");
 const releaseWorkflow = readFileSync(join(repoRoot, ".github/workflows/release.yml"), "utf8");
 const dmgScript = readFileSync(join(repoRoot, "scripts/build-macos-dmg.sh"), "utf8");
 
@@ -40,4 +41,17 @@ test("release notarization preserves failed submit status", () => {
 
 test("release publishing generates GitHub release notes", () => {
   expect(releaseWorkflow).toContain("generate_release_notes: true");
+});
+
+test("ci macos packaging signs notarizes and uploads the dmg", () => {
+  expect(ciWorkflow).toContain("if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository");
+  expect(ciWorkflow).toContain("Validate macOS signing/notarization secrets");
+  expect(ciWorkflow).toContain("Import Developer ID certificate");
+  expect(ciWorkflow).toContain("Prepare notary API key file");
+  expect(ciWorkflow).toContain('REQUIRE_SIGNING: "1"');
+  expect(ciWorkflow).toContain('REQUIRE_NOTARIZE: "1"');
+  expect(ciWorkflow).toContain('NOTARY_WAIT_TIMEOUT: "10m"');
+  expect(ciWorkflow).toContain('NOTARY_MAX_ATTEMPTS: "3"');
+  expect(ciWorkflow).toContain("actions/upload-artifact@v4");
+  expect(ciWorkflow).not.toContain("SKIP_NOTARIZE=1");
 });
