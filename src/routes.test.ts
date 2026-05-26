@@ -102,7 +102,7 @@ test("dev bridge rejects malformed settings files explicitly", async () => {
 	}
 });
 
-test("dev bridge accepts known removed settings keys", async () => {
+test("dev bridge accepts settings with known removed keys", async () => {
 	const previous = process.env.CODEX_HELPER_HOME;
 	const root = mkdtempSync(join(tmpdir(), "codex-helper-routes-"));
 	try {
@@ -110,7 +110,14 @@ test("dev bridge accepts known removed settings keys", async () => {
 		mkdirSync(root, { recursive: true });
 		writeFileSync(
 			join(root, "config.json"),
-			'{ "markdownExportEnabled": true, "sessionDeleteEnabled": true }',
+			`{
+  "markdownExportEnabled": true,
+  "sessionDeleteEnabled": true,
+  "autoRenameMenuEnabled": true,
+  "markdownFriendlyFilenameEnabled": true,
+  "autoNamingMinChars": 8,
+  "autoNamingMaxChars": 12
+}`,
 			"utf8",
 		);
 
@@ -124,10 +131,10 @@ test("dev bridge accepts known removed settings keys", async () => {
 				portForwardingEnabled: false,
 				portAutoForwardWeb: true,
 				portSameLocalPort: true,
-				autoRenameMenuEnabled: false,
+				autoRenameMenuEnabled: true,
 				markdownFriendlyFilenameEnabled: true,
-				autoNamingMinChars: 4,
-				autoNamingMaxChars: 10,
+				autoNamingMinChars: 8,
+				autoNamingMaxChars: 12,
 			},
 		});
 	} finally {
