@@ -34,7 +34,6 @@ type JsonValue =
 	| { [key: string]: JsonValue };
 
 type HelperSettings = {
-	sessionDeleteEnabled: boolean;
 	markdownExportEnabled: boolean;
 	sessionMoveEnabled: boolean;
 	portForwardingEnabled: boolean;
@@ -43,7 +42,6 @@ type HelperSettings = {
 };
 
 const defaultSettings: HelperSettings = {
-	sessionDeleteEnabled: false,
 	markdownExportEnabled: false,
 	sessionMoveEnabled: false,
 	portForwardingEnabled: false,
@@ -66,10 +64,6 @@ function helperLogsDir(): string {
 	return join(helperRoot(), "logs");
 }
 
-function helperBackupsDir(): string {
-	return join(helperRoot(), "backups");
-}
-
 function helperScriptsDir(): string {
 	return join(helperRoot(), "scripts");
 }
@@ -81,7 +75,6 @@ function helperConfigPath(): string {
 function ensureHelperRoot(): void {
 	mkdirSync(helperRoot(), { recursive: true });
 	mkdirSync(helperLogsDir(), { recursive: true });
-	mkdirSync(helperBackupsDir(), { recursive: true });
 	mkdirSync(helperScriptsDir(), { recursive: true });
 }
 
@@ -106,10 +99,11 @@ function readSettings(): HelperSettings {
 		const settings = JSON.parse(
 			readFileSync(helperConfigPath(), "utf8"),
 		) as Partial<HelperSettings>;
-		return {
-			...defaultSettings,
-			...settings,
-		};
+		const next: HelperSettings = { ...defaultSettings };
+		for (const key of Object.keys(defaultSettings) as Array<keyof HelperSettings>) {
+			if (typeof settings[key] === "boolean") next[key] = settings[key];
+		}
+		return next;
 	} catch {
 		writeFileSync(
 			helperConfigPath(),
@@ -253,8 +247,6 @@ export async function handleBridgeRequest(
 			return openPath(helperLogsDir());
 		case "/scripts/reveal":
 			return openPath(helperScriptsDir());
-		case "/backups/reveal":
-			return openPath(helperBackupsDir());
 		case "/state/reveal":
 			return openPath(helperRoot());
 		case "/devtools/open":

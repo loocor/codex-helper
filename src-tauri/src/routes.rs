@@ -3,21 +3,17 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use crate::cdp::{list_targets, pick_codex_page_target, CdpTarget};
-use crate::chat_search::search_chats_response;
 use crate::logging::DiagnosticLogger;
 use crate::ports::{
     discover_remote_listening_ports, discovery_request_from_payload, request_from_payload,
     PortForwardManager,
 };
-use crate::session_actions::{
-    delete_session_response, deleted_sessions_response, export_markdown_response,
-    move_thread_workspace_response, restore_deleted_session_response, undo_delete_response,
-};
+use crate::session_actions::{export_markdown_response, fork_thread_project_response};
 use crate::settings::{read_settings, update_settings};
 use crate::state_dir::StateDir;
 use crate::zed::{
-    fallback_open_request_response, open_zed_remote, resolve_ssh_target_for_host_id,
-    resolve_ssh_target_response, zed_remote_status,
+    fallback_open_request_response, open_zed_remote, remote_projects_response,
+    resolve_ssh_target_for_host_id, resolve_ssh_target_response, zed_remote_status,
 };
 
 #[derive(Clone)]
@@ -64,17 +60,11 @@ pub async fn handle_bridge_request(ctx: BridgeContext, path: &str, payload: Valu
         "/diagnostics/reveal-log" => reveal_path_response(ctx.logger.log_path()),
         "/logs/reveal" => reveal_path_response(&ctx.state_dir.logs_dir),
         "/scripts/reveal" => reveal_path_response(&ctx.state_dir.scripts_dir),
-        "/backups/reveal" => reveal_path_response(&ctx.state_dir.backups_dir),
         "/state/reveal" => reveal_path_response(&ctx.state_dir.root),
         "/devtools/open" => open_devtools_response(ctx.debug_port).await,
         "/url/open-external" => open_external_local_url_response(&payload),
-        "/delete" => delete_session_response(&ctx.state_dir, &payload),
-        "/undo" => undo_delete_response(&ctx.state_dir, &payload),
-        "/backups/list" => deleted_sessions_response(&ctx.state_dir),
-        "/backups/restore" => restore_deleted_session_response(&ctx.state_dir, &payload),
-        "/chats/search" => search_chats_response(&ctx.state_dir, &payload),
         "/export-markdown" => export_markdown_response(&payload),
-        "/move-thread-workspace" => move_thread_workspace_response(&ctx.state_dir, &payload),
+        "/fork-thread-project" => fork_thread_project_response(&payload),
         "/ports/list" => ctx.port_manager.list().await,
         "/ports/discover" => match discovery_request_from_payload(&payload) {
             Ok(request) => match resolve_ssh_target_for_host_id(&request.host_id, None) {
@@ -104,6 +94,7 @@ pub async fn handle_bridge_request(ctx: BridgeContext, path: &str, payload: Valu
             ctx.port_manager.stop(id).await
         }
         "/zed-remote/status" => zed_remote_status(),
+        "/projects/remote-list" => remote_projects_response(&payload),
         "/zed-remote/resolve-host" => resolve_ssh_target_response(&payload),
         "/zed-remote/fallback-request" => fallback_open_request_response(&payload),
         "/zed-remote/open" => open_zed_remote(&payload),

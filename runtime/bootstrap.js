@@ -13,14 +13,6 @@ function installObserver() {
   const observer = new MutationObserver(() => {
     maintainPortsPanel();
     installNativeHelperSettingsGroup();
-    if (
-      archivedCleanupTicksRemaining > 0 &&
-      removeArchivedChatsSearchArtifacts() > 0
-    ) {
-      archivedCleanupTicksRemaining = ARCHIVED_CLEANUP_BUDGET;
-    } else if (archivedCleanupTicksRemaining > 0) {
-      archivedCleanupTicksRemaining -= 1;
-    }
     if (helperPageRoot && !helperPageRoot.isConnected) {
       clearHelperSettingsPage();
     }
@@ -93,22 +85,6 @@ function onHelperRuntimeClick(event) {
     });
     return;
   }
-  const restoreButton = target.closest("[data-codex-helper-restore-token]");
-  if (restoreButton instanceof HTMLElement) {
-    event.preventDefault();
-    event.stopPropagation();
-    handleRestoreBackup(restoreButton).catch((error) => {
-      restoreButton.removeAttribute("disabled");
-      setHelperText(
-        "[data-codex-helper-backend]",
-        error?.message || String(error),
-      );
-      logDiagnostic("backup_restore_failed", {
-        error: error?.message || String(error),
-      });
-    });
-    return;
-  }
   const command = target.closest(`[${helperCommandAttribute}]`);
   if (!(command instanceof HTMLElement)) return;
   event.preventDefault();
@@ -127,26 +103,6 @@ function onHelperRuntimeClick(event) {
   });
 }
 
-function replaySessionContextMenu(event, target) {
-  target.dispatchEvent(
-    new MouseEvent("contextmenu", {
-      bubbles: true,
-      cancelable: true,
-      view: window,
-      clientX: event.clientX,
-      clientY: event.clientY,
-      screenX: event.screenX,
-      screenY: event.screenY,
-      button: event.button,
-      buttons: event.buttons,
-      ctrlKey: event.ctrlKey,
-      shiftKey: event.shiftKey,
-      altKey: event.altKey,
-      metaKey: event.metaKey,
-    }),
-  );
-}
-
 function onHelperRuntimeContextMenu(event) {
   const target = event.target;
   if (!(target instanceof Element)) return;
@@ -159,26 +115,18 @@ function onHelperRuntimeContextMenu(event) {
   }
   const row = sessionRowFromTarget(target);
   if (!(row instanceof HTMLElement)) return;
-  if (!featureSettingsLoaded && !sessionContextMenuReplayInFlight) {
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    sessionContextMenuReplayInFlight = true;
-    refreshFeatureSettings()
-      .catch((error) => {
-        logDiagnostic("session_menu_settings_failed", {
-          error: error?.message || String(error),
-        });
-      })
-      .finally(() => {
-        try {
-          if (target.isConnected) replaySessionContextMenu(event, target);
-        } finally {
-          sessionContextMenuReplayInFlight = false;
-        }
-      });
-    return;
-  }
   trackSessionContextMenu(row);
+  if (enabledSessionActions().length === 0) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const ref = sessionRefFromRow(row);
+  if (!ref.session_id) return;
+  showExtendedSessionContextMenu(row, ref).catch((error) => {
+    showHelperToast(error?.message || String(error));
+    logDiagnostic("session_menu_open_failed", {
+      error: error?.message || String(error),
+    });
+  });
 }
 
 function onHelperRuntimeKeydown(event) {
@@ -213,20 +161,11 @@ function onHelperRuntimeChange(event) {
   });
 }
 
-function onHelperRuntimeInput(event) {
-  const target = event.target;
-  if (!(target instanceof HTMLInputElement)) return;
-  if (target.hasAttribute("data-codex-helper-deleted-chat-search")) {
-    scheduleDeletedChatSearch(target);
-  }
-}
-
 function removeHelperRuntimeEventListeners() {
   document.removeEventListener("click", onHelperRuntimeClick, true);
   document.removeEventListener("contextmenu", onHelperRuntimeContextMenu, true);
   document.removeEventListener("keydown", onHelperRuntimeKeydown, true);
   document.removeEventListener("change", onHelperRuntimeChange, true);
-  document.removeEventListener("input", onHelperRuntimeInput, true);
 }
 
 function installHelperRuntimeEventListeners() {
@@ -235,7 +174,6 @@ function installHelperRuntimeEventListeners() {
   document.addEventListener("contextmenu", onHelperRuntimeContextMenu, true);
   document.addEventListener("keydown", onHelperRuntimeKeydown, true);
   document.addEventListener("change", onHelperRuntimeChange, true);
-  document.addEventListener("input", onHelperRuntimeInput, true);
 }
 
 window.__codexHelperRuntimeCleanup = () => {
@@ -243,19 +181,16 @@ window.__codexHelperRuntimeCleanup = () => {
   if (maintainPortsPanelTimer) clearTimeout(maintainPortsPanelTimer);
   if (refreshPortsPanelTimer) clearTimeout(refreshPortsPanelTimer);
   if (pinnedSummaryHideTimer) clearTimeout(pinnedSummaryHideTimer);
-  if (deletedChatSearchTimer) clearTimeout(deletedChatSearchTimer);
   stopPortScanLoop();
   if (helperRuntimeObserver) helperRuntimeObserver.disconnect();
   closePortForwardRowMenu();
   closePortForwardDialog();
   clearNativeHelperSettingsPage();
-  if (sessionContextMenuMapRestore) sessionContextMenuMapRestore();
   removeHelperRuntimeEventListeners();
   pendingPortScan = 0;
   maintainPortsPanelTimer = 0;
   refreshPortsPanelTimer = 0;
   pinnedSummaryHideTimer = 0;
-  deletedChatSearchTimer = 0;
   observerInstalled = false;
   helperRuntimeObserver = null;
 };
@@ -265,8 +200,6 @@ installHelperStyles();
 removeLegacyPortsBottomPanelUi();
 maintainPortsPanel();
 installNativeHelperSettingsGroup();
-archivedCleanupTicksRemaining = ARCHIVED_CLEANUP_BUDGET;
-removeArchivedChatsSearchArtifacts();
 refreshFeatureSettings().catch((error) => {
   logDiagnostic("settings_feature_refresh_failed", {
     error: error?.message || String(error),

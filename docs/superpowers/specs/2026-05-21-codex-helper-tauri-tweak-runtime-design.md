@@ -43,15 +43,12 @@ Codex Helper owns one local state directory:
 ```text
 ~/.codex-helper/
   logs/
-  backups/
   scripts/
   config.json
   state.json
 ```
 
 `logs/` stores launch, CDP, bridge, renderer, and user-script failures.
-
-`backups/` stores reversible backups before destructive operations such as session deletion.
 
 `scripts/` stores user-provided JavaScript files loaded by the tweak runtime.
 
@@ -78,7 +75,7 @@ Codex Helper has four boundaries:
 3. Bridge
    - Uses CDP `Runtime.addBinding` for renderer-to-backend calls.
    - Uses `Page.addScriptToEvaluateOnNewDocument` and immediate `Runtime.evaluate` for runtime installation.
-   - Routes only allowlisted local paths such as diagnostics, user-script inventory, Zed open, Markdown export, and session deletion.
+   - Routes only allowlisted local paths such as diagnostics, user-script inventory, Zed open, Markdown export, and project-level session fork.
 
 4. Renderer runtime
    - Runs inside Codex.
@@ -95,7 +92,7 @@ The first implementation should keep built-in tweaks limited:
 
 Zed support is in scope, but it should restore Codex's existing Zed entry in native open-target menus for remote contexts instead of adding a separate Codex Helper button or path-guessing action.
 
-Session deletion and Markdown export are in scope for the product but should be implemented after the launcher, bridge, runtime, and Settings UI are stable. Deletion must always create a backup in `~/.codex-helper/backups` before modifying Codex session data.
+Markdown export is in scope for the product but should be implemented after the launcher, bridge, runtime, and Settings UI are stable. Session deletion is intentionally out of scope for Helper because Codex owns archive, unarchive, and the archived chat lifecycle across local and remote hosts.
 
 ## Codex Settings Injection
 

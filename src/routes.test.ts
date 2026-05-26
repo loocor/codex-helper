@@ -73,3 +73,20 @@ test("dev bridge returns helper directory paths for native settings", async () =
 		else process.env.CODEX_HELPER_HOME = previous;
 	}
 });
+
+test("dev bridge no longer exposes helper session delete lifecycle routes", async () => {
+	for (const path of [
+		"/delete",
+		"/undo",
+		"/backups/list",
+		"/backups/restore",
+		"/backups/reveal",
+	]) {
+		const result = await handleBridgeRequest(path, {});
+
+		expect(result).toEqual({
+			status: "failed",
+			message: `Unknown Codex Helper bridge path: ${path}`,
+		});
+	}
+});

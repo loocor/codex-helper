@@ -6,9 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
+#[serde(rename_all = "camelCase", default)]
 pub struct HelperSettings {
-    pub session_delete_enabled: bool,
     pub markdown_export_enabled: bool,
     pub session_move_enabled: bool,
     pub port_forwarding_enabled: bool,
@@ -19,7 +18,6 @@ pub struct HelperSettings {
 impl Default for HelperSettings {
     fn default() -> Self {
         Self {
-            session_delete_enabled: false,
             markdown_export_enabled: false,
             session_move_enabled: false,
             port_forwarding_enabled: false,
@@ -55,7 +53,6 @@ pub fn update_settings(path: &Path, payload: &Value) -> anyhow::Result<HelperSet
             .as_bool()
             .ok_or_else(|| anyhow::anyhow!("Settings value for {key} must be a boolean"))?;
         match key.as_str() {
-            "sessionDeleteEnabled" => settings.session_delete_enabled = enabled,
             "markdownExportEnabled" => settings.markdown_export_enabled = enabled,
             "sessionMoveEnabled" => settings.session_move_enabled = enabled,
             "portForwardingEnabled" => settings.port_forwarding_enabled = enabled,
@@ -86,7 +83,6 @@ mod tests {
     fn default_settings_disable_session_tools() {
         let settings = HelperSettings::default();
 
-        assert!(!settings.session_delete_enabled);
         assert!(!settings.markdown_export_enabled);
         assert!(!settings.session_move_enabled);
         assert!(!settings.port_forwarding_enabled);
@@ -101,7 +97,6 @@ mod tests {
         fs::write(
             &path,
             r#"{
-  "sessionDeleteEnabled": true,
   "markdownExportEnabled": false,
   "sessionMoveEnabled": true
 }
@@ -111,7 +106,6 @@ mod tests {
 
         let settings = read_settings(&path).expect("legacy settings should load");
 
-        assert!(settings.session_delete_enabled);
         assert!(!settings.markdown_export_enabled);
         assert!(settings.session_move_enabled);
         assert!(!settings.port_forwarding_enabled);
@@ -128,7 +122,6 @@ mod tests {
         let settings = update_settings(
             &path,
             &serde_json::json!({
-                "sessionDeleteEnabled": true,
                 "markdownExportEnabled": true,
                 "portForwardingEnabled": true,
                 "portAutoForwardWeb": false,
@@ -138,7 +131,6 @@ mod tests {
         .expect("updated settings");
         let persisted = read_settings(&path).expect("persisted settings");
 
-        assert!(settings.session_delete_enabled);
         assert!(settings.markdown_export_enabled);
         assert!(!settings.session_move_enabled);
         assert!(settings.port_forwarding_enabled);

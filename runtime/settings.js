@@ -1,5 +1,4 @@
 // Helper Settings page content and commands
-// biome-ignore-all lint/correctness/noUnusedVariables: called from bootstrap.js, sessions.js, and native-settings.js in the bundled runtime
 function setEntryActive(active) {
   void active;
 }
@@ -88,9 +87,8 @@ function renderHelperPage(host, options = {}) {
           <section class="codex-helper-settings-section flex flex-col gap-1.5">
             <div class="codex-helper-settings-section-title text-sm font-medium text-token-text-primary">Sessions</div>
             ${settingsPanel(`
-            ${switchRow("Delete sessions", "Show delete controls in the session list context menu.", "sessionDeleteEnabled", "sessionDeleteEnabled", "Delete sessions")}
             ${switchRow("Markdown export", "Export conversations as Markdown from the session menu.", "markdownExportEnabled", "markdownExportEnabled", "Markdown export")}
-            ${switchRow("Move sessions", "Move sessions between projects from the sidebar context menu.", "sessionMoveEnabled", "sessionMoveEnabled", "Move sessions")}
+            ${switchRow("Fork sessions", "Fork sessions into local, remote, or another project from the sidebar context menu.", "sessionMoveEnabled", "sessionMoveEnabled", "Fork sessions")}
             `)}
           </section>
           <section class="codex-helper-settings-section flex flex-col gap-1.5" ${helperSettingsSectionAttribute}="port-forwarding">
@@ -106,16 +104,6 @@ function renderHelperPage(host, options = {}) {
             ${settingsPanel(`
             ${sectionToolbar("data-codex-helper-scripts-status", "refresh")}
             <div class="codex-helper-settings-scroll" data-codex-helper-scripts-list></div>
-            `)}
-          </section>
-          <section class="codex-helper-settings-section flex flex-col gap-1.5">
-            ${sectionHeading("Deleted chats", "open-backups-dir", "Open deleted chats folder")}
-            ${settingsPanel(`
-            ${sectionToolbar("data-codex-helper-backups-status", "refresh")}
-            <div class="codex-helper-chat-search">
-              <input class="codex-helper-chat-search-input" data-codex-helper-deleted-chat-search type="search" placeholder="Search deleted chats" autocomplete="off" spellcheck="false" aria-label="Search deleted chats">
-            </div>
-            <div class="codex-helper-settings-scroll" data-codex-helper-backups></div>
             `)}
           </section>
           <section class="codex-helper-settings-section flex flex-col gap-1.5">
@@ -218,18 +206,16 @@ function focusHelperSettingsSection(sectionId) {
 
 async function refreshHelperPage() {
   if (helperSettingsRoots().length === 0) return;
-  const [backend, scripts, settings, backups, zed, log] = await Promise.all([
+  const [backend, scripts, settings, zed, log] = await Promise.all([
     bridge("/backend/status"),
     bridge("/runtime/user-scripts"),
     bridge("/settings/get"),
-    bridge("/backups/list"),
     bridge("/zed-remote/status"),
     bridge("/diagnostics/read-latest"),
   ]);
   setHelperText("[data-codex-helper-backend]", resultText(backend));
   applySettings(settings);
   renderLoadedScripts(scripts);
-  await renderDeletedSessionBackupsAfterRefresh(backups);
   setHelperText(
     "[data-codex-helper-zed-status]",
     zed?.status === "ok"
@@ -250,28 +236,6 @@ async function refreshHelperPage() {
     "[data-codex-helper-log]",
     log?.contents || "No diagnostic records yet",
   );
-}
-
-async function renderDeletedSessionBackupsAfterRefresh(result) {
-  const activeDeletedSearchInput = activeDeletedChatSearchInput();
-  if (activeDeletedSearchInput) {
-    await runDeletedChatSearch(activeDeletedSearchInput);
-    return;
-  }
-  renderDeletedSessionBackups(result);
-}
-
-function activeDeletedChatSearchInput() {
-  for (const root of helperSettingsRoots()) {
-    const input = root.querySelector("[data-codex-helper-deleted-chat-search]");
-    if (
-      input instanceof HTMLInputElement &&
-      String(input.value || "").trim()
-    ) {
-      return input;
-    }
-  }
-  return null;
 }
 
 function renderLoadedScripts(result) {
@@ -312,46 +276,6 @@ function renderLoadedScripts(result) {
   }
 }
 
-function renderDeletedSessionBackups(result) {
-  deletedChatBackupsResult = result;
-  const panels = helperSettingsRoots()
-    .map((root) => root.querySelector("[data-codex-helper-backups]"))
-    .filter((panel) => panel instanceof HTMLElement);
-  if (panels.length === 0) return;
-  for (const panel of panels) {
-    renderDeletedSessionBackupsPanel(panel, result);
-  }
-}
-
-function renderDeletedSessionBackupsPanel(panel, result) {
-  panel.textContent = "";
-  if (result?.status !== "ok") {
-    setHelperText("[data-codex-helper-backups-status]", resultText(result));
-    panel.appendChild(createScrollEmptyMessage(resultText(result)));
-    return;
-  }
-  const backups = Array.isArray(result.backups) ? result.backups : [];
-  setHelperText(
-    "[data-codex-helper-backups-path]",
-    result?.backups_path || "Backups path unavailable",
-  );
-  setHelperText(
-    "[data-codex-helper-backups-status]",
-    backups.length
-      ? `${backups.length} deleted chat${backups.length === 1 ? "" : "s"}`
-      : "No deleted chats",
-  );
-  if (backups.length === 0) {
-    panel.appendChild(
-      createScrollEmptyMessage("Deleted chat backups will appear here."),
-    );
-    return;
-  }
-  for (const backup of backups.slice(0, DELETED_CHAT_BACKUP_RENDER_LIMIT)) {
-    panel.appendChild(createCompactBackupRow(backup, restoreButtonForChat(backup)));
-  }
-}
-
 function createScrollEmptyMessage(message) {
   const node = document.createElement("div");
   node.className = "codex-helper-settings-scroll-empty";
@@ -368,152 +292,6 @@ function createCompactListRow(label, title) {
   if (title) text.title = title;
   row.appendChild(text);
   return row;
-}
-
-function createCompactBackupRow(backup, control) {
-  const row = document.createElement("div");
-  row.className = "codex-helper-settings-compact-row";
-  const text = document.createElement("div");
-  text.className = "codex-helper-settings-compact-text";
-  const title = backup.title || backup.session_id || "Untitled session";
-  const summary = backupSummaryLine(backup);
-  const titleNode = document.createElement("div");
-  titleNode.className = "codex-helper-settings-compact-title";
-  titleNode.textContent = title;
-  const meta = document.createElement("div");
-  meta.className = "codex-helper-settings-compact-meta";
-  meta.textContent = summary || backup.session_id || "";
-  text.title = backupDetail(backup) || [title, summary].filter(Boolean).join(" · ");
-  text.appendChild(titleNode);
-  if (meta.textContent) text.appendChild(meta);
-  row.appendChild(text);
-  if (control instanceof HTMLElement) {
-    if (control.tagName === "BUTTON") control.className = helperActionClass;
-    row.appendChild(control);
-  }
-  return row;
-}
-
-function restoreButtonForChat(chat) {
-  if (!chat?.token) return null;
-  const button = document.createElement("button");
-  button.type = "button";
-  button.textContent = "Restore";
-  button.setAttribute("data-codex-helper-restore-token", chat.token || "");
-  return button;
-}
-
-function backupSummaryLine(backup) {
-  const parts = [];
-  if (backup.time || backup.deleted_at) {
-    parts.push(formatDateTime(backup.time || backup.deleted_at));
-  }
-  if (backup.cwd) parts.push(displayProjectName(backup.cwd));
-  return parts.filter(Boolean).join(" · ");
-}
-
-
-function backupDetail(backup) {
-  const parts = [];
-  if (backup.time) parts.push(formatDateTime(backup.time));
-  if (backup.deleted_at) parts.push(`Deleted ${formatDateTime(backup.deleted_at)}`);
-  if (backup.cwd) parts.push(backup.cwd);
-  if (backup.session_id) parts.push(backup.session_id);
-  return parts.filter(Boolean).join(" · ");
-}
-
-async function searchChats(scope, query) {
-  // The bridge route also handles scope === "archived" (see
-  // src-tauri/src/chat_search.rs), but no runtime caller emits it today —
-  // Archived chats search is intentionally backend-only until the UI is
-  // reintroduced. Keep the `scope` argument so re-enabling stays trivial.
-  return bridge("/chats/search", { scope, query });
-}
-
-function scheduleDeletedChatSearch(input) {
-  if (deletedChatSearchTimer) clearTimeout(deletedChatSearchTimer);
-  deletedChatSearchTimer = window.setTimeout(() => {
-    deletedChatSearchTimer = 0;
-    runDeletedChatSearch(input).catch((error) => {
-      setHelperText("[data-codex-helper-backups-status]", error?.message || String(error));
-      logDiagnostic("deleted_chat_search_failed", {
-        error: error?.message || String(error),
-      });
-    });
-  }, 250);
-}
-
-async function runDeletedChatSearch(input) {
-  const query = String(input?.value || "").trim();
-  const requestId = ++deletedChatSearchRequestId;
-  if (!query) {
-    if (deletedChatBackupsResult) renderDeletedSessionBackups(deletedChatBackupsResult);
-    return;
-  }
-  setHelperText("[data-codex-helper-backups-status]", "Searching deleted chats");
-  const result = await searchChats("deleted", query);
-  if (requestId !== deletedChatSearchRequestId) return;
-  renderDeletedChatSearchResults(result);
-}
-
-function renderDeletedChatSearchResults(result) {
-  const panels = helperSettingsRoots()
-    .map((root) => root.querySelector("[data-codex-helper-backups]"))
-    .filter((panel) => panel instanceof HTMLElement);
-  for (const panel of panels) {
-    panel.textContent = "";
-    if (result?.status !== "ok") {
-      const message = resultText(result);
-      setHelperText("[data-codex-helper-backups-status]", message);
-      panel.appendChild(createScrollEmptyMessage(message));
-      continue;
-    }
-    const matches = Array.isArray(result.matches) ? result.matches : [];
-    setHelperText(
-      "[data-codex-helper-backups-status]",
-      matches.length
-        ? `${matches.length} deleted chat match${matches.length === 1 ? "" : "es"}`
-        : "No deleted chat matches",
-    );
-    if (matches.length === 0) {
-      panel.appendChild(createScrollEmptyMessage("No deleted chats match this search."));
-      continue;
-    }
-    for (const match of matches) {
-      panel.appendChild(createCompactBackupRow(match, restoreButtonForChat(match)));
-    }
-  }
-}
-
-function removeArchivedChatsSearchArtifacts() {
-  // Defensive sweep for any leftover Archived chats search UI created by
-  // earlier runtime builds. Returns the number of unique nodes removed so
-  // callers (the MutationObserver in bootstrap.js) can decide whether to
-  // keep running the sweep.
-  const removed = new Set();
-  for (const node of document.querySelectorAll(
-    "[data-codex-helper-archived-chat-search], [data-codex-helper-archived-chat-results]",
-  )) {
-    if (!(node instanceof HTMLElement)) continue;
-    const container = node.closest(".codex-helper-chat-search");
-    const target = container instanceof HTMLElement ? container : node;
-    if (removed.has(target)) continue;
-    removed.add(target);
-    target.remove();
-  }
-  return removed.size;
-}
-
-function formatDateTime(value) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
 }
 
 function applySettings(result) {
@@ -564,7 +342,6 @@ async function handleHelperCommand(command) {
   const route = {
     "open-devtools": "/devtools/open",
     "open-scripts-dir": "/scripts/reveal",
-    "open-backups-dir": "/backups/reveal",
     "open-log-file": "/diagnostics/reveal-log",
     "open-logs-dir": "/logs/reveal",
   }[command];
@@ -599,25 +376,6 @@ async function handleHelperToggle(input) {
     return;
   }
   applySettings(result);
-}
-
-async function handleRestoreBackup(button) {
-  const undoToken =
-    button.getAttribute("data-codex-helper-restore-token") || "";
-  if (!undoToken) return;
-  button.setAttribute("disabled", "true");
-  const result = await bridge("/backups/restore", { undo_token: undoToken });
-  button.removeAttribute("disabled");
-  if (result?.status !== "undone") {
-    setHelperText(
-      "[data-codex-helper-backend]",
-      result?.message || "Restore failed",
-    );
-    logDiagnostic("backup_restore_failed", { result });
-    return;
-  }
-  showHelperToast(result.message || "Session restored");
-  await refreshHelperPage();
 }
 
 async function refreshFeatureSettings() {

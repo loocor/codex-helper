@@ -35,3 +35,12 @@ test("native settings validator creates the screenshot output directory", () => 
 	expect(existsSync(screenshotPath)).toBe(true);
 	expect(readFileSync(screenshotPath, "utf8")).toBe("png");
 });
+
+test("native settings validator follows current Helper settings pages", () => {
+	expect(source).toContain('labels !== "General|Logs|About"');
+	expect(source).toContain('iconNames !== "sliders-horizontal|scroll-text|info"');
+	expect(source).toContain('["general", "logs", "about"]');
+	expect(source).not.toContain("Deleted Sessions");
+	expect(source).not.toContain("deleted-sessions");
+	expect(source).not.toContain("trash-2");
+});

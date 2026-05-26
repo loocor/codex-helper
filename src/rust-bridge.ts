@@ -14,13 +14,9 @@ type JsonValue =
 	| { [key: string]: JsonValue };
 
 const RUST_BRIDGE_PATHS = new Set([
-	"/delete",
 	"/export-markdown",
-	"/move-thread-workspace",
-	"/undo",
-	"/backups/list",
-	"/backups/restore",
-	"/chats/search",
+	"/fork-thread-project",
+	"/projects/remote-list",
 ]);
 
 export function isRustBridgePath(path: string): boolean {

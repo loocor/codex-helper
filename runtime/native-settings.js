@@ -17,13 +17,6 @@ function nativeHelperSettingsPageDefinitions() {
       hidden: true,
     },
     {
-      id: "deleted-chats",
-      label: "Deleted chats",
-      standardIconName: "trash-2",
-      description:
-        "Search deleted local chat backups and restore them when needed.",
-    },
-    {
       id: "logs",
       label: "Logs",
       standardIconName: "scroll-text",
@@ -106,8 +99,6 @@ function nativeSettingsStandardIconSvg(iconName, className = "") {
       return `${base}<line x1="21" x2="14" y1="4" y2="4"></line><line x1="10" x2="3" y1="4" y2="4"></line><line x1="21" x2="12" y1="12" y2="12"></line><line x1="8" x2="3" y1="12" y2="12"></line><line x1="21" x2="16" y1="20" y2="20"></line><line x1="12" x2="3" y1="20" y2="20"></line><line x1="14" x2="14" y1="2" y2="6"></line><line x1="8" x2="8" y1="10" y2="14"></line><line x1="16" x2="16" y1="18" y2="22"></line></svg>`;
     case "file-code-2":
       return `${base}<path d="M4 22h14a2 2 0 0 0 2-2V7.5L14.5 2H6a2 2 0 0 0-2 2v4"></path><path d="M14 2v6h6"></path><path d="m5 12-3 3 3 3"></path><path d="m9 18 3-3-3-3"></path></svg>`;
-    case "trash-2":
-      return `${base}<path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path><line x1="10" x2="10" y1="11" y2="17"></line><line x1="14" x2="14" y1="11" y2="17"></line></svg>`;
     case "scroll-text":
       return `${base}<path d="M15 12h-5"></path><path d="M15 8h-5"></path><path d="M19 17V5a2 2 0 0 0-2-2H4"></path><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"></path></svg>`;
     case "info":
@@ -511,22 +502,6 @@ function nativeSettingsPageContent(pageId) {
       ${nativeSettingsListFooter("data-codex-helper-scripts-status")}
     `);
   }
-  if (pageId === "deleted-chats") {
-    return nativeSettingsListSection(
-      nativeSettingsPathHeader(
-        "data-codex-helper-backups-path",
-        "open-backups-dir",
-        "refresh",
-      ),
-      nativeSettingsPanel(`
-        <div class="codex-helper-chat-search">
-          <input class="codex-helper-chat-search-input" data-codex-helper-deleted-chat-search type="search" placeholder="Search deleted chats" autocomplete="off" spellcheck="false" aria-label="Search deleted chats">
-        </div>
-        <div class="codex-helper-settings-scroll" data-codex-helper-backups></div>
-        ${nativeSettingsListFooter("data-codex-helper-backups-status")}
-      `),
-    );
-  }
   if (pageId === "logs") {
     return nativeSettingsListSection(
       nativeSettingsPathHeader(
@@ -551,9 +526,8 @@ function nativeSettingsPageContent(pageId) {
       ${nativeSettingsActionRow("DevTools", "Open Chrome DevTools for this Codex window.", "open-devtools", "Open")}
     `)}
     ${nativeSettingsPanel(`
-      ${nativeSettingsSwitchRow("Delete sessions", "Show delete controls in the session list context menu.", "sessionDeleteEnabled", "sessionDeleteEnabled", "Delete sessions")}
       ${nativeSettingsSwitchRow("Markdown export", "Export conversations as Markdown from the session menu.", "markdownExportEnabled", "markdownExportEnabled", "Markdown export")}
-      ${nativeSettingsSwitchRow("Move sessions", "Move sessions between projects from the sidebar context menu.", "sessionMoveEnabled", "sessionMoveEnabled", "Move sessions")}
+      ${nativeSettingsSwitchRow("Fork sessions", "Fork sessions into local, remote, or another project from the sidebar context menu.", "sessionMoveEnabled", "sessionMoveEnabled", "Fork sessions")}
     `)}
     ${nativeSettingsPanel(`
       ${nativeSettingsSwitchRow("Enable port forwarding", "Detect and forward ports from agent sessions.", "portForwardingEnabled", "portForwardingEnabled", "Enable port forwarding")}

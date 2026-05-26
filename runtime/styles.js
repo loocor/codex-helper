@@ -78,9 +78,6 @@ function installHelperStyles() {
       [${helperNativeSettingsPageAttribute}] .codex-helper-panel {
         background-color: var(--color-background-panel, var(--color-token-bg-fog));
       }
-      [${helperNativeSettingsPageAttribute}] [data-codex-helper-backups] {
-        display: contents;
-      }
       [${helperNativeSettingsPageAttribute}] .codex-helper-action {
         border-color: transparent;
       }
@@ -147,12 +144,6 @@ function installHelperStyles() {
       [${helperNativeSettingsPageAttribute}] .codex-helper-settings-compact-text {
         min-width: 0;
         flex: 1 1 auto;
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-      }
-      [${helperNativeSettingsPageAttribute}] .codex-helper-settings-compact-title {
-        min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -160,10 +151,7 @@ function installHelperStyles() {
         color: inherit;
       }
       [${helperNativeSettingsPageAttribute}] .codex-helper-settings-compact-meta {
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        flex-shrink: 0;
         font-size: 12px;
         color: color-mix(in srgb, currentColor 55%, transparent);
       }
@@ -300,34 +288,6 @@ function installHelperStyles() {
       [${helperPageAttribute}] .codex-helper-panel {
         background-color: var(--color-background-panel, var(--color-token-bg-fog));
       }
-      [${helperPageAttribute}] [data-codex-helper-backups] {
-        display: contents;
-      }
-      .codex-helper-chat-search {
-        padding: 8px 12px;
-        border-top: 0.5px solid color-mix(in srgb, currentColor 10%, transparent);
-      }
-      .codex-helper-chat-search-input {
-        width: 100%;
-        min-width: 0;
-        box-sizing: border-box;
-        border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
-        border-radius: 6px;
-        padding: 7px 9px;
-        background: color-mix(in srgb, currentColor 4%, transparent);
-        color: inherit;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-        font-size: 12px;
-        line-height: 1.35;
-      }
-      .codex-helper-chat-search-input:focus-visible {
-        outline: 2px solid var(--color-token-focus-border, rgb(48, 145, 255));
-        outline-offset: 1px;
-      }
-      .codex-helper-chat-search-input:disabled {
-        cursor: not-allowed;
-        opacity: 0.6;
-      }
       [${helperPageAttribute}] .codex-helper-action {
         border-color: transparent;
       }
@@ -382,12 +342,6 @@ function installHelperStyles() {
       [${helperPageAttribute}] .codex-helper-settings-compact-text {
         min-width: 0;
         flex: 1 1 auto;
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-      }
-      [${helperPageAttribute}] .codex-helper-settings-compact-title {
-        min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -395,10 +349,7 @@ function installHelperStyles() {
         color: inherit;
       }
       [${helperPageAttribute}] .codex-helper-settings-compact-meta {
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        flex-shrink: 0;
         font-size: 12px;
         color: color-mix(in srgb, currentColor 55%, transparent);
       }
@@ -688,13 +639,13 @@ function installHelperStyles() {
         font: inherit;
         cursor: pointer;
       }
-      [data-codex-helper-project-move] {
+      [data-codex-helper-project-fork] {
         position: fixed;
         inset: 0;
         z-index: 2147483646;
         background: color-mix(in srgb, black 18%, transparent);
       }
-      [data-codex-helper-project-move] .codex-helper-project-move-panel {
+      [data-codex-helper-project-fork] .codex-helper-project-fork-panel {
         position: fixed;
         width: min(360px, calc(100vw - 32px));
         max-height: min(420px, calc(100vh - 32px));
@@ -705,23 +656,23 @@ function installHelperStyles() {
         color: CanvasText;
         box-shadow: 0 16px 40px color-mix(in srgb, black 22%, transparent);
       }
-      [data-codex-helper-project-move] .codex-helper-project-move-header {
+      [data-codex-helper-project-fork] .codex-helper-project-fork-header {
         padding: 14px 16px 10px;
         border-bottom: 1px solid color-mix(in srgb, currentColor 10%, transparent);
       }
-      [data-codex-helper-project-move] .codex-helper-project-move-title {
+      [data-codex-helper-project-fork] .codex-helper-project-fork-title {
         font-size: 14px;
         font-weight: 600;
       }
-      [data-codex-helper-project-move] .codex-helper-project-move-list {
+      [data-codex-helper-project-fork] .codex-helper-project-fork-list {
         padding: 8px;
       }
-      [data-codex-helper-project-move] .codex-helper-project-move-empty {
+      [data-codex-helper-project-fork] .codex-helper-project-fork-empty {
         padding: 12px;
         font-size: 13px;
         color: color-mix(in srgb, currentColor 55%, transparent);
       }
-      [data-codex-helper-project-move] .codex-helper-project-move-item {
+      [data-codex-helper-project-fork] .codex-helper-project-fork-item {
         display: block;
         width: 100%;
         border: 0;
@@ -732,16 +683,16 @@ function installHelperStyles() {
         text-align: left;
         cursor: pointer;
       }
-      [data-codex-helper-project-move] .codex-helper-project-move-item:hover,
-      [data-codex-helper-project-move] .codex-helper-project-move-item:focus-visible {
+      [data-codex-helper-project-fork] .codex-helper-project-fork-item:hover,
+      [data-codex-helper-project-fork] .codex-helper-project-fork-item:focus-visible {
         background: color-mix(in srgb, currentColor 8%, transparent);
         outline: none;
       }
-      [data-codex-helper-project-move] .codex-helper-project-move-item-title {
+      [data-codex-helper-project-fork] .codex-helper-project-fork-item-title {
         font-size: 13px;
         font-weight: 500;
       }
-      [data-codex-helper-project-move] .codex-helper-project-move-item-path {
+      [data-codex-helper-project-fork] .codex-helper-project-fork-item-path {
         margin-top: 2px;
         font-size: 12px;
         color: color-mix(in srgb, currentColor 55%, transparent);

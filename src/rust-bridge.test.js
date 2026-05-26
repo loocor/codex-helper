@@ -1,9 +1,20 @@
 import { join } from "node:path";
 import { expect, test } from "bun:test";
 
-import { rustBridgeCandidatePaths, rustBridgeBinaryPath } from "./rust-bridge.ts";
+import {
+	isRustBridgePath,
+	rustBridgeCandidatePaths,
+	rustBridgeBinaryPath,
+} from "./rust-bridge.ts";
 
 const root = "/tmp/codex-helper-root";
+
+test("rust bridge does not allow helper session delete lifecycle routes", () => {
+	expect(isRustBridgePath("/delete")).toBe(false);
+	expect(isRustBridgePath("/undo")).toBe(false);
+	expect(isRustBridgePath("/backups/list")).toBe(false);
+	expect(isRustBridgePath("/backups/restore")).toBe(false);
+});
 
 test("rust bridge candidates include configured cargo target directories", () => {
 	const previousTargetDir = process.env.CARGO_TARGET_DIR;

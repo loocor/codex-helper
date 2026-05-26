@@ -53,7 +53,6 @@ Create a hidden-window Tauri app named `CodexHelper`. `tauri.conf.json` must hav
 ```text
 ~/.codex-helper
 ~/.codex-helper/logs
-~/.codex-helper/backups
 ~/.codex-helper/scripts
 ```
 

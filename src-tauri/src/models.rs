@@ -23,25 +23,6 @@ impl SessionRef {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DeleteStatus {
-    ServerDeleted,
-    LocalDeleted,
-    Partial,
-    Failed,
-    Undone,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct DeleteResult {
-    pub status: DeleteStatus,
-    pub session_id: String,
-    pub message: String,
-    pub undo_token: Option<String>,
-    pub backup_path: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum ExportStatus {
     Exported,
     Failed,
@@ -82,18 +63,6 @@ mod tests {
     }
 
     #[test]
-    fn delete_status_uses_snake_case_json_values() {
-        assert_eq!(
-            serde_json::to_value(DeleteStatus::ServerDeleted).unwrap(),
-            json!("server_deleted")
-        );
-        assert_eq!(
-            serde_json::from_value::<DeleteStatus>(json!("server_deleted")).unwrap(),
-            DeleteStatus::ServerDeleted
-        );
-    }
-
-    #[test]
     fn export_status_uses_snake_case_json_values() {
         assert_eq!(
             serde_json::to_value(ExportStatus::Exported).unwrap(),
@@ -102,34 +71,6 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ExportStatus>(json!("exported")).unwrap(),
             ExportStatus::Exported
-        );
-    }
-
-    #[test]
-    fn delete_result_json_shape_matches_rust_model() {
-        let result = DeleteResult {
-            status: DeleteStatus::Partial,
-            session_id: "session-123".to_string(),
-            message: "deleted locally only".to_string(),
-            undo_token: Some("undo-123".to_string()),
-            backup_path: None,
-        };
-
-        let value = serde_json::to_value(&result).unwrap();
-
-        assert_eq!(
-            value,
-            json!({
-                "status": "partial",
-                "session_id": "session-123",
-                "message": "deleted locally only",
-                "undo_token": "undo-123",
-                "backup_path": null
-            })
-        );
-        assert_eq!(
-            serde_json::from_value::<DeleteResult>(value).unwrap(),
-            result
         );
     }
 

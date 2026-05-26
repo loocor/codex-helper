@@ -1,9 +1,5 @@
-use codex_helper::chat_search::search_chats_response;
-use codex_helper::session_actions::{
-    delete_session_response, deleted_sessions_response, export_markdown_response,
-    move_thread_workspace_response, restore_deleted_session_response, undo_delete_response,
-};
-use codex_helper::state_dir::StateDir;
+use codex_helper::session_actions::{export_markdown_response, fork_thread_project_response};
+use codex_helper::zed::remote_projects_response;
 use serde_json::json;
 use std::env;
 
@@ -22,21 +18,10 @@ fn main() {
     } else {
         json!({})
     };
-    let state_dir = match StateDir::init() {
-        Ok(state_dir) => state_dir,
-        Err(error) => {
-            eprintln!("{error}");
-            std::process::exit(1);
-        }
-    };
     let response = match path {
-        "/delete" => delete_session_response(&state_dir, &payload),
-        "/undo" => undo_delete_response(&state_dir, &payload),
-        "/backups/list" => deleted_sessions_response(&state_dir),
-        "/backups/restore" => restore_deleted_session_response(&state_dir, &payload),
-        "/chats/search" => search_chats_response(&state_dir, &payload),
         "/export-markdown" => export_markdown_response(&payload),
-        "/move-thread-workspace" => move_thread_workspace_response(&state_dir, &payload),
+        "/fork-thread-project" => fork_thread_project_response(&payload),
+        "/projects/remote-list" => remote_projects_response(&payload),
         _ => json!({
             "status": "failed",
             "message": format!("Unknown Codex Helper bridge path: {path}")
