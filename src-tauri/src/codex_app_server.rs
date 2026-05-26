@@ -8,6 +8,8 @@ use serde_json::{json, Value};
 
 use crate::zed::SshTarget;
 
+const GENERATED_TITLE_TIMEOUT_SECS: u64 = 120;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForkedThread {
     pub session_id: String,
@@ -792,7 +794,7 @@ fn recv_generated_title(lines: &Receiver<String>) -> anyhow::Result<String> {
     let mut latest_title = String::new();
     loop {
         let line = lines
-            .recv_timeout(Duration::from_secs(60))
+            .recv_timeout(Duration::from_secs(GENERATED_TITLE_TIMEOUT_SECS))
             .map_err(|_| anyhow::anyhow!("Codex title generation timed out"))?;
         let response: Value = serde_json::from_str(line.trim())?;
         if response.get("method").and_then(Value::as_str) == Some("item/completed") {
@@ -980,6 +982,11 @@ mod tests {
         assert!(prompt.contains("Transcript:"));
         assert!(prompt.contains("Confirmed Admin preset API wiring"));
         assert!(!prompt.contains("Existing title"));
+    }
+
+    #[test]
+    fn generated_title_timeout_matches_bridge_budget() {
+        assert_eq!(super::GENERATED_TITLE_TIMEOUT_SECS, 120);
     }
 
     #[test]

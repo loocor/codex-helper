@@ -405,6 +405,13 @@ async function handleHelperNumberInput(input) {
   if (!key) return;
   const value = Number(input.value);
   if (!Number.isInteger(value)) throw new Error(`Settings value for ${key} must be an integer`);
+  if (value < 1 || value > 20) {
+    const message = `Settings value for ${key} must be between 1 and 20`;
+    setHelperText("[data-codex-helper-backend]", message);
+    logDiagnostic("settings_update_failed", { key, message });
+    applySettings({ status: "ok", settings: featureSettings });
+    return;
+  }
   input.disabled = true;
   const result = await bridge("/settings/set", { [key]: value });
   input.disabled = false;

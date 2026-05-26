@@ -3,38 +3,34 @@ use serde_json::Value;
 use std::fs;
 use std::path::Path;
 
-pub fn export_rollout(thread_id: &str, title: &str, rollout_path: &Path) -> ExportResult {
-    let title = display_title(title);
-    let result = (|| -> anyhow::Result<ExportResult> {
-        if !rollout_path.is_file() {
-            anyhow::bail!(
-                "Rollout file does not exist:{}",
-                rollout_path.to_string_lossy()
-            );
-        }
-        let messages = load_messages(rollout_path)?;
-        if messages.is_empty() {
-            return Ok(failed(
-                thread_id,
-                "No exportable user or assistant messages found",
-            ));
-        }
-        let filename = build_filename(&title, thread_id);
-        let markdown = render_markdown(&title, &messages);
-        Ok(ExportResult {
-            status: ExportStatus::Exported,
-            session_id: thread_id.to_string(),
-            message: format!("Exported as Markdown:{filename}"),
-            filename: Some(filename),
-            markdown: Some(markdown),
-        })
-    })();
-    result.unwrap_or_else(|err| failed(thread_id, format!("Failed to read rollout:{err}")))
+#[derive(Debug)]
+pub struct ExportableRollout {
+    messages: Vec<Message>,
 }
 
-pub fn validate_exportable_rollout(thread_id: &str, rollout_path: &Path) -> Option<ExportResult> {
+pub fn export_validated_rollout(
+    thread_id: &str,
+    title: &str,
+    rollout: &ExportableRollout,
+) -> ExportResult {
+    let title = display_title(title);
+    let filename = build_filename(&title, thread_id);
+    let markdown = render_markdown(&title, &rollout.messages);
+    ExportResult {
+        status: ExportStatus::Exported,
+        session_id: thread_id.to_string(),
+        message: format!("Exported as Markdown:{filename}"),
+        filename: Some(filename),
+        markdown: Some(markdown),
+    }
+}
+
+pub fn validate_exportable_rollout(
+    thread_id: &str,
+    rollout_path: &Path,
+) -> Result<ExportableRollout, ExportResult> {
     if !rollout_path.is_file() {
-        return Some(failed(
+        return Err(failed(
             thread_id,
             format!(
                 "Rollout file does not exist:{}",
@@ -43,12 +39,12 @@ pub fn validate_exportable_rollout(thread_id: &str, rollout_path: &Path) -> Opti
         ));
     }
     match load_messages(rollout_path) {
-        Ok(messages) if messages.is_empty() => Some(failed(
+        Ok(messages) if messages.is_empty() => Err(failed(
             thread_id,
             "No exportable user or assistant messages found",
         )),
-        Ok(_) => None,
-        Err(error) => Some(failed(thread_id, format!("Failed to read rollout:{error}"))),
+        Ok(messages) => Ok(ExportableRollout { messages }),
+        Err(error) => Err(failed(thread_id, format!("Failed to read rollout:{error}"))),
     }
 }
 
@@ -229,7 +225,7 @@ mod tests {
         let file = tempfile::NamedTempFile::new().expect("rollout");
 
         let result = validate_exportable_rollout("thread-1", file.path())
-            .expect("empty rollout should not be exportable");
+            .expect_err("empty rollout should not be exportable");
 
         assert_eq!(result.status, ExportStatus::Failed);
         assert!(result
@@ -248,6 +244,6 @@ mod tests {
 
         let result = validate_exportable_rollout("thread-1", file.path());
 
-        assert!(result.is_none());
+        assert!(result.is_ok());
     }
 }

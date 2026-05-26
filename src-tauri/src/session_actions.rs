@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 
 use crate::codex_app_server::{CodexAppServerClient, ThreadForker};
-use crate::markdown::{export_rollout, validate_exportable_rollout};
+use crate::markdown::{export_validated_rollout, validate_exportable_rollout};
 use crate::models::SessionRef;
 use crate::zed::{resolve_ssh_target_for_host_id, SshTarget};
 
@@ -36,15 +36,17 @@ pub fn export_markdown_response(payload: &Value) -> Value {
                         SourceRollout::Temp(rollout),
                     )
                 };
-                if let Some(result) = validate_exportable_rollout(&thread_id, rollout.path()) {
-                    return Ok(serde_json::to_value(result)?);
-                }
+                let exportable_rollout =
+                    match validate_exportable_rollout(&thread_id, rollout.path()) {
+                        Ok(exportable_rollout) => exportable_rollout,
+                        Err(result) => return Ok(serde_json::to_value(result)?),
+                    };
                 let title =
                     friendly_title_for_export(payload, &session, &host_id)?.unwrap_or(base_title);
-                Ok(serde_json::to_value(export_rollout(
+                Ok(serde_json::to_value(export_validated_rollout(
                     &thread_id,
                     &title,
-                    rollout.path(),
+                    &exportable_rollout,
                 ))?)
             })();
             result

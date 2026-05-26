@@ -217,6 +217,15 @@ test("settings page groups options by feature area", () => {
   expect(source).not.toContain('">Other</div>');
 });
 
+test("number settings validate the configured character range before saving", () => {
+  expect(source).toContain("if (value < 1 || value > 20)");
+  expect(source).toContain(
+    "Settings value for ${key} must be between 1 and 20",
+  );
+  expect(source).toContain('logDiagnostic("settings_update_failed", { key, message })');
+  expect(source).toContain('applySettings({ status: "ok", settings: featureSettings })');
+});
+
 test("account menu no longer exposes helper settings dialog entry", () => {
   expect(source).toContain("Helper Settings");
   expect(source).not.toContain("data-codex-helper-account-settings-entry");
