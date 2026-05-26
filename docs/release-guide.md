@@ -11,6 +11,7 @@ bun run build:app
 ## GitHub Release
 
 Push a tag such as `v0.1.0`. The **Release** workflow builds both architectures, signs, notarizes, and uploads DMGs to GitHub Releases.
+The release entry uses GitHub-generated release notes based on the tag comparison range selected by GitHub.
 
 Configure the repository secrets used by signed and notarized macOS releases.
 Secret names must match exactly:

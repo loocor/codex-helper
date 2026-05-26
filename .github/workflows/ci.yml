@@ -16,6 +16,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun install
       - run: bun run check
+      - run: bun run test:release
       - run: bun run test:runtime
 
   rust:
@@ -30,6 +31,7 @@ jobs:
 
   macos:
     runs-on: macos-latest
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       matrix:
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
@@ -41,6 +43,108 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
-      - run: chmod +x scripts/build-macos-dmg.sh
-      - run: SKIP_NOTARIZE=1 OUTPUT_DIR=dist/macos scripts/build-macos-dmg.sh "$(jq -r .version package.json)" "${{ matrix.target }}"
+
+      - name: Validate macOS signing/notarization secrets
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          test -n "$APPLE_CERTIFICATE_P12_BASE64" || { echo "missing APPLE_CERTIFICATE_P12_BASE64" >&2; exit 1; }
+          test -n "$APPLE_CERTIFICATE_PASSWORD" || { echo "missing APPLE_CERTIFICATE_PASSWORD" >&2; exit 1; }
+          test -n "$KEYCHAIN_PASSWORD" || { echo "missing KEYCHAIN_PASSWORD" >&2; exit 1; }
+          test -n "$APPLE_SIGNING_IDENTITY" || { echo "missing APPLE_SIGNING_IDENTITY" >&2; exit 1; }
+          test "$APPLE_SIGNING_IDENTITY" != "-" || { echo "APPLE_SIGNING_IDENTITY must be a Developer ID identity for release builds" >&2; exit 1; }
+          test -n "$APPLE_TEAM_ID" || { echo "missing APPLE_TEAM_ID" >&2; exit 1; }
+
+          test -n "$APPLE_API_KEY" || { echo "missing APPLE_API_KEY" >&2; exit 1; }
+          test -n "$APPLE_API_ISSUER" || { echo "missing APPLE_API_ISSUER" >&2; exit 1; }
+          test -n "$APPLE_API_PRIVATE_KEY" || { echo "missing APPLE_API_PRIVATE_KEY" >&2; exit 1; }
+
+      - name: Import Developer ID certificate
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/codex-helper-signing.keychain-db"
+          CERT_PATH="$RUNNER_TEMP/codex-helper-signing-cert.p12"
+
+          if ! echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$CERT_PATH" 2>/dev/null; then
+            echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 -D > "$CERT_PATH"
+          fi
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Prepare notary API key file
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$APPLE_API_KEY" || -z "$APPLE_API_ISSUER" || -z "$APPLE_API_PRIVATE_KEY" ]]; then
+            echo "missing App Store Connect API key notarization credentials" >&2
+            exit 1
+          fi
+
+          KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
+          echo "APPLE_API_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
+
+      - name: Build signed and notarized DMG
+        timeout-minutes: 45
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          REQUIRE_SIGNING: "1"
+          REQUIRE_NOTARIZE: "1"
+          NOTARY_WAIT_TIMEOUT: "10m"
+          NOTARY_MAX_ATTEMPTS: "3"
+          OUTPUT_DIR: ${{ github.workspace }}/dist/macos
+        run: |
+          chmod +x scripts/build-macos-dmg.sh
+          scripts/build-macos-dmg.sh "$(jq -r .version package.json)" "${{ matrix.target }}"
+
       - run: ls dist/macos/*.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dmg-${{ matrix.target }}
+          path: dist/macos/*.dmg
+
+      - name: Cleanup macOS signing materials
+        if: always()
+        run: |
+          set -euo pipefail
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/codex-helper-signing.keychain-db"
+          CERT_PATH="$RUNNER_TEMP/codex-helper-signing-cert.p12"
+
+          security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+          rm -f "$CERT_PATH"
+          rm -f "$RUNNER_TEMP"/AuthKey_*.p8

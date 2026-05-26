@@ -6,6 +6,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "bundle:runtime": "bun runtime/bundle.ts",
+    "test:release": "bun test ./scripts/_test-release-workflow.test.js",
     "test:runtime": "bun test ./runtime",
     "build:bridge": "env RUSTC_WRAPPER= cargo build --manifest-path src-tauri/Cargo.toml --bin codex-helper-bridge",
     "launch": "bun run build:bridge && bun src/launch.ts",
