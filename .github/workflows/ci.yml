@@ -16,6 +16,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun install
       - run: bun run check
+      - run: bun run test:release
       - run: bun run test:runtime
 
   rust:

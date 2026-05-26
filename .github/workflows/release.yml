@@ -113,7 +113,8 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           REQUIRE_SIGNING: "1"
           REQUIRE_NOTARIZE: "1"
-          NOTARY_WAIT_TIMEOUT: "30m"
+          NOTARY_WAIT_TIMEOUT: "10m"
+          NOTARY_MAX_ATTEMPTS: "3"
           OUTPUT_DIR: ${{ github.workspace }}/dist/macos
         run: |
           chmod +x scripts/build-macos-dmg.sh

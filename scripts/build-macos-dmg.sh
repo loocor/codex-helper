@@ -8,7 +8,9 @@ VERSION="${1:-$(jq -r '.version' "${ROOT}/package.json")}"
 TARGET="${2:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-${ROOT}/dist/macos}"
 APP_NAME="CodexHelper"
-NOTARY_WAIT_TIMEOUT="${NOTARY_WAIT_TIMEOUT:-30m}"
+NOTARY_WAIT_TIMEOUT="${NOTARY_WAIT_TIMEOUT:-10m}"
+NOTARY_MAX_ATTEMPTS="${NOTARY_MAX_ATTEMPTS:-3}"
+NOTARY_RETRY_DELAY_SECONDS="${NOTARY_RETRY_DELAY_SECONDS:-30}"
 
 if [[ -z "$TARGET" ]]; then
   case "$(uname -m)" in
@@ -63,6 +65,32 @@ require_notarization_credentials() {
 
 require_release_signing
 require_notarization_credentials
+
+if ! [[ "$NOTARY_MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "NOTARY_MAX_ATTEMPTS must be a positive integer" >&2
+  exit 1
+fi
+
+submit_notarization() {
+  local -a args=("$@")
+  local attempt=1
+  local status=0
+
+  while (( attempt <= NOTARY_MAX_ATTEMPTS )); do
+    echo "Notarization attempt ${attempt}/${NOTARY_MAX_ATTEMPTS} with timeout ${NOTARY_WAIT_TIMEOUT}"
+    if xcrun notarytool submit "$DMG" "${args[@]}" --wait --timeout "$NOTARY_WAIT_TIMEOUT"; then
+      return 0
+    fi
+    status=$?
+    if (( attempt >= NOTARY_MAX_ATTEMPTS )); then
+      echo "Notarization failed after ${NOTARY_MAX_ATTEMPTS} attempts" >&2
+      return "$status"
+    fi
+    echo "Notarization attempt ${attempt} failed; retrying in ${NOTARY_RETRY_DELAY_SECONDS}s" >&2
+    sleep "$NOTARY_RETRY_DELAY_SECONDS"
+    attempt=$((attempt + 1))
+  done
+}
 
 mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
@@ -123,10 +151,10 @@ fi
 
 if [[ "${SKIP_NOTARIZE:-}" != "1" ]]; then
   if [[ -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_ISSUER:-}" && -n "${APPLE_API_KEY_PATH:-}" ]]; then
-    xcrun notarytool submit "$DMG" --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait --timeout "$NOTARY_WAIT_TIMEOUT"
+    submit_notarization --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER"
     xcrun stapler staple "$DMG"
   elif [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
-    xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_PASSWORD" --wait --timeout "$NOTARY_WAIT_TIMEOUT"
+    submit_notarization --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_PASSWORD"
     xcrun stapler staple "$DMG"
   elif [[ "${REQUIRE_NOTARIZE:-}" == "1" ]]; then
     echo "notarization credentials are required unless SKIP_NOTARIZE=1" >&2
