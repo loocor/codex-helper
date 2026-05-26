@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { listTargets, pickCodexPageTarget } from "./cdp";
+import { listTargets } from "./cdp";
 import {
 	discoverRemoteListeningPorts,
 	discoveryRequestFromPayload,
@@ -33,6 +33,14 @@ type JsonValue =
 	| string
 	| JsonValue[]
 	| { [key: string]: JsonValue };
+
+export type BridgeCaller = {
+	targetId: string;
+	helperInstanceId: string;
+	href?: string;
+	hasFocus?: boolean;
+	visibilityState?: string;
+};
 
 type HelperSettings = {
 	markdownExportEnabled: boolean;
@@ -307,6 +315,24 @@ function devtoolsUrl(
 	return `http://127.0.0.1:${debugPort}/devtools/inspector.html?ws=${ws.slice(5)}`;
 }
 
+export function devtoolsUrlForTargetId(
+	debugPort: number,
+	targetId: string,
+	targets: { id?: string; webSocketDebuggerUrl?: string }[],
+): string {
+	const target = targets.find((target) => target.id === targetId);
+	if (!target) {
+		throw new Error(`Codex DevTools target not found: ${targetId}`);
+	}
+	return devtoolsUrl(debugPort, target);
+}
+
+function requiredCallerTargetId(caller?: BridgeCaller): string {
+	const targetId = caller?.targetId?.trim() ?? "";
+	if (!targetId) throw new Error("Bridge caller target id is required");
+	return targetId;
+}
+
 function helperDebugPort(): number {
 	const raw = process.env.CODEX_HELPER_DEBUG_PORT || "9229";
 	const value = Number(raw);
@@ -317,6 +343,7 @@ function helperDebugPort(): number {
 export async function handleBridgeRequest(
 	path: string,
 	payload: Record<string, JsonValue>,
+	caller?: BridgeCaller,
 ): Promise<JsonValue> {
 	if (isRustBridgePath(path)) {
 		return invokeRustBridge(path, payload);
@@ -329,7 +356,13 @@ export async function handleBridgeRequest(
 				typeof payload.event === "string" ? payload.event : "renderer.event";
 			appendDiagnostic(event, payload);
 			return { status: "ok" };
-		}
+			}
+			case "/runtime/activity":
+				appendDiagnostic("runtime.activity", {
+					...payload,
+					...(caller ? { caller } : {}),
+				});
+				return { status: "ok" };
 		case "/runtime/user-scripts":
 			return {
 				status: "ok",
@@ -371,9 +404,9 @@ export async function handleBridgeRequest(
 		case "/devtools/open":
 			try {
 				const debugPort = helperDebugPort();
+				const targetId = requiredCallerTargetId(caller);
 				const targets = await listTargets(debugPort);
-				const target = pickCodexPageTarget(targets);
-				const url = devtoolsUrl(debugPort, target);
+				const url = devtoolsUrlForTargetId(debugPort, targetId, targets);
 				return openPath(url);
 			} catch (error) {
 				return {

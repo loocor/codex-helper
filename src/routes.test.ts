@@ -7,7 +7,7 @@ import {
 	bridgeRequestTimeoutMessage,
 	bridgeRequestTimeoutMs,
 } from "./bridge";
-import { handleBridgeRequest } from "./routes";
+import { devtoolsUrlForTargetId, handleBridgeRequest } from "./routes";
 
 test("dev bridge exposes port forwarding list route", async () => {
 	const result = await handleBridgeRequest("/ports/list", {});
@@ -49,6 +49,23 @@ test("dev bridge only opens local forwarded urls externally", async () => {
 		status: "failed",
 		message: "Only local forwarded URLs can be opened",
 	});
+});
+
+test("devtools url uses caller target id", () => {
+	const url = devtoolsUrlForTargetId(9229, "caller", [
+		{
+			id: "first",
+			webSocketDebuggerUrl: "ws://127.0.0.1:9229/devtools/page/first",
+		},
+		{
+			id: "caller",
+			webSocketDebuggerUrl: "ws://127.0.0.1:9229/devtools/page/caller",
+		},
+	]);
+
+	expect(url).toBe(
+		"http://127.0.0.1:9229/devtools/inspector.html?ws=127.0.0.1:9229/devtools/page/caller",
+	);
 });
 
 test("dev bridge returns helper directory paths for native settings", async () => {
