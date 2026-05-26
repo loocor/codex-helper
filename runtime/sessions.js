@@ -738,27 +738,200 @@
     ];
   }
 
-  async function refreshSidebarConversationsForHost(hostId) {
+  function findSidebarConversationManager(hostId) {
     const normalizedHostId = codexAppServerHostId(hostId);
-    const manager = collectSidebarConversationManagers().find(
+    return collectSidebarConversationManagers().find(
       (candidate) => candidate.hostId === normalizedHostId,
+    ) || null;
+  }
+
+  function sidebarRefreshDelay(delayMs) {
+    const delay = Number(delayMs || 0);
+    if (delay <= 0) return Promise.resolve();
+    return new Promise((resolve) => {
+      window.setTimeout(resolve, delay);
+    });
+  }
+
+  function sidebarConversationById(manager, sessionId) {
+    const threadId = codexThreadId(sessionId);
+    if (!threadId || typeof manager?.getConversation !== "function") return null;
+    return manager.getConversation(threadId) || null;
+  }
+
+  function sidebarRecentConversationHas(manager, sessionId) {
+    const threadId = codexThreadId(sessionId);
+    if (!threadId || typeof manager?.getRecentConversations !== "function")
+      return null;
+    const conversations = manager.getRecentConversations();
+    if (!Array.isArray(conversations)) return null;
+    return (
+      conversations.find((conversation) => codexThreadId(conversation?.id) === threadId) ||
+      null
     );
+  }
+
+  function normalizeSidebarRefreshExpectation(expectation) {
+    if (!expectation || typeof expectation !== "object") return null;
+    const conversationId = codexThreadId(expectation.conversationId);
+    const title = String(expectation.title || "").trim();
+    return {
+      conversationId,
+      title,
+      valid: Boolean(conversationId),
+    };
+  }
+
+  function sidebarRefreshExpectationMatches(manager, expectation) {
+    const normalized = normalizeSidebarRefreshExpectation(expectation);
+    if (!normalized) return true;
+    if (!normalized.conversationId) return true;
+    const conversation =
+      sidebarConversationById(manager, normalized.conversationId) ||
+      sidebarRecentConversationHas(manager, normalized.conversationId);
+    if (!conversation) return false;
+    if (!normalized.title) return true;
+    return String(conversation.title || "").trim() === normalized.title;
+  }
+
+  async function refreshSidebarStateForHost(hostId, expectation, options) {
+    const normalizedHostId = codexAppServerHostId(hostId);
+    const manager = findSidebarConversationManager(normalizedHostId);
+    const normalizedExpectation = normalizeSidebarRefreshExpectation(expectation);
+    if (expectation && !normalizedExpectation?.valid) {
+      logDiagnostic("sidebar_refresh_expectation_missing", {
+        host_id: normalizedHostId,
+        title: normalizedExpectation?.title || "",
+      });
+      return {
+        attempts: 0,
+        hostId: normalizedHostId,
+        managerFound: Boolean(manager),
+        ok: false,
+        verified: false,
+      };
+    }
     if (!manager) {
       logDiagnostic("sidebar_refresh_manager_missing", {
         host_id: normalizedHostId,
       });
-      return false;
+      return {
+        attempts: 0,
+        hostId: normalizedHostId,
+        managerFound: false,
+        ok: false,
+        verified: false,
+      };
     }
-    try {
-      await manager.refreshRecentConversations({ sortKey: "updated_at" });
-      return true;
-    } catch (error) {
+    const retryDelays =
+      Array.isArray(options?.retryDelays) && options.retryDelays.length > 0
+        ? options.retryDelays
+        : [0, 300, 900, 1800];
+    let lastError = null;
+    let lastAttemptFailed = false;
+    let refreshErrorCount = 0;
+    for (let index = 0; index < retryDelays.length; index += 1) {
+      await sidebarRefreshDelay(retryDelays[index]);
+      try {
+        await manager.refreshRecentConversations({ sortKey: "updated_at" });
+        lastAttemptFailed = false;
+      } catch (error) {
+        lastError = error;
+        lastAttemptFailed = true;
+        refreshErrorCount += 1;
+      }
+      if (sidebarRefreshExpectationMatches(manager, normalizedExpectation)) {
+        return {
+          attempts: index + 1,
+          hostId: normalizedHostId,
+          managerFound: true,
+          ok: true,
+          verified: true,
+        };
+      }
+    }
+    if (lastAttemptFailed) {
       logDiagnostic("sidebar_refresh_failed", {
         host_id: normalizedHostId,
-        message: error?.message || String(error),
+        message: lastError?.message || String(lastError),
       });
-      return false;
+    } else {
+      logDiagnostic("sidebar_refresh_unverified", {
+        host_id: normalizedHostId,
+        session_id: normalizedExpectation?.conversationId || "",
+        title: normalizedExpectation?.title || "",
+        refresh_error_count: refreshErrorCount,
+        last_error: lastError?.message || "",
+      });
     }
+    return {
+      attempts: retryDelays.length,
+      hostId: normalizedHostId,
+      managerFound: true,
+      ok: false,
+      verified: false,
+    };
+  }
+
+  async function refreshSidebarConversationsForHost(hostId) {
+    const result = await refreshSidebarStateForHost(hostId);
+    return result.ok;
+  }
+
+  function sidebarThreadRowsBySessionId(row, sessionId) {
+    const threadId = codexThreadId(sessionId);
+    if (!threadId) return [];
+    const rows = [];
+    const seen = new Set();
+    const addRow = (candidate) => {
+      if (!(candidate instanceof HTMLElement) || seen.has(candidate)) return;
+      const candidateId = codexThreadId(
+        candidate.getAttribute("data-app-action-sidebar-thread-id") ||
+          candidate.getAttribute("data-session-id") ||
+          "",
+      );
+      if (candidateId !== threadId) return;
+      seen.add(candidate);
+      rows.push(candidate);
+    };
+    if (typeof document?.querySelectorAll === "function") {
+      for (const candidate of document.querySelectorAll(
+        "[data-app-action-sidebar-thread-id], [data-session-id]",
+      )) {
+        addRow(candidate);
+      }
+    }
+    addRow(row);
+    return rows;
+  }
+
+  function setSidebarConversationTitleInDom(row, sessionId, title) {
+    const threadId = codexThreadId(sessionId);
+    const name = String(title || "").trim();
+    if (!threadId || !name) return false;
+    let updatedCount = 0;
+    for (const candidate of sidebarThreadRowsBySessionId(row, threadId)) {
+      const titleNode = candidate.querySelector(
+        "[data-thread-title], .truncate.select-none, .truncate.text-base",
+      );
+      if (!(titleNode instanceof HTMLElement)) continue;
+      titleNode.textContent = name;
+      if (typeof titleNode.setAttribute === "function") {
+        titleNode.setAttribute("title", name);
+      }
+      updatedCount += 1;
+    }
+    logDiagnostic(
+      updatedCount > 0
+        ? "sidebar_title_dom_updated"
+        : "sidebar_title_dom_missing",
+      {
+        session_id: threadId,
+        title: name,
+        updated_count: updatedCount,
+      },
+    );
+    return updatedCount > 0;
   }
 
   async function setSidebarConversationTitleForHost(hostId, sessionId, title) {
@@ -766,9 +939,7 @@
     const threadId = codexThreadId(sessionId);
     const name = String(title || "").trim();
     if (!threadId || !name) return false;
-    const manager = collectSidebarConversationManagers().find(
-      (candidate) => candidate.hostId === normalizedHostId,
-    );
+    const manager = findSidebarConversationManager(normalizedHostId);
     if (!manager) {
       logDiagnostic("sidebar_title_manager_missing", {
         host_id: normalizedHostId,
@@ -781,16 +952,35 @@
         typeof manager.getConversation === "function"
           ? manager.getConversation(threadId)
           : null;
+      const recentConversation =
+        conversation || sidebarRecentConversationHas(manager, threadId);
+      if (!recentConversation) {
+        logDiagnostic("sidebar_title_conversation_missing", {
+          host_id: normalizedHostId,
+          session_id: threadId,
+        });
+        return false;
+      }
       if (
-        conversation &&
         typeof manager.applyThreadTitleUpdateAndNotify === "function"
       ) {
         manager.applyThreadTitleUpdateAndNotify({
-          ...conversation,
+          ...recentConversation,
           title: name,
         });
+        logDiagnostic("sidebar_title_update_applied", {
+          host_id: normalizedHostId,
+          session_id: threadId,
+          source: conversation ? "conversation" : "recent",
+          title: name,
+        });
+        return true;
       }
-      return true;
+      logDiagnostic("sidebar_title_update_unavailable", {
+        host_id: normalizedHostId,
+        session_id: threadId,
+      });
+      return false;
     } catch (error) {
       logDiagnostic("sidebar_title_update_failed", {
         host_id: normalizedHostId,
@@ -801,8 +991,11 @@
     }
   }
 
-  async function refreshSidebarAfterFork(target) {
-    await refreshSidebarConversationsForHost(target?.hostId || "");
+  async function refreshSidebarAfterFork(target, result) {
+    const sessionId = String(result?.new_session_id || result?.newSessionId || "");
+    return await refreshSidebarStateForHost(target?.hostId || "", {
+      conversationId: sessionId,
+    });
   }
 
   function autoNamingRangePayload() {
@@ -834,13 +1027,16 @@
         name: result.name || "",
         source: result.source || "",
       });
+      finishTaskToast(result.message || "Regenerated chat title");
+      await refreshSidebarStateForHost(context.hostId, {
+        conversationId: ref.session_id,
+      });
       await setSidebarConversationTitleForHost(
         context.hostId,
         ref.session_id,
         result.name || "",
       );
-      await refreshSidebarConversationsForHost(context.hostId);
-      finishTaskToast(result.message || "Regenerated chat title");
+      setSidebarConversationTitleInDom(row, ref.session_id, result.name || "");
       return;
     }
     if (action === "export") {
@@ -897,8 +1093,8 @@
       });
       if (result?.status !== "forked")
         throw new Error(result?.message || "Fork failed");
-      await refreshSidebarAfterFork(target);
       finishTaskToast(result.warning || result.message || "Forked");
+      await refreshSidebarAfterFork(target, result);
       navigateAfterFork(result, target);
       return;
     }

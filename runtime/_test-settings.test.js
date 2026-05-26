@@ -13,6 +13,12 @@ function extractFunction(name) {
   const marker = `function ${name}(`;
   const start = source.indexOf(marker);
   if (start === -1) throw new Error(`${name} not found`);
+  const asyncPrefixStart = start - "async ".length;
+  const functionStart =
+    asyncPrefixStart >= 0 &&
+    source.slice(asyncPrefixStart, start) === "async "
+      ? asyncPrefixStart
+      : start;
   const braceStart = source.indexOf("{", start);
   let depth = 0;
   let quote = "";
@@ -61,7 +67,7 @@ function extractFunction(name) {
     }
     if (char === "{") depth += 1;
     if (char === "}") depth -= 1;
-    if (depth === 0) return source.slice(start, index + 1);
+    if (depth === 0) return source.slice(functionStart, index + 1);
   }
   throw new Error(`${name} closing brace not found`);
 }
@@ -88,6 +94,34 @@ function loadForkProjectHelpers(document) {
       "return { nativeProjectTargets, forkTargetsForAction, enabledForkSessionActions, forkedSessionPath, sessionProjectContext, codexAppServerHostId, codexThreadId };",
     ].join("\n"),
   )(document, document.Element);
+}
+
+function loadSidebarRefreshHelpers(document = null) {
+  const Element = document?.Element || class Element {};
+  return new Function(
+    "document",
+    "HTMLElement",
+    [
+      "let managers = [];",
+      "const diagnostics = [];",
+      "function collectSidebarConversationManagers() { return managers; }",
+      "function logDiagnostic(name, payload) { diagnostics.push({ name, payload }); }",
+      extractFunction("sessionRemoteHostId"),
+      extractFunction("codexAppServerHostId"),
+      extractFunction("codexThreadId"),
+      extractFunction("sidebarRefreshDelay"),
+      extractFunction("findSidebarConversationManager"),
+      extractFunction("sidebarConversationById"),
+      extractFunction("sidebarRecentConversationHas"),
+      extractFunction("normalizeSidebarRefreshExpectation"),
+      extractFunction("sidebarRefreshExpectationMatches"),
+      extractFunction("refreshSidebarStateForHost"),
+      extractFunction("setSidebarConversationTitleForHost"),
+      extractFunction("sidebarThreadRowsBySessionId"),
+      extractFunction("setSidebarConversationTitleInDom"),
+      "return { diagnostics, setManagers(value) { managers = value; }, refreshSidebarStateForHost, setSidebarConversationTitleForHost, setSidebarConversationTitleInDom };",
+    ].join("\n"),
+  )(document, Element);
 }
 
 function fakeProjectDocument(projects, selectedPath = "") {
@@ -523,6 +557,16 @@ test("long session actions show a persistent task toast before bridge work", () 
   );
   expect(actionHandler).toContain('finishTaskToast(result.message || "Exported")');
   expect(actionHandler).toContain('finishTaskToast(result.warning || result.message || "Forked")');
+  expect(
+    actionHandler.indexOf('finishTaskToast(result.message || "Regenerated chat title")'),
+  ).toBeLessThan(
+    actionHandler.indexOf("await refreshSidebarStateForHost(context.hostId, {"),
+  );
+  expect(
+    actionHandler.indexOf('finishTaskToast(result.warning || result.message || "Forked")'),
+  ).toBeLessThan(
+    actionHandler.indexOf("await refreshSidebarAfterFork(target, result)"),
+  );
 });
 
 test("helper no longer exposes its own session delete lifecycle", () => {
@@ -739,14 +783,149 @@ test("fork success navigates only for local forked sessions", () => {
 });
 
 test("fork success refreshes sidebar through Codex recent conversations manager", () => {
-  expect(source).toContain("await refreshSidebarAfterFork(target)");
+  expect(source).toContain("await refreshSidebarAfterFork(target, result)");
   expect(source).toContain(
     'await manager.refreshRecentConversations({ sortKey: "updated_at" })',
   );
   expect(source).toContain('"sidebar_refresh_manager_missing"');
+  expect(source).toContain('"sidebar_refresh_unverified"');
 });
 
-test("auto rename updates Codex sidebar manager before refreshing", () => {
+test("sidebar refresh retries until the expected conversation appears", async () => {
+  const helpers = loadSidebarRefreshHelpers();
+  let attempts = 0;
+  const conversations = new Map();
+  helpers.setManagers([
+    {
+      hostId: "local",
+      async refreshRecentConversations() {
+        attempts += 1;
+        if (attempts === 2) {
+          conversations.set("thread-1", { id: "thread-1", title: "Forked" });
+        }
+      },
+      getConversation(id) {
+        return conversations.get(id) || null;
+      },
+      getRecentConversations() {
+        return Array.from(conversations.values());
+      },
+    },
+  ]);
+
+  const result = await helpers.refreshSidebarStateForHost(
+    "",
+    { conversationId: "local:thread-1" },
+    { retryDelays: [0, 0, 0] },
+  );
+
+  expect(result.ok).toBe(true);
+  expect(result.verified).toBe(true);
+  expect(result.attempts).toBe(2);
+  expect(attempts).toBe(2);
+});
+
+test("sidebar refresh reports unverified when title never matches", async () => {
+  const helpers = loadSidebarRefreshHelpers();
+  helpers.setManagers([
+    {
+      hostId: "remote-ssh-codex-managed:box",
+      async refreshRecentConversations() {},
+      getConversation() {
+        return { id: "thread-1", title: "Old title" };
+      },
+      getRecentConversations() {
+        return [{ id: "thread-1", title: "Old title" }];
+      },
+    },
+  ]);
+
+  const result = await helpers.refreshSidebarStateForHost(
+    "remote-ssh-codex-managed:box",
+    { conversationId: "remote:thread-1", title: "New title" },
+    { retryDelays: [0, 0] },
+  );
+
+  expect(result.ok).toBe(false);
+  expect(result.verified).toBe(false);
+  expect(result.attempts).toBe(2);
+  expect(helpers.diagnostics.at(-1).name).toBe("sidebar_refresh_unverified");
+});
+
+test("sidebar refresh rejects an invalid expected conversation id", async () => {
+  const helpers = loadSidebarRefreshHelpers();
+  let attempts = 0;
+  helpers.setManagers([
+    {
+      hostId: "local",
+      async refreshRecentConversations() {
+        attempts += 1;
+      },
+      getConversation() {
+        return { id: "thread-1", title: "Forked" };
+      },
+      getRecentConversations() {
+        return [{ id: "thread-1", title: "Forked" }];
+      },
+    },
+  ]);
+
+  const result = await helpers.refreshSidebarStateForHost(
+    "",
+    { conversationId: "" },
+    { retryDelays: [0, 0] },
+  );
+
+  expect(result.ok).toBe(false);
+  expect(result.verified).toBe(false);
+  expect(result.attempts).toBe(0);
+  expect(attempts).toBe(0);
+  expect(helpers.diagnostics.at(-1).name).toBe(
+    "sidebar_refresh_expectation_missing",
+  );
+});
+
+test("sidebar refresh diagnostics include prior refresh errors", async () => {
+  const helpers = loadSidebarRefreshHelpers();
+  let attempts = 0;
+  helpers.setManagers([
+    {
+      hostId: "local",
+      async refreshRecentConversations() {
+        attempts += 1;
+        if (attempts === 1) throw new Error("temporary refresh failure");
+      },
+      getConversation() {
+        return null;
+      },
+      getRecentConversations() {
+        return [];
+      },
+    },
+  ]);
+
+  const result = await helpers.refreshSidebarStateForHost(
+    "",
+    { conversationId: "thread-1" },
+    { retryDelays: [0, 0] },
+  );
+
+  expect(result.ok).toBe(false);
+  expect(result.verified).toBe(false);
+  expect(result.attempts).toBe(2);
+  expect(helpers.diagnostics.at(-1)).toEqual({
+    name: "sidebar_refresh_unverified",
+    payload: {
+      host_id: "local",
+      session_id: "thread-1",
+      title: "",
+      refresh_error_count: 1,
+      last_error: "temporary refresh failure",
+    },
+  });
+});
+
+test("auto rename refreshes the sidebar before applying the generated title", () => {
   expect(source).toContain("function codexThreadId(sessionId)");
   expect(source).toContain(
     "async function setSidebarConversationTitleForHost(hostId, sessionId, title)",
@@ -754,8 +933,96 @@ test("auto rename updates Codex sidebar manager before refreshing", () => {
   expect(source).not.toContain('manager.sendRequest("thread/name/set"');
   expect(source).toContain("manager.applyThreadTitleUpdateAndNotify({");
   expect(source).toContain('"sidebar_title_update_failed"');
-  expect(source).toContain("await setSidebarConversationTitleForHost(");
-  expect(source).toContain("await refreshSidebarConversationsForHost(context.hostId)");
+  const actionHandler = extractFunction("handleSessionAction");
+  const refreshIndex = actionHandler.indexOf(
+    "await refreshSidebarStateForHost(context.hostId, {\n        conversationId: ref.session_id,\n      });",
+  );
+  const titleUpdateIndex = actionHandler.lastIndexOf(
+    "await setSidebarConversationTitleForHost(",
+  );
+  const domTitleUpdateIndex = actionHandler.lastIndexOf(
+    "setSidebarConversationTitleInDom(row, ref.session_id, result.name || \"\")",
+  );
+  expect(refreshIndex).toBeGreaterThan(-1);
+  expect(titleUpdateIndex).toBeGreaterThan(-1);
+  expect(domTitleUpdateIndex).toBeGreaterThan(-1);
+  expect(refreshIndex).toBeLessThan(titleUpdateIndex);
+  expect(refreshIndex).toBeLessThan(domTitleUpdateIndex);
+});
+
+test("sidebar title update falls back to recent conversations", async () => {
+  const helpers = loadSidebarRefreshHelpers();
+  let patchedConversation = null;
+  helpers.setManagers([
+    {
+      hostId: "local",
+      getConversation() {
+        return null;
+      },
+      getRecentConversations() {
+        return [{ id: "thread-1", title: "Old title" }];
+      },
+      applyThreadTitleUpdateAndNotify(conversation) {
+        patchedConversation = conversation;
+      },
+    },
+  ]);
+
+  const result = await helpers.setSidebarConversationTitleForHost(
+    "",
+    "local:thread-1",
+    "New title",
+  );
+
+  expect(result).toBe(true);
+  expect(patchedConversation).toEqual({ id: "thread-1", title: "New title" });
+});
+
+test("sidebar DOM title update targets the refreshed session row", () => {
+  class Element {
+    constructor(attrs = {}, titleNode = null) {
+      this.attrs = attrs;
+      this.titleNode = titleNode;
+      this.textContent = "";
+    }
+
+    getAttribute(name) {
+      return this.attrs[name] || null;
+    }
+
+    querySelector(selector) {
+      return selector.includes("[data-thread-title]") ? this.titleNode : null;
+    }
+  }
+  const staleTitle = new Element();
+  staleTitle.textContent = "Stale title";
+  const refreshedTitle = new Element();
+  refreshedTitle.textContent = "Old title";
+  const staleRow = new Element(
+    { "data-app-action-sidebar-thread-id": "thread-old" },
+    staleTitle,
+  );
+  const refreshedRow = new Element(
+    { "data-app-action-sidebar-thread-id": "thread-1" },
+    refreshedTitle,
+  );
+  const document = {
+    Element,
+    querySelectorAll() {
+      return [refreshedRow];
+    },
+  };
+  const helpers = loadSidebarRefreshHelpers(document);
+
+  const result = helpers.setSidebarConversationTitleInDom(
+    staleRow,
+    "local:thread-1",
+    "New title",
+  );
+
+  expect(result).toBe(true);
+  expect(staleTitle.textContent).toBe("Stale title");
+  expect(refreshedTitle.textContent).toBe("New title");
 });
 
 test("auto rename preserves remote host context for sidebar title updates", () => {
