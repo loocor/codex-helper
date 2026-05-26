@@ -15,6 +15,21 @@ export type CdpVersion = {
 	webSocketDebuggerUrl: string;
 };
 
+export const CODEX_APP_URL = "app://-/index.html";
+
+type CdpTargetInfo = {
+	targetId?: string;
+	type?: string;
+	title?: string;
+	url?: string;
+};
+
+type CdpTargetInfosResult = {
+	targetInfos?: CdpTargetInfo[];
+};
+
+export const ALL_TARGETS_FILTER = [{}];
+
 async function fetchCdp(
 	url: string,
 	init?: Omit<RequestInit, "signal">,
@@ -50,8 +65,8 @@ export async function isDebugPortReady(debugPort: number): Promise<boolean> {
 
 export async function hasCodexCdpTarget(debugPort: number): Promise<boolean> {
 	try {
-		const targets = await listTargets(debugPort);
-		return findCodexPageTarget(targets) !== null;
+		const targets = await listBrowserTargets(debugPort);
+		return codexInjectablePageTargets(targets).length > 0;
 	} catch {
 		return false;
 	}
@@ -101,6 +116,28 @@ export async function listTargets(debugPort: number): Promise<CdpTarget[]> {
 	return response.json() as Promise<CdpTarget[]>;
 }
 
+export async function listBrowserTargets(
+	debugPort: number,
+): Promise<CdpTarget[]> {
+	const result = (await cdpCommand(
+		await browserWebsocketUrl(debugPort),
+		"Target.getTargets",
+		{ filter: ALL_TARGETS_FILTER },
+	)) as CdpTargetInfosResult;
+
+	return (result.targetInfos ?? []).flatMap((targetInfo) => {
+		if (!targetInfo.targetId || !targetInfo.type) return [];
+		return [
+			{
+				id: targetInfo.targetId,
+				type: targetInfo.type,
+				title: targetInfo.title ?? "",
+				url: targetInfo.url ?? "",
+			},
+		];
+	});
+}
+
 export function pickCodexPageTarget(targets: CdpTarget[]): CdpTarget {
 	const pages = targets.filter(
 		(target) => target.type === "page" && target.webSocketDebuggerUrl,
@@ -113,15 +150,32 @@ export function pickCodexPageTarget(targets: CdpTarget[]): CdpTarget {
 	return selected;
 }
 
+export function isCodexPageTarget(target: CdpTarget): boolean {
+	const titleAndUrl = `${target.title ?? ""} ${target.url ?? ""}`.toLowerCase();
+	return (
+		target.type === "page" &&
+		(target.url === CODEX_APP_URL || titleAndUrl.includes("codex"))
+	);
+}
+
+function hasTargetWebsocket(target: CdpTarget): boolean {
+	return Boolean(target.webSocketDebuggerUrl?.trim());
+}
+
+export function codexPageTargets(targets: CdpTarget[]): CdpTarget[] {
+	return targets.filter(
+		(target) => isCodexPageTarget(target) && hasTargetWebsocket(target),
+	);
+}
+
+export function codexInjectablePageTargets(targets: CdpTarget[]): CdpTarget[] {
+	return targets.filter(isCodexPageTarget);
+}
+
 export function findCodexPageTarget(targets: CdpTarget[]): CdpTarget | null {
 	return (
 		targets.find(
-			(target) =>
-				target.type === "page" &&
-				Boolean(target.webSocketDebuggerUrl) &&
-				`${target.title ?? ""} ${target.url ?? ""}`
-					.toLowerCase()
-					.includes("codex"),
+			(target) => isCodexPageTarget(target) && hasTargetWebsocket(target),
 		) ?? null
 	);
 }
@@ -167,6 +221,53 @@ export async function waitForCodexTarget(
 	}
 	throw new Error(
 		`Timed out waiting for Codex CDP target after ${Date.now() - startedAt}ms: ${String(lastError)}`,
+	);
+}
+
+export async function waitForCodexTargets(
+	debugPort: number,
+	timer: LaunchTimer,
+	attempts = 120,
+): Promise<CdpTarget[]> {
+	const startedAt = Date.now();
+	let lastProgressAt = startedAt;
+	let lastError: unknown;
+	timer.stage("wait cdp targets start", {
+		port: debugPort,
+		maxAttempts: attempts,
+	});
+	for (let attempt = 0; attempt < attempts; attempt += 1) {
+		try {
+			const targets = await listBrowserTargets(debugPort);
+			const codexTargets = codexInjectablePageTargets(targets);
+			if (codexTargets.length > 0) {
+				timer.stage("wait cdp targets done", {
+					attempts: attempt + 1,
+					waitedMs: Date.now() - startedAt,
+					targetIds: codexTargets.map((target) => target.id).join(","),
+					count: codexTargets.length,
+				});
+				return codexTargets;
+			}
+			lastError = new Error("No injectable Codex page target found");
+		} catch (error) {
+			lastError = error;
+		}
+		const now = Date.now();
+		if (now - lastProgressAt >= CDP_POLL_PROGRESS_MS) {
+			timer.stage("wait cdp targets polling", {
+				attempt: attempt + 1,
+				maxAttempts: attempts,
+				waitedMs: now - startedAt,
+				lastError:
+					lastError instanceof Error ? lastError.message : String(lastError),
+			});
+			lastProgressAt = now;
+		}
+		await Bun.sleep(250);
+	}
+	throw new Error(
+		`Timed out waiting for Codex CDP targets after ${Date.now() - startedAt}ms: ${String(lastError)}`,
 	);
 }
 
