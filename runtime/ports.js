@@ -525,7 +525,7 @@ function findTerminalPortScanRoots() {
   for (const node of document.querySelectorAll(selector)) {
     if (!(node instanceof HTMLElement)) continue;
     if (!isVisibleElement(node)) continue;
-    if (node.closest(`[${helperPageAttribute}], [${helperToastAttribute}]`)) {
+    if (node.closest(`[${helperNativeSettingsPageAttribute}], [${helperToastAttribute}]`)) {
       continue;
     }
     if (roots.some((root) => root.contains(node))) continue;
@@ -542,7 +542,7 @@ function appendTerminalTextFromRoot(root, parts, seen) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   while (walker.nextNode()) {
     const parent = walker.currentNode.parentElement;
-    if (parent?.closest(`[${helperPageAttribute}], [${helperToastAttribute}]`)) {
+    if (parent?.closest(`[${helperNativeSettingsPageAttribute}], [${helperToastAttribute}]`)) {
       continue;
     }
     const text = (walker.currentNode.nodeValue || "").trim();
@@ -559,7 +559,7 @@ function terminalTextForPortScan() {
     appendTerminalTextFromRoot(root, parts, seen);
   }
   for (const xterm of document.querySelectorAll(".xterm, [class*='xterm' i]")) {
-    if (xterm.closest(`[${helperPageAttribute}], [${helperToastAttribute}]`)) {
+    if (xterm.closest(`[${helperNativeSettingsPageAttribute}], [${helperToastAttribute}]`)) {
       continue;
     }
     appendTerminalTextFromRoot(xterm, parts, seen);
@@ -1063,12 +1063,26 @@ function remoteForwardingContextChanged(initialSessionKey) {
   return !currentSessionKey || currentSessionKey !== initialSessionKey;
 }
 
+function remotePortSyncIsThrottled(sessionKey) {
+  const now = Date.now();
+  if (
+    sessionKey === lastRemotePortSyncSessionKey &&
+    now - lastRemotePortSyncStartedAt < REMOTE_PORT_SYNC_MIN_INTERVAL_MS
+  ) {
+    return true;
+  }
+  lastRemotePortSyncSessionKey = sessionKey;
+  lastRemotePortSyncStartedAt = now;
+  return false;
+}
+
 async function syncRemoteSessionPortsOnce() {
   if (!featureSettings.portForwardingEnabled) return;
   if (!helperWindowIsPortOwner()) return;
   const context = await resolveRemoteForwardingContext();
   if (!remoteForwardingContextIsReady(context)) return;
   const initialSessionKey = contextSessionKey(context);
+  if (remotePortSyncIsThrottled(initialSessionKey)) return;
   const result = await bridge("/ports/discover", {
     hostId: context.hostId,
     remotePath: context.path,

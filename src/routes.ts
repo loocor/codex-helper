@@ -356,13 +356,9 @@ export async function handleBridgeRequest(
 				typeof payload.event === "string" ? payload.event : "renderer.event";
 			appendDiagnostic(event, payload);
 			return { status: "ok" };
-			}
-			case "/runtime/activity":
-				appendDiagnostic("runtime.activity", {
-					...payload,
-					...(caller ? { caller } : {}),
-				});
-				return { status: "ok" };
+		}
+		case "/runtime/activity":
+			return { status: "ok" };
 		case "/runtime/user-scripts":
 			return {
 				status: "ok",

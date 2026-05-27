@@ -90,16 +90,7 @@ pub async fn handle_bridge_request(ctx: BridgeContext, request: BridgeRequest) -
         }
         "/runtime/activity" => {
             ctx.runtime_activity.record(&caller);
-            match ctx.logger.append(
-                "runtime.activity",
-                json!({
-                    "caller": caller.clone(),
-                    "payload": payload,
-                }),
-            ) {
-                Ok(()) => json!({ "status": "ok" }),
-                Err(error) => json!({ "status": "failed", "message": error.to_string() }),
-            }
+            json!({ "status": "ok" })
         }
         "/runtime/user-scripts" => match user_script_inventory(&ctx.state_dir) {
             Ok(scripts) => json!({
@@ -175,10 +166,24 @@ fn log_bridge_request(
     caller: &BridgeCaller,
     response: &Value,
 ) {
+    let status = response
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if !should_log_bridge_request(path, status) {
+        return;
+    }
     let _ = logger.append(
         "bridge.request",
         bridge_request_diagnostic(path, caller, response),
     );
+}
+
+fn should_log_bridge_request(path: &str, status: &str) -> bool {
+    if status != "ok" {
+        return true;
+    }
+    !matches!(path, "/ports/list" | "/runtime/activity")
 }
 
 fn bridge_request_diagnostic(path: &str, caller: &BridgeCaller, response: &Value) -> Value {
@@ -504,6 +509,14 @@ mod tests {
         assert_eq!(diagnostic["caller"]["href"], "app://-/index.html");
         assert_eq!(diagnostic["caller"]["hasFocus"], true);
         assert_eq!(diagnostic["caller"]["visibilityState"], "visible");
+    }
+
+    #[test]
+    fn bridge_request_logging_suppresses_noisy_success_routes() {
+        assert!(!should_log_bridge_request("/ports/list", "ok"));
+        assert!(!should_log_bridge_request("/runtime/activity", "ok"));
+        assert!(should_log_bridge_request("/ports/list", "failed"));
+        assert!(should_log_bridge_request("/backend/status", "ok"));
     }
 
     #[test]

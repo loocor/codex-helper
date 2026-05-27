@@ -28,6 +28,14 @@ test("runtime reports window activity with caller identity", () => {
   expect(source).toContain("helperRuntimeActivityDetail()");
 });
 
+test("runtime activity reports are deduplicated", () => {
+  expect(source).toContain("RUNTIME_ACTIVITY_REPORT_MIN_INTERVAL_MS");
+  expect(source).toContain("lastRuntimeActivityKey");
+  expect(source).toContain("lastRuntimeActivityAt");
+  expect(source).toContain("runtimeActivityKey(detail)");
+  expect(source).toContain('bridge("/runtime/activity", detail)');
+});
+
 test("port automation is gated to the active helper window", () => {
   expect(source).toContain("function helperWindowIsPortOwner()");
   expect(source).toContain("!helperWindowIsPortOwner()");

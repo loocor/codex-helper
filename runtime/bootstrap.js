@@ -202,8 +202,29 @@ function onHelperRuntimeChange(event) {
   });
 }
 
+function runtimeActivityKey(detail) {
+  return [
+    detail?.targetId || "",
+    detail?.helperInstanceId || "",
+    detail?.href || "",
+    detail?.hasFocus ? "focused" : "blurred",
+    detail?.visibilityState || "",
+  ].join("\n");
+}
+
 function reportHelperRuntimeActivity() {
-  bridge("/runtime/activity", helperRuntimeActivityDetail()).catch((error) => {
+  const detail = helperRuntimeActivityDetail();
+  const key = runtimeActivityKey(detail);
+  const now = Date.now();
+  if (
+    key === lastRuntimeActivityKey &&
+    now - lastRuntimeActivityAt < RUNTIME_ACTIVITY_REPORT_MIN_INTERVAL_MS
+  ) {
+    return;
+  }
+  lastRuntimeActivityKey = key;
+  lastRuntimeActivityAt = now;
+  bridge("/runtime/activity", detail).catch((error) => {
     console.warn("[Codex Helper] runtime activity report failed", error);
   });
 }
@@ -249,6 +270,12 @@ window.__codexHelperRuntimeCleanup = () => {
   maintainPortsPanelTimer = 0;
   refreshPortsPanelTimer = 0;
   pinnedSummaryHideTimer = 0;
+  lastRuntimeActivityKey = "";
+  lastRuntimeActivityAt = 0;
+  lastRemotePortSyncStartedAt = 0;
+  lastRemotePortSyncSessionKey = "";
+  cachedRemoteProjectMetadata = [];
+  cachedRemoteProjectMetadataLoaded = false;
   observerInstalled = false;
   helperRuntimeObserver = null;
 };

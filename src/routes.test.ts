@@ -95,6 +95,37 @@ test("dev bridge returns helper directory paths for native settings", async () =
 	}
 });
 
+test("dev bridge does not log routine runtime activity", async () => {
+	const previous = process.env.CODEX_HELPER_HOME;
+	const root = mkdtempSync(join(tmpdir(), "codex-helper-routes-"));
+	try {
+		process.env.CODEX_HELPER_HOME = root;
+
+		const result = await handleBridgeRequest(
+			"/runtime/activity",
+			{},
+			{
+				targetId: "target-1",
+				helperInstanceId: "helper-1",
+				href: "app://-/index.html",
+				hasFocus: true,
+				visibilityState: "visible",
+			},
+		);
+		const log = await handleBridgeRequest("/diagnostics/read-latest", {});
+
+		expect(result).toEqual({ status: "ok" });
+		expect(log).toMatchObject({
+			status: "ok",
+			path: join(root, "logs", "codex-helper.jsonl"),
+			contents: "",
+		});
+	} finally {
+		if (previous === undefined) delete process.env.CODEX_HELPER_HOME;
+		else process.env.CODEX_HELPER_HOME = previous;
+	}
+});
+
 test("dev bridge rejects malformed settings files explicitly", async () => {
 	const previous = process.env.CODEX_HELPER_HOME;
 	const root = mkdtempSync(join(tmpdir(), "codex-helper-routes-"));
