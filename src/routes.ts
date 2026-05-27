@@ -45,11 +45,13 @@ type HelperSettings = {
 	portAutoForwardWeb: boolean;
 	portSameLocalPort: boolean;
 };
+type HelperSettingKey = keyof HelperSettings;
+type AutoNamingAliasKey = "autoNamingMinWords" | "autoNamingMaxWords";
 
 const defaultSettings: HelperSettings = {
 	markdownExportEnabled: false,
 	sessionMoveEnabled: false,
-	autoRenameMenuEnabled: false,
+	autoRenameMenuEnabled: true,
 	markdownFriendlyFilenameEnabled: true,
 	autoNamingMinChars: 4,
 	autoNamingMaxChars: 10,
@@ -129,18 +131,7 @@ function readSettings(): HelperSettings {
 	const next: HelperSettings = { ...defaultSettings };
 	const object = settings as Record<string, JsonValue>;
 	for (const [key, value] of Object.entries(object)) {
-		if (key in defaultSettings) {
-			setSettingValue(next, key, value);
-			continue;
-		}
-		const canonicalAutoNamingKey = canonicalAutoNamingSettingKey(key);
-		if (canonicalAutoNamingKey) {
-			if (Object.prototype.hasOwnProperty.call(object, canonicalAutoNamingKey)) {
-				continue;
-			}
-			setSettingValue(next, key, value);
-			continue;
-		}
+		if (applySettingsEntry(next, object, key, value)) continue;
 		if (legacySettingsKeys.has(key)) continue;
 		throw new Error(`Unknown settings key: ${key}`);
 	}
@@ -152,16 +143,9 @@ function updateSettings(payload: Record<string, JsonValue>): HelperSettings {
 	const current = readSettings();
 	const next: HelperSettings = { ...current };
 	for (const [key, value] of Object.entries(payload)) {
-		if (!(key in defaultSettings)) {
-			const canonicalAutoNamingKey = canonicalAutoNamingSettingKey(key);
-			if (!canonicalAutoNamingKey) {
-				throw new Error(`Unknown settings key: ${key}`);
-			}
-			if (Object.prototype.hasOwnProperty.call(payload, canonicalAutoNamingKey)) {
-				continue;
-			}
+		if (!applySettingsEntry(next, payload, key, value)) {
+			throw new Error(`Unknown settings key: ${key}`);
 		}
-		setSettingValue(next, key, value);
 	}
 	validateAutoNamingRange(next);
 	writeFileSync(
@@ -172,15 +156,42 @@ function updateSettings(payload: Record<string, JsonValue>): HelperSettings {
 	return next;
 }
 
-function canonicalAutoNamingSettingKey(key: string): string {
+function applySettingsEntry(
+	settings: HelperSettings,
+	source: Record<string, JsonValue>,
+	key: string,
+	value: JsonValue,
+): boolean {
+	if (isHelperSettingKey(key)) {
+		setSettingValue(settings, key, value);
+		return true;
+	}
+	if (!isAutoNamingAliasKey(key)) return false;
+	const canonicalAutoNamingKey = canonicalAutoNamingSettingKey(key);
+	if (!Object.hasOwn(source, canonicalAutoNamingKey)) {
+		setSettingValue(settings, key, value);
+	}
+	return true;
+}
+
+function isHelperSettingKey(key: string): key is HelperSettingKey {
+	return Object.hasOwn(defaultSettings, key);
+}
+
+function isAutoNamingAliasKey(key: string): key is AutoNamingAliasKey {
+	return key === "autoNamingMinWords" || key === "autoNamingMaxWords";
+}
+
+function canonicalAutoNamingSettingKey(
+	key: AutoNamingAliasKey,
+): HelperSettingKey {
 	if (key === "autoNamingMinWords") return "autoNamingMinChars";
-	if (key === "autoNamingMaxWords") return "autoNamingMaxChars";
-	return "";
+	return "autoNamingMaxChars";
 }
 
 function setSettingValue(
 	settings: HelperSettings,
-	key: string,
+	key: HelperSettingKey | AutoNamingAliasKey,
 	value: JsonValue,
 ): void {
 	if (
@@ -204,15 +215,29 @@ function setSettingValue(
 	if (typeof value !== "boolean") {
 		throw new Error(`Settings value for ${key} must be a boolean`);
 	}
-	if (key === "markdownExportEnabled") settings.markdownExportEnabled = value;
-	else if (key === "sessionMoveEnabled") settings.sessionMoveEnabled = value;
-	else if (key === "autoRenameMenuEnabled") settings.autoRenameMenuEnabled = value;
-	else if (key === "markdownFriendlyFilenameEnabled")
-		settings.markdownFriendlyFilenameEnabled = value;
-	else if (key === "portForwardingEnabled") settings.portForwardingEnabled = value;
-	else if (key === "portAutoForwardWeb") settings.portAutoForwardWeb = value;
-	else if (key === "portSameLocalPort") settings.portSameLocalPort = value;
-	else throw new Error(`Unknown settings key: ${key}`);
+	switch (key) {
+		case "markdownExportEnabled":
+			settings.markdownExportEnabled = value;
+			return;
+		case "sessionMoveEnabled":
+			settings.sessionMoveEnabled = value;
+			return;
+		case "autoRenameMenuEnabled":
+			settings.autoRenameMenuEnabled = value;
+			return;
+		case "markdownFriendlyFilenameEnabled":
+			settings.markdownFriendlyFilenameEnabled = value;
+			return;
+		case "portForwardingEnabled":
+			settings.portForwardingEnabled = value;
+			return;
+		case "portAutoForwardWeb":
+			settings.portAutoForwardWeb = value;
+			return;
+		case "portSameLocalPort":
+			settings.portSameLocalPort = value;
+			return;
+	}
 }
 
 function validateAutoNamingRange(settings: HelperSettings): void {

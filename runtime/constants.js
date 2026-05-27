@@ -1,7 +1,4 @@
 // Constants and mutable runtime state
-const helperEntryAttribute = "data-codex-helper-settings-entry";
-const helperContentHostAttribute = "data-codex-helper-content-host";
-const helperPageAttribute = "data-codex-helper-settings-page";
 const helperCommandAttribute = "data-codex-helper-command";
 const helperToggleAttribute = "data-codex-helper-setting-toggle";
 const helperNumberAttribute = "data-codex-helper-setting-number";
@@ -28,13 +25,13 @@ const helperPanelClass =
   "codex-helper-panel flex flex-col divide-y-[0.5px] divide-token-border overflow-hidden rounded-lg border border-token-border";
 let observerInstalled = false;
 let helperRuntimeObserver = null;
-let helperPageRoot = null;
+let sessionContextMenuMapRestore = null;
+let sessionContextMenuReplayInFlight = false;
+const SESSION_CONTEXT_MENU_MAX_AGE_MS = 2500;
 let helperNativeSettingsRoot = null;
 let helperNativeSettingsContentHost = null;
 let helperNativeSettingsContentStash = null;
 let helperNativeSettingsActivePage = "";
-let helperContentHost = null;
-let helperContentStash = null;
 let pendingSessionMenuContext = null;
 let pendingPortScan = 0;
 let maintainPortsPanelTimer = 0;
@@ -57,7 +54,7 @@ const suppressedPortMappings = new Set();
 let featureSettings = {
   markdownExportEnabled: false,
   sessionMoveEnabled: false,
-  autoRenameMenuEnabled: false,
+  autoRenameMenuEnabled: true,
   markdownFriendlyFilenameEnabled: true,
   autoNamingMinChars: 4,
   autoNamingMaxChars: 10,
@@ -66,3 +63,5 @@ let featureSettings = {
   portSameLocalPort: true,
 };
 let featureSettingsLoaded = false;
+let cachedRemoteProjectMetadata = [];
+let cachedRemoteProjectMetadataLoaded = false;

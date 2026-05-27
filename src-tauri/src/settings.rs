@@ -24,7 +24,7 @@ impl Default for HelperSettings {
         Self {
             markdown_export_enabled: false,
             session_move_enabled: false,
-            auto_rename_menu_enabled: false,
+            auto_rename_menu_enabled: true,
             markdown_friendly_filename_enabled: true,
             auto_naming_min_chars: 4,
             auto_naming_max_chars: 10,
@@ -61,33 +61,11 @@ fn settings_from_value(value: &Value) -> anyhow::Result<HelperSettings> {
         .ok_or_else(|| anyhow::anyhow!("Settings file must contain a JSON object"))?;
     let mut settings = HelperSettings::default();
     for (key, value) in object {
-        match key.as_str() {
-            "markdownExportEnabled" => settings.markdown_export_enabled = bool_setting(key, value)?,
-            "sessionMoveEnabled" => settings.session_move_enabled = bool_setting(key, value)?,
-            "autoRenameMenuEnabled" => {
-                settings.auto_rename_menu_enabled = bool_setting(key, value)?
-            }
-            "markdownFriendlyFilenameEnabled" => {
-                settings.markdown_friendly_filename_enabled = bool_setting(key, value)?
-            }
-            "autoNamingMinChars" => {
-                settings.auto_naming_min_chars = char_count_setting(key, value)?
-            }
-            "autoNamingMaxChars" => {
-                settings.auto_naming_max_chars = char_count_setting(key, value)?
-            }
-            "autoNamingMinWords" if !object.contains_key("autoNamingMinChars") => {
-                settings.auto_naming_min_chars = char_count_setting("autoNamingMinChars", value)?
-            }
-            "autoNamingMaxWords" if !object.contains_key("autoNamingMaxChars") => {
-                settings.auto_naming_max_chars = char_count_setting("autoNamingMaxChars", value)?
-            }
-            "autoNamingMinWords" | "autoNamingMaxWords" => {}
-            "portForwardingEnabled" => settings.port_forwarding_enabled = bool_setting(key, value)?,
-            "portAutoForwardWeb" => settings.port_auto_forward_web = bool_setting(key, value)?,
-            "portSameLocalPort" => settings.port_same_local_port = bool_setting(key, value)?,
-            key if LEGACY_SETTINGS_KEYS.contains(&key) => {}
-            _ => anyhow::bail!("Unknown settings key: {key}"),
+        if apply_setting_value(&mut settings, key, value, object)? {
+            continue;
+        }
+        if !LEGACY_SETTINGS_KEYS.contains(&key.as_str()) {
+            anyhow::bail!("Unknown settings key: {key}");
         }
     }
     validate_auto_naming_range(&settings)?;
@@ -101,38 +79,63 @@ pub fn update_settings(path: &Path, payload: &Value) -> anyhow::Result<HelperSet
         .ok_or_else(|| anyhow::anyhow!("Settings payload must be an object"))?;
 
     for (key, value) in object {
-        match key.as_str() {
-            "markdownExportEnabled" => settings.markdown_export_enabled = bool_setting(key, value)?,
-            "sessionMoveEnabled" => settings.session_move_enabled = bool_setting(key, value)?,
-            "autoRenameMenuEnabled" => {
-                settings.auto_rename_menu_enabled = bool_setting(key, value)?
-            }
-            "markdownFriendlyFilenameEnabled" => {
-                settings.markdown_friendly_filename_enabled = bool_setting(key, value)?
-            }
-            "autoNamingMinChars" => {
-                settings.auto_naming_min_chars = char_count_setting(key, value)?
-            }
-            "autoNamingMaxChars" => {
-                settings.auto_naming_max_chars = char_count_setting(key, value)?
-            }
-            "autoNamingMinWords" if !object.contains_key("autoNamingMinChars") => {
-                settings.auto_naming_min_chars = char_count_setting("autoNamingMinChars", value)?
-            }
-            "autoNamingMaxWords" if !object.contains_key("autoNamingMaxChars") => {
-                settings.auto_naming_max_chars = char_count_setting("autoNamingMaxChars", value)?
-            }
-            "autoNamingMinWords" | "autoNamingMaxWords" => {}
-            "portForwardingEnabled" => settings.port_forwarding_enabled = bool_setting(key, value)?,
-            "portAutoForwardWeb" => settings.port_auto_forward_web = bool_setting(key, value)?,
-            "portSameLocalPort" => settings.port_same_local_port = bool_setting(key, value)?,
-            _ => return Err(anyhow::anyhow!("Unknown settings key: {key}")),
+        if !apply_setting_value(&mut settings, key, value, object)? {
+            return Err(anyhow::anyhow!("Unknown settings key: {key}"));
         }
     }
     validate_auto_naming_range(&settings)?;
 
     write_settings(path, &settings)?;
     Ok(settings)
+}
+
+fn apply_setting_value(
+    settings: &mut HelperSettings,
+    key: &str,
+    value: &Value,
+    object: &serde_json::Map<String, Value>,
+) -> anyhow::Result<bool> {
+    match key {
+        "markdownExportEnabled" => settings.markdown_export_enabled = bool_setting(key, value)?,
+        "sessionMoveEnabled" => settings.session_move_enabled = bool_setting(key, value)?,
+        "autoRenameMenuEnabled" => settings.auto_rename_menu_enabled = bool_setting(key, value)?,
+        "markdownFriendlyFilenameEnabled" => {
+            settings.markdown_friendly_filename_enabled = bool_setting(key, value)?
+        }
+        "autoNamingMinChars" => settings.auto_naming_min_chars = char_count_setting(key, value)?,
+        "autoNamingMaxChars" => settings.auto_naming_max_chars = char_count_setting(key, value)?,
+        "autoNamingMinWords" | "autoNamingMaxWords" => {
+            apply_auto_naming_alias(settings, key, value, object)?
+        }
+        "portForwardingEnabled" => settings.port_forwarding_enabled = bool_setting(key, value)?,
+        "portAutoForwardWeb" => settings.port_auto_forward_web = bool_setting(key, value)?,
+        "portSameLocalPort" => settings.port_same_local_port = bool_setting(key, value)?,
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn apply_auto_naming_alias(
+    settings: &mut HelperSettings,
+    key: &str,
+    value: &Value,
+    object: &serde_json::Map<String, Value>,
+) -> anyhow::Result<()> {
+    let canonical_key = if key == "autoNamingMinWords" {
+        "autoNamingMinChars"
+    } else {
+        "autoNamingMaxChars"
+    };
+    if object.contains_key(canonical_key) {
+        return Ok(());
+    }
+    let count = char_count_setting(canonical_key, value)?;
+    if canonical_key == "autoNamingMinChars" {
+        settings.auto_naming_min_chars = count;
+    } else {
+        settings.auto_naming_max_chars = count;
+    }
+    Ok(())
 }
 
 fn bool_setting(key: &str, value: &Value) -> anyhow::Result<bool> {
@@ -172,7 +175,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_settings_disable_session_tools() {
+    fn default_settings_enable_chat_title_regeneration() {
         let settings = HelperSettings::default();
 
         assert!(!settings.markdown_export_enabled);
@@ -180,7 +183,7 @@ mod tests {
         assert!(!settings.port_forwarding_enabled);
         assert!(settings.port_auto_forward_web);
         assert!(settings.port_same_local_port);
-        assert!(!settings.auto_rename_menu_enabled);
+        assert!(settings.auto_rename_menu_enabled);
         assert!(settings.markdown_friendly_filename_enabled);
         assert_eq!(settings.auto_naming_min_chars, 4);
         assert_eq!(settings.auto_naming_max_chars, 10);

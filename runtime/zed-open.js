@@ -3,7 +3,7 @@
 
   const helperZedAttribute = "data-codex-helper-zed-menu-item";
   const helperUiSelector =
-    "[data-codex-helper-settings-entry], [data-codex-helper-zed-menu-item], [data-codex-helper-settings-page]";
+    "[data-codex-helper-native-settings-entry], [data-codex-helper-zed-menu-item], [data-codex-helper-native-settings-page]";
   const sidebarThreadSelector = "[data-app-action-sidebar-thread-id]";
   let observerInstalled = false;
   let zedRemoteContextCache = { scope: null, at: 0, value: null };
