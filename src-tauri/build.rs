@@ -1,7 +1,8 @@
 use std::env;
 use std::fs;
+use std::fs::File;
+use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn main() {
     assert_app_icon();
@@ -120,13 +121,11 @@ fn assert_app_icon() {
 /// Edit `tray.png` (any size, black + transparent). Cargo embeds the generated
 /// 44×44 asset via `include_image!` so icon changes rebuild reliably.
 fn prepare_tray_icon() {
-    const MENU_BAR_PX: &str = "44";
+    const MENU_BAR_PX: u32 = 44;
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let icons_dir = manifest_dir.join("icons");
     let tray_source = icons_dir.join("tray.png");
-    let tray_flat = icons_dir.join("tray-flat.png");
-    let tray_scaled = icons_dir.join("tray-menu-scaled.png");
     let tray_menu = icons_dir.join("tray-menu.png");
 
     if !tray_source.is_file() {
@@ -142,74 +141,131 @@ fn prepare_tray_icon() {
 
     println!("cargo:rerun-if-changed={}", tray_source.display());
 
-    // Interlaced PNG (Adam7) breaks Tauri tray embedding; flatten before resize.
-    deinterlace_png(&tray_source, &tray_flat);
-
-    let fit = Command::new("sips")
-        .arg("-Z")
-        .arg(MENU_BAR_PX)
-        .arg(&tray_flat)
-        .arg("--out")
-        .arg(&tray_scaled)
-        .status()
-        .unwrap_or_else(|error| panic!("failed to run sips for tray icon fit: {error}"));
-    if !fit.success() {
-        panic!(
-            "failed to fit tray icon {} within {MENU_BAR_PX}px",
-            tray_flat.display()
-        );
-    }
-
-    let pad = Command::new("sips")
-        .arg("--padToHeightWidth")
-        .arg(MENU_BAR_PX)
-        .arg(MENU_BAR_PX)
-        .arg(&tray_scaled)
-        .arg("--out")
-        .arg(&tray_menu)
-        .status()
-        .unwrap_or_else(|error| panic!("failed to run sips for tray icon pad: {error}"));
-    let _ = fs::remove_file(&tray_flat);
-    let _ = fs::remove_file(&tray_scaled);
-    if !pad.success() {
-        panic!(
-            "failed to pad tray icon {} to {MENU_BAR_PX}x{MENU_BAR_PX}",
-            tray_scaled.display()
-        );
-    }
+    let source = read_rgba_png(&tray_source);
+    let menu = fit_and_pad_rgba(&source, MENU_BAR_PX);
+    write_rgba_png(&tray_menu, &menu);
 
     println!("cargo:rerun-if-changed={}", tray_menu.display());
 }
 
-fn deinterlace_png(source: &Path, dest: &Path) {
-    let tiff = dest.with_extension("tif");
-    let to_tiff = Command::new("sips")
-        .arg("-s")
-        .arg("format")
-        .arg("tiff")
-        .arg(source)
-        .arg("--out")
-        .arg(&tiff)
-        .status()
-        .unwrap_or_else(|error| panic!("failed to run sips for tray deinterlace: {error}"));
-    if !to_tiff.success() {
+struct RgbaImage {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+
+fn read_rgba_png(path: &Path) -> RgbaImage {
+    let file = File::open(path)
+        .unwrap_or_else(|error| panic!("failed to open {}: {error}", path.display()));
+    let mut decoder = png::Decoder::new(BufReader::new(file));
+    decoder.set_transformations(
+        png::Transformations::normalize_to_color8() | png::Transformations::ALPHA,
+    );
+    let mut reader = decoder
+        .read_info()
+        .unwrap_or_else(|error| panic!("failed to read PNG metadata {}: {error}", path.display()));
+    let mut buffer = vec![0; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut buffer)
+        .unwrap_or_else(|error| panic!("failed to decode PNG {}: {error}", path.display()));
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
         panic!(
-            "failed to deinterlace tray icon {} via TIFF",
-            source.display()
+            "tray icon {} must decode to 8-bit RGBA, got {:?} {:?}",
+            path.display(),
+            info.color_type,
+            info.bit_depth
         );
     }
+    buffer.truncate(info.buffer_size());
+    RgbaImage {
+        width: info.width,
+        height: info.height,
+        pixels: buffer,
+    }
+}
 
-    let to_png = Command::new("sips")
-        .arg("-s")
-        .arg("format")
-        .arg("png")
-        .arg(&tiff)
-        .arg("--out")
-        .arg(dest)
-        .status()
-        .unwrap_or_else(|error| panic!("failed to run sips for tray PNG export: {error}"));
-    let _ = fs::remove_file(&tiff);
-    if !to_png.success() {
-        panic!("failed to write deinterlaced tray icon {}", dest.display());
+fn write_rgba_png(path: &Path, image: &RgbaImage) {
+    let file = File::create(path)
+        .unwrap_or_else(|error| panic!("failed to create {}: {error}", path.display()));
+    let mut encoder = png::Encoder::new(BufWriter::new(file), image.width, image.height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder
+        .write_header()
+        .unwrap_or_else(|error| panic!("failed to write PNG header {}: {error}", path.display()));
+    writer
+        .write_image_data(&image.pixels)
+        .unwrap_or_else(|error| panic!("failed to write PNG data {}: {error}", path.display()));
+}
+
+fn fit_and_pad_rgba(source: &RgbaImage, canvas_size: u32) -> RgbaImage {
+    let scale =
+        (canvas_size as f64 / source.width as f64).min(canvas_size as f64 / source.height as f64);
+    let scaled_width = ((source.width as f64 * scale).round() as u32).clamp(1, canvas_size);
+    let scaled_height = ((source.height as f64 * scale).round() as u32).clamp(1, canvas_size);
+    let offset_x = (canvas_size - scaled_width) / 2;
+    let offset_y = (canvas_size - scaled_height) / 2;
+    let mut pixels = vec![0; (canvas_size * canvas_size * 4) as usize];
+
+    for y in 0..scaled_height {
+        for x in 0..scaled_width {
+            let source_x = (x as f64 + 0.5) / scale - 0.5;
+            let source_y = (y as f64 + 0.5) / scale - 0.5;
+            let pixel = sample_rgba(source, source_x, source_y);
+            let dest = (((y + offset_y) * canvas_size + x + offset_x) * 4) as usize;
+            pixels[dest..dest + 4].copy_from_slice(&pixel);
+        }
+    }
+
+    RgbaImage {
+        width: canvas_size,
+        height: canvas_size,
+        pixels,
+    }
+}
+
+fn sample_rgba(source: &RgbaImage, x: f64, y: f64) -> [u8; 4] {
+    let x = x.clamp(0.0, (source.width - 1) as f64);
+    let y = y.clamp(0.0, (source.height - 1) as f64);
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(source.width - 1);
+    let y1 = (y0 + 1).min(source.height - 1);
+    let tx = x - x0 as f64;
+    let ty = y - y0 as f64;
+
+    let top = mix_pixel(source.pixel(x0, y0), source.pixel(x1, y0), tx);
+    let bottom = mix_pixel(source.pixel(x0, y1), source.pixel(x1, y1), tx);
+    mix_pixel(top, bottom, ty)
+}
+
+fn mix_pixel(a: [u8; 4], b: [u8; 4], t: f64) -> [u8; 4] {
+    let alpha_a = a[3] as f64 / 255.0;
+    let alpha_b = b[3] as f64 / 255.0;
+    let alpha = alpha_a + (alpha_b - alpha_a) * t;
+    if alpha <= f64::EPSILON {
+        return [0, 0, 0, 0];
+    }
+
+    let mut out = [0; 4];
+    for channel in 0..3 {
+        let premultiplied_a = a[channel] as f64 * alpha_a;
+        let premultiplied_b = b[channel] as f64 * alpha_b;
+        let premultiplied = premultiplied_a + (premultiplied_b - premultiplied_a) * t;
+        out[channel] = (premultiplied / alpha).round().clamp(0.0, 255.0) as u8;
+    }
+    out[3] = (alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+    out
+}
+
+impl RgbaImage {
+    fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
+        let index = ((y * self.width + x) * 4) as usize;
+        [
+            self.pixels[index],
+            self.pixels[index + 1],
+            self.pixels[index + 2],
+            self.pixels[index + 3],
+        ]
     }
 }

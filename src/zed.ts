@@ -24,6 +24,19 @@ class ZedRemoteError extends Error {
 	}
 }
 
+type LaunchCommand = {
+	program: string;
+	args: string[];
+};
+
+function spawnDetached(command: LaunchCommand): void {
+	const child = spawn(command.program, command.args, {
+		detached: true,
+		stdio: "ignore",
+	});
+	child.unref();
+}
+
 function stringValue(value: unknown): string {
 	if (typeof value === "string") return value.trim();
 	if (typeof value === "number") return String(value);
@@ -338,19 +351,14 @@ function fallbackOpenRequestFromGlobalState(
 }
 
 function launchZedUrl(url: string): void {
-	const appPath = findZedAppPath();
 	const cliPath = findZedCliPath();
-	if (process.platform === "darwin" && appPath) {
-		const child = spawn("open", ["-a", appPath, url], {
-			detached: true,
-			stdio: "ignore",
-		});
-		child.unref();
+	if (cliPath) {
+		spawnDetached({ program: cliPath, args: [url] });
 		return;
 	}
-	if (cliPath) {
-		const child = spawn(cliPath, [url], { detached: true, stdio: "ignore" });
-		child.unref();
+	const appPath = findZedAppPath();
+	if (process.platform === "darwin" && appPath) {
+		spawnDetached({ program: "open", args: ["-a", appPath, url] });
 		return;
 	}
 	throw new ZedRemoteError("Zed is not installed or not available on PATH");

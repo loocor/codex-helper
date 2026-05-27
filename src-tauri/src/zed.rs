@@ -6,13 +6,14 @@ use std::process::Command;
 
 use serde::Serialize;
 use serde_json::{json, Value};
+use tauri_plugin_opener::open_url;
 
 #[derive(Debug)]
 pub enum ZedRemoteError {
     Validation(&'static str),
     StateRead(std::io::Error),
     StateParse(serde_json::Error),
-    Launch(std::io::Error),
+    Launch(String),
 }
 
 impl std::fmt::Display for ZedRemoteError {
@@ -21,7 +22,7 @@ impl std::fmt::Display for ZedRemoteError {
             Self::Validation(message) => f.write_str(message),
             Self::StateRead(_) => f.write_str("Cannot read Codex remote connection state"),
             Self::StateParse(_) => f.write_str("Cannot parse Codex remote connection state"),
-            Self::Launch(error) => write!(f, "Failed to launch Zed: {error}"),
+            Self::Launch(message) => write!(f, "Failed to launch Zed: {message}"),
         }
     }
 }
@@ -31,7 +32,7 @@ impl std::error::Error for ZedRemoteError {
         match self {
             Self::StateRead(error) => Some(error),
             Self::StateParse(error) => Some(error),
-            Self::Launch(error) => Some(error),
+            Self::Launch(_) => None,
             Self::Validation(_) => None,
         }
     }
@@ -295,25 +296,22 @@ fn percent_encode_segment(segment: &str) -> String {
 }
 
 fn launch_zed_url(url: &str) -> Result<(), ZedRemoteError> {
-    let app_path = find_zed_app_path();
     let cli_path = find_zed_cli_path();
-    if cfg!(target_os = "macos") {
-        if let Some(app_path) = app_path {
-            Command::new("open")
-                .arg("-a")
-                .arg(app_path)
-                .arg(url)
-                .spawn()
-                .map_err(ZedRemoteError::Launch)?;
-            return Ok(());
-        }
-    }
     if !cli_path.is_empty() {
         Command::new(cli_path)
             .arg(url)
             .spawn()
-            .map_err(ZedRemoteError::Launch)?;
+            .map_err(|error| ZedRemoteError::Launch(error.to_string()))?;
         return Ok(());
+    }
+    let app_path = find_zed_app_path();
+    if cfg!(target_os = "macos") {
+        if let Some(app_path) = app_path {
+            let app = app_path.to_string_lossy().into_owned();
+            open_url(url, Some(app.as_str()))
+                .map_err(|error| ZedRemoteError::Launch(error.to_string()))?;
+            return Ok(());
+        }
     }
     Err(ZedRemoteError::Validation(
         "Zed is not installed or not available on PATH",
