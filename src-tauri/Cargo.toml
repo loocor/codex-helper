@@ -16,6 +16,7 @@ name = "codex-helper-bridge"
 path = "src/bridge_cli.rs"
 
 [build-dependencies]
+png = "0.17"
 serde_json = "1"
 tauri-build = { version = "2.0.0", features = [] }
 
