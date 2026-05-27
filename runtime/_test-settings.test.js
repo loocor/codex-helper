@@ -8,6 +8,7 @@ const nativeSettingsSource = readFileSync(
   join(import.meta.dir, "native-settings.js"),
   "utf8",
 );
+const zedOpenSource = readFileSync(join(import.meta.dir, "zed-open.js"), "utf8");
 
 function extractFunction(name) {
   const marker = `function ${name}(`;
@@ -186,18 +187,20 @@ test("settings page exposes port forwarding policy switches", () => {
   const descKeyBinding = templatePlaceholder("descKey");
   const toggleKeyBinding = templatePlaceholder("toggleKey");
   expect(source).toContain("Enable port forwarding");
-  expect(source).toContain('${helperSettingsSectionAttribute}="port-forwarding"');
+  expect(source).toContain('${helperSettingsSectionAttribute}="${sectionId}"');
+  expect(source).toContain('nativeSettingsGroupSection("Port forwarding"');
+  expect(source).toContain('"port-forwarding")');
   expect(source).toContain("function focusHelperSettingsSection(");
   expect(source).toContain(`data-codex-helper-setting-desc="${descKeyBinding}"`);
   expect(source).toContain(`${helperToggleBinding}="${toggleKeyBinding}"`);
   expect(source).toContain(
-    'switchRow("Enable port forwarding", "Detect and forward ports from agent sessions.", "portForwardingEnabled"',
+    'nativeSettingsSwitchRow("Enable port forwarding", "Detect and forward ports from agent sessions.", "portForwardingEnabled"',
   );
   expect(source).toContain(
-    'switchRow("Auto-forward detected web ports", "Open forwarded web URLs when a common dev port is detected.", "portAutoForwardWeb"',
+    'nativeSettingsSwitchRow("Auto-forward detected web ports", "Open forwarded web URLs when a common dev port is detected.", "portAutoForwardWeb"',
   );
   expect(source).toContain(
-    'switchRow("Use the same local port by default", "Bind forwarded ports to the same local port number when possible.", "portSameLocalPort"',
+    'nativeSettingsSwitchRow("Use the same local port by default", "Bind forwarded ports to the same local port number when possible.", "portSameLocalPort"',
   );
 });
 
@@ -217,24 +220,23 @@ test("disabling port forwarding stops managed tunnels", () => {
 });
 
 test("settings page groups options by feature area", () => {
-  expect(source).toContain('codex-helper-settings-section-title text-sm font-medium text-token-text-primary">Basic</div>');
-  expect(source).toContain('codex-helper-settings-section-title text-sm font-medium text-token-text-primary">Auto naming</div>');
-  expect(source).toContain('codex-helper-settings-section-title text-sm font-medium text-token-text-primary">Sessions</div>');
-  expect(source).toContain('codex-helper-settings-section-title text-sm font-medium text-token-text-primary">Port forwarding</div>');
-  expect(source).toContain('sectionHeading("Loaded scripts"');
-  expect(source).toContain('sectionHeading("Log files"');
+  expect(source).toContain('nativeSettingsGroupSection("Integrations"');
+  expect(source).toContain('nativeSettingsGroupSection("Session actions"');
+  expect(source).toContain('nativeSettingsGroupSection("Chat titles"');
+  expect(source).toContain('nativeSettingsGroupSection("Port forwarding"');
+  expect(source).not.toContain('>Basic</div>');
+  expect(source).not.toContain('sectionHeading("Loaded scripts"');
+  expect(source).not.toContain('sectionHeading("Log files"');
   expect(source).toContain("https://github.com/loocor/codex-helper");
-  expect(source).toContain('externalLinkRow("Project repository"');
-  expect(source).toContain('actionRow("Open in Zed"');
-  expect(source).toContain("sectionHeading");
+  expect(source).toContain("function nativeSettingsAboutPageContent(");
+  expect(source).toContain('nativeSettingsActionRow("Open in Zed"');
   expect(source).toContain("open-scripts-dir");
   expect(source).toContain("open-logs-dir");
-  expect(source).toContain("codex-helper-settings-section-link");
   expect(source).not.toContain("Helper directory");
   expect(source).toContain("codex-helper-settings-scroll");
-  expect(source).toContain('forkRemoteProject: "Fork into Remote Project..."');
-  expect(source).toContain('forkLocalProject: "Fork into Local Project..."');
-  expect(source).toContain('forkAnotherProject: "Fork into Another Project..."');
+  expect(source).toContain('forkRemoteProject: "Fork into remote project..."');
+  expect(source).toContain('forkLocalProject: "Fork into local project..."');
+  expect(source).toContain('forkAnotherProject: "Fork into another project..."');
   expect(source).toContain('const order = ["autoRename", "export", "fork"]');
   expect(source).toContain('autoRename: "Regenerate chat title"');
   expect(source).toContain('bridge("/auto-rename-chat"');
@@ -490,9 +492,22 @@ test("native settings opener can use an existing Settings menu item or trigger c
 
 test("standalone helper settings dialog is not bundled", () => {
   expect(source).not.toContain("function showHelperSettingsDialog(");
+  expect(source).not.toContain("function renderHelperPage(");
+  expect(source).not.toContain("function clearHelperSettingsPage(");
+  expect(source).not.toContain("function stashHostContent(");
+  expect(source).not.toContain("function restoreStashedContent(");
+  expect(source).not.toContain("helperPageAttribute");
+  expect(source).not.toContain("helperEntryAttribute");
+  expect(source).not.toContain("helperContentHostAttribute");
+  expect(source).not.toContain("helperPageRoot");
+  expect(source).not.toContain("helperContentHost");
+  expect(source).not.toContain("helperContentStash");
   expect(source).not.toContain("helperDialogRoot = renderHelperPage(body,");
   expect(source).not.toContain("pageAttribute: helperDialogPageAttribute");
   expect(source).not.toContain("helperDialogRoot = renderNativeHelperSettingsPage");
+  expect(source).toContain("helperNativeSettingsPageAttribute");
+  expect(zedOpenSource).not.toContain("data-codex-helper-settings-page");
+  expect(zedOpenSource).toContain("data-codex-helper-native-settings-page");
 });
 
 test("startup does not eagerly mount inline General settings page", () => {

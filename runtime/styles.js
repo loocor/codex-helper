@@ -8,20 +8,12 @@ function installHelperStyles() {
     document.head.appendChild(style);
   }
   style.textContent = `
-      [${helperEntryAttribute}][data-active="true"],
       [${helperNativeSettingsEntryAttribute}][data-active="true"] {
         background: color-mix(in srgb, currentColor 10%, transparent) !important;
       }
       [data-codex-helper-muted-selected="true"] {
         background: transparent !important;
         box-shadow: none !important;
-      }
-      [${helperContentHostAttribute}][data-codex-helper-active="true"] > :not([${helperPageAttribute}]) {
-        display: none !important;
-      }
-      [${helperContentHostAttribute}][data-codex-helper-active="true"] {
-        min-height: 0 !important;
-        overflow: auto !important;
       }
       [${helperNativeSettingsContentHostAttribute}][data-codex-helper-active="true"] > :not([${helperNativeSettingsPageAttribute}]) {
         display: none !important;
@@ -287,130 +279,6 @@ function installHelperStyles() {
       [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-about-name {
         font-size: 15px;
         font-weight: 600;
-      }
-      [${helperPageAttribute}] {
-        display: flex;
-        flex-direction: column;
-        border-top: 0.5px solid var(--color-token-border, rgba(26, 28, 31, 0.12));
-        padding-top: var(--padding-panel, 20px);
-        color: inherit;
-      }
-      [${helperPageAttribute}] .codex-helper-panel {
-        background-color: var(--color-background-panel, var(--color-token-bg-fog));
-      }
-      [${helperPageAttribute}] .codex-helper-action {
-        border-color: transparent;
-      }
-      [${helperPageAttribute}] a.codex-helper-external-link {
-        text-decoration: none;
-      }
-      [${helperPageAttribute}] .codex-helper-switch {
-        position: relative;
-      }
-      [${helperPageAttribute}] .codex-helper-switch input {
-        position: absolute;
-        width: 1px;
-        height: 1px;
-        opacity: 0;
-        pointer-events: none;
-      }
-      [${helperPageAttribute}] .codex-helper-switch input:focus-visible + span {
-        outline: 2px solid var(--color-token-focus-border, rgb(48, 145, 255));
-        outline-offset: 2px;
-      }
-      [${helperPageAttribute}] .codex-helper-switch input:checked + span {
-        background-color: var(--color-token-charts-blue, rgb(48, 145, 255));
-      }
-      [${helperPageAttribute}] .codex-helper-switch input:checked + span > span {
-        transform: translateX(14px);
-      }
-      [${helperPageAttribute}] .codex-helper-number-input {
-        width: 64px;
-        border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
-        border-radius: 6px;
-        background: transparent;
-        color: inherit;
-        padding: 3px 6px;
-        font: inherit;
-        font-size: 13px;
-      }
-      [${helperPageAttribute}] pre[data-codex-helper-log] {
-        margin: 0;
-        padding: 12px;
-        white-space: pre-wrap;
-        word-break: break-word;
-        font-size: 12px;
-        line-height: 1.45;
-      }
-      [${helperPageAttribute}] .codex-helper-settings-scroll {
-        max-height: 160px;
-        overflow: auto;
-        min-height: 0;
-      }
-      [${helperPageAttribute}] .codex-helper-settings-compact-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        min-width: 0;
-        padding: 8px 12px;
-        border-top: 0.5px solid color-mix(in srgb, currentColor 10%, transparent);
-      }
-      [${helperPageAttribute}] .codex-helper-settings-compact-row:first-child {
-        border-top: 0;
-      }
-      [${helperPageAttribute}] .codex-helper-settings-compact-text {
-        min-width: 0;
-        flex: 1 1 auto;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        font-size: 13px;
-        color: inherit;
-      }
-      [${helperPageAttribute}] .codex-helper-settings-compact-meta {
-        flex-shrink: 0;
-        font-size: 12px;
-        color: color-mix(in srgb, currentColor 55%, transparent);
-      }
-      [${helperPageAttribute}] .codex-helper-settings-scroll-empty {
-        padding: 12px;
-        font-size: 13px;
-        color: color-mix(in srgb, currentColor 55%, transparent);
-      }
-      [${helperPageAttribute}] .codex-helper-settings-section-title {
-        padding: 0;
-      }
-      [${helperPageAttribute}] .codex-helper-settings-section-heading {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-        padding: 0 2px;
-      }
-      [${helperPageAttribute}] .codex-helper-settings-section-link {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 28px;
-        height: 28px;
-        border: 0;
-        border-radius: 6px;
-        background: transparent;
-        color: color-mix(in srgb, currentColor 70%, transparent);
-        cursor: pointer;
-      }
-      [${helperPageAttribute}] .codex-helper-settings-section-link:hover {
-        background: color-mix(in srgb, currentColor 8%, transparent);
-        color: inherit;
-      }
-      [${helperPageAttribute}] .codex-helper-settings-section-link:focus-visible {
-        outline: 2px solid var(--color-token-focus-border, rgb(48, 145, 255));
-        outline-offset: 2px;
-      }
-      [${helperPageAttribute}] .codex-helper-settings-section-link svg {
-        width: 14px;
-        height: 14px;
       }
       [data-codex-helper-port-row][data-codex-helper-port-row-menu-open="true"]
         [class*="summary-panel-row-accessory"] {

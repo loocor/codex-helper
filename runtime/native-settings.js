@@ -396,6 +396,21 @@ function nativeSettingsPanel(rows, extraClass = "") {
   return `<div class="${classes}" style="background-color: var(--color-background-panel, var(--color-token-bg-fog));">${rows}</div>`;
 }
 
+function nativeSettingsGroupTitle(title) {
+  return `<div class="codex-helper-settings-section-title text-sm font-medium text-token-text-primary">${title}</div>`;
+}
+
+function nativeSettingsGroupSection(title, rows, sectionId = "") {
+  const sectionAttr = sectionId
+    ? ` ${helperSettingsSectionAttribute}="${sectionId}"`
+    : "";
+  return `
+    <section class="codex-helper-settings-section flex flex-col gap-1.5"${sectionAttr}>
+      ${nativeSettingsGroupTitle(title)}
+      ${nativeSettingsPanel(rows)}
+    </section>`;
+}
+
 function nativeSettingsIconSvg(name) {
   if (name === "refresh") {
     return nativeSettingsStandardIconSvg("refresh-cw");
@@ -531,26 +546,26 @@ function nativeSettingsPageContent(pageId) {
     return nativeSettingsAboutPageContent();
   }
   return `
-    ${nativeSettingsPanel(`
+    ${nativeSettingsGroupSection("Integrations", `
       ${nativeSettingsActionRow("Backend", "Loading", "refresh", "Refresh", "data-codex-helper-backend")}
       ${nativeSettingsActionRow("Open in Zed", "Loading", "refresh", "Refresh", "data-codex-helper-zed-status")}
       ${nativeSettingsActionRow("DevTools", "Open Chrome DevTools for this Codex window.", "open-devtools", "Open")}
     `)}
-    ${nativeSettingsPanel(`
+    ${nativeSettingsGroupSection("Session actions", `
       ${nativeSettingsSwitchRow("Markdown export", "Export conversations as Markdown from the session menu.", "markdownExportEnabled", "markdownExportEnabled", "Markdown export")}
       ${nativeSettingsSwitchRow("Fork sessions", "Fork sessions into local, remote, or another project from the sidebar context menu.", "sessionMoveEnabled", "sessionMoveEnabled", "Fork sessions")}
     `)}
-    ${nativeSettingsPanel(`
+    ${nativeSettingsGroupSection("Chat titles", `
       ${nativeSettingsSwitchRow("Regenerate chat title", "Show Regenerate chat title in the session context menu.", "autoRenameMenuEnabled", "autoRenameMenuEnabled", "Regenerate chat title")}
       ${nativeSettingsSwitchRow("Friendly Markdown filenames", "Use Codex auto naming for exported Markdown filenames.", "markdownFriendlyFilenameEnabled", "markdownFriendlyFilenameEnabled", "Friendly Markdown filenames")}
       ${nativeSettingsNumberRow("Minimum characters", "Smallest expected auto name length.", "autoNamingMinChars", "Minimum auto naming characters")}
       ${nativeSettingsNumberRow("Maximum characters", "Largest expected auto name length; 10 works well for Chinese names.", "autoNamingMaxChars", "Maximum auto naming characters")}
     `)}
-    ${nativeSettingsPanel(`
+    ${nativeSettingsGroupSection("Port forwarding", `
       ${nativeSettingsSwitchRow("Enable port forwarding", "Detect and forward ports from agent sessions.", "portForwardingEnabled", "portForwardingEnabled", "Enable port forwarding")}
       ${nativeSettingsSwitchRow("Auto-forward detected web ports", "Open forwarded web URLs when a common dev port is detected.", "portAutoForwardWeb", "portAutoForwardWeb", "Auto-forward detected web ports")}
       ${nativeSettingsSwitchRow("Use the same local port by default", "Bind forwarded ports to the same local port number when possible.", "portSameLocalPort", "portSameLocalPort", "Use the same local port by default")}
-    `)}
+    `, "port-forwarding")}
   `;
 }
 
