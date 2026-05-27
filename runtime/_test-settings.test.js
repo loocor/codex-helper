@@ -515,9 +515,14 @@ test("startup does not eagerly mount inline General settings page", () => {
   expect(source).not.toContain("showHelperSettingsPage({ refresh: false })");
 });
 
-test("session context menu extends Codex native electronBridge menu", () => {
-  expect(source).toContain("showExtendedSessionContextMenu");
-  expect(source).toContain("buildCodexSessionNativeMenuItems");
+test("session context menu hooks Codex native menu model", () => {
+  expect(source).toContain("installSessionContextMenuBridge");
+  expect(source).toContain("sessionContextMenuMapRestore");
+  expect(source).toContain("Array.prototype.map");
+  expect(source).toContain("appendHelperSessionMenuItems");
+  expect(source).toContain("buildHelperSessionMenuModelItems");
+  expect(source).toContain("prepareSessionContextMenu");
+  expect(source).toContain("replaySessionContextMenu");
   expect(source).toContain("openProjectForkMenu");
   expect(source).toContain("navigateAfterFork(result, target)");
   expect(source).toContain("Regenerate chat title");
@@ -527,19 +532,22 @@ test("session context menu extends Codex native electronBridge menu", () => {
   expect(source).toContain("window.location.assign(path)");
   expect(source).toContain("nativeProjectTargets");
   expect(source).toContain("helperSessionMenuIcon");
-  expect(source).toContain("Fork into Another Project...");
+  expect(source).toContain("Fork into another project...");
   expect(source).not.toContain("Move Session");
-  expect(source).toContain("window.electronBridge");
   expect(source).toContain("open-thread-new-window");
   expect(source).toContain("loadRemoteProjectMetadataOrEmpty");
   expect(source).toContain('logDiagnostic("remote_project_metadata_unavailable"');
   expect(source).toContain("codex-helper-session-");
-  expect(source).toContain("stopImmediatePropagation");
-  expect(source).not.toContain('id: "mark-thread-unread"');
-  expect(source).not.toContain('id: "fork-into-local"');
-  expect(source).not.toContain('id: "fork-into-worktree"');
+  expect(source).toContain("trackSessionContextMenu(row)");
+  expect(source).not.toContain("showExtendedSessionContextMenu");
+  expect(source).not.toContain("buildCodexSessionNativeMenuItems");
+  expect(source).not.toContain("forwardSessionMenuAction");
+  expect(source).toContain('id === "mark-thread-unread"');
+  expect(source).toContain('id === "fork-into-local"');
+  expect(source).toContain('id === "fork-into-worktree"');
   expect(source).not.toContain("installSessionContextMenuItems");
   expect(source).not.toContain("installElectronContextMenuHook");
+  expect(source).not.toContain("showContextMenuWithHelperItems");
   expect(source).not.toContain("promptMoveTargetPath");
 });
 

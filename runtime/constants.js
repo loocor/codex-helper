@@ -63,3 +63,5 @@ let featureSettings = {
   portSameLocalPort: true,
 };
 let featureSettingsLoaded = false;
+let cachedRemoteProjectMetadata = [];
+let cachedRemoteProjectMetadataLoaded = false;

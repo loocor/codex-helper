@@ -51,10 +51,12 @@
   function trackSessionContextMenu(row) {
     const ref = sessionRefFromRow(row);
     if (!ref.session_id) return;
+    const openedAt = Date.now();
+    installSessionContextMenuBridge();
     pendingSessionMenuContext = {
       row,
       ref,
-      openedAt: Date.now(),
+      openedAt,
     };
     refreshFeatureSettings().catch((error) => {
       logDiagnostic("session_menu_settings_failed", {
@@ -62,24 +64,18 @@
       });
     });
     setTimeout(() => {
-      if (pendingSessionMenuContext?.ref?.session_id === ref.session_id) {
-        pendingSessionMenuContext = null;
+      if (
+        pendingSessionMenuContext?.ref?.session_id === ref.session_id &&
+        pendingSessionMenuContext?.openedAt === openedAt
+      ) {
+        clearPendingSessionMenuContext();
       }
-    }, 2500);
+    }, SESSION_CONTEXT_MENU_MAX_AGE_MS);
   }
 
-  function sessionConversationPath(row, ref) {
-    const href = rowHref(row);
-    if (href) {
-      try {
-        const pathname = new URL(href, window.location.href).pathname;
-        if (pathname && pathname !== "/") return pathname;
-      } catch (_) {
-        /* ignore malformed href */
-      }
-    }
-    const sessionId = ref.session_id.replace(/^local:/, "");
-    return sessionId ? `/local/${sessionId}` : "";
+  function clearPendingSessionMenuContext() {
+    pendingSessionMenuContext = null;
+    if (sessionContextMenuMapRestore) sessionContextMenuMapRestore();
   }
 
   function codexAppServerHostId(hostId) {
@@ -93,165 +89,155 @@
       .replace(/^remote:/, "");
   }
 
-  function sessionRowIsPinned(row) {
-    return row.getAttribute("data-app-action-sidebar-thread-pinned") === "true";
-  }
-
-  function buildCodexSessionNativeMenuItems(row, _ref) {
-    const items = [];
-    const pinned = sessionRowIsPinned(row);
-    items.push({
-      id: pinned ? "unpin-thread" : "pin-thread",
-      label: pinned ? "Unpin chat" : "Pin chat",
-      enabled: true,
-    });
-    items.push({
-      id: "rename-thread",
-      label: "Rename chat",
-      enabled: true,
-    });
-    items.push({
-      id: "archive-thread",
-      label: "Archive chat",
-      enabled: true,
-    });
-    items.push({ type: "separator" });
-    items.push({
-      id: "open-thread-folder",
-      label: "Open in Finder",
-      enabled: true,
-    });
-    items.push({
-      id: "copy-cwd",
-      label: "Copy working directory",
-      enabled: true,
-    });
-    items.push({
-      id: "copy-session-id",
-      label: "Copy session ID",
-      enabled: true,
-    });
-    items.push({
-      id: "copy-app-link",
-      label: "Copy deeplink",
-      enabled: true,
-    });
-    items.push({ type: "separator" });
-    items.push({
-      id: "open-thread-new-window",
-      label: "Open in new window",
-      enabled: true,
-    });
+  function buildHelperSessionMenuModelItems(actions, context, remoteProjects = []) {
+    if (actions.length === 0) return [];
+    const entries = sessionActionEntries(actions, context.row, remoteProjects);
+    if (entries.length === 0) return [];
+    const labels = sessionActionMenuLabels();
+    const items = [{ type: "separator" }];
+    for (const action of entries) {
+      const item = {
+        id: helperSessionActionId(action),
+        nativeLabel: labels[action] || action,
+        enabled: true,
+        onSelect: () => {
+          if (!context?.row?.isConnected || !context?.ref?.session_id) return;
+          handleSessionAction(action, context.row, context.ref).catch((error) => {
+            showHelperToast(error?.message || String(error));
+            logDiagnostic("session_menu_action_failed", {
+              action,
+              session_id: context.ref.session_id,
+              error: error?.message || String(error),
+            });
+          });
+        },
+      };
+      const icon = helperSessionMenuIcon(action);
+      if (icon) item.icon = icon;
+      items.push(item);
+    }
     return items;
   }
 
-  async function copyTextToClipboard(value) {
-    if (!value) throw new Error("Nothing to copy");
-    await navigator.clipboard.writeText(value);
-  }
-
-  function clickRowAction(row, labels) {
-    const candidates = Array.from(
-      row.querySelectorAll("button, [role='button'], a"),
-    ).filter((node) => {
-      if (!(node instanceof HTMLElement)) return false;
-      const rect = node.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) return false;
-      const label = textOf(node);
-      return labels.some((value) => label === value || label.includes(value));
-    });
-    return clickElement(candidates[0] instanceof HTMLElement ? candidates[0] : null);
-  }
-
-  async function forwardSessionMenuAction(id, row, ref) {
-    const path = sessionConversationPath(row, ref);
-    if (id === "copy-session-id") {
-      await copyTextToClipboard(ref.session_id);
-      showHelperToast("Copied session ID");
-      return;
-    }
-    if (id === "copy-app-link") {
-      const link = path
-        ? `${window.location.origin}${path}`
-        : ref.session_id;
-      await copyTextToClipboard(link);
-      showHelperToast("Copied deeplink");
-      return;
-    }
-    if (id === "copy-cwd") {
-      await copyTextToClipboard(sessionProjectContext(row).path);
-      showHelperToast("Copied working directory");
-      return;
-    }
-    if (id === "rename-thread") {
-      const title = row.querySelector("[data-thread-title]");
-      if (title instanceof HTMLElement) {
-        title.dispatchEvent(
-          new MouseEvent("dblclick", { bubbles: true, cancelable: true }),
-        );
+  function hasHelperSessionMenuItem(items) {
+    for (const item of items) {
+      if (item?.type !== "separator" && helperSessionActionFromId(item?.id)) {
+        return true;
       }
-      return;
     }
-    if (id === "archive-thread") {
+    return false;
+  }
+
+  function isCodexSessionMenuItemId(id) {
+    return (
+      id === "toggle-thread-pin" ||
+      id === "pin-thread" ||
+      id === "unpin-thread" ||
+      id === "rename-thread" ||
+      id === "archive-thread" ||
+      id === "mark-thread-unread" ||
+      id === "copy-session-id" ||
+      id === "copy-deeplink" ||
+      id === "copy-app-link" ||
+      id === "copy-conversation-path" ||
+      id === "copy-working-directory" ||
+      id === "copy-cwd" ||
+      id === "copyConversationMarkdown" ||
+      id === "openSideChat" ||
+      id === "open-in-new-window" ||
+      id === "open-thread-new-window" ||
+      id === "open-thread-folder" ||
+      id === "fork-into-local" ||
+      id === "fork-into-same-worktree" ||
+      id === "fork-into-worktree"
+    );
+  }
+
+  function looksLikeCodexSessionMenuItems(items) {
+    let sessionActionCount = 0;
+    for (const item of items) {
+      if (isCodexSessionMenuItemId(item?.id)) sessionActionCount += 1;
+    }
+    return sessionActionCount >= 2;
+  }
+
+  function hasNativeSessionMenuLabels(items) {
+    let nativeLabelCount = 0;
+    for (const item of items) {
       if (
-        clickRowAction(row, ["Archive", "Archive chat"]) ||
-        clickRowAction(row, ["Delete", "Remove"])
+        isCodexSessionMenuItemId(item?.id) &&
+        typeof item?.nativeLabel === "string"
       ) {
-        return;
+        nativeLabelCount += 1;
       }
-      throw new Error("Archive control not found for this session");
     }
-    if (id === "pin-thread" || id === "unpin-thread") {
-      if (clickRowAction(row, ["Pin", "Unpin"])) return;
-      throw new Error("Pin control not found for this session");
-    }
-    if (id === "open-thread-new-window" && path) {
-      const bridge = window.electronBridge;
-      if (typeof bridge?.sendMessageFromView !== "function") {
-        throw new Error("Open in new window is unavailable");
-      }
-      await bridge.sendMessageFromView({ type: "open-in-new-window", path });
-      return;
-    }
-    if (id === "open-thread-folder" && path) {
-      const bridge = window.electronBridge;
-      if (typeof bridge?.sendMessageFromView !== "function") {
-        throw new Error("Open in Finder is unavailable");
-      }
-      await bridge.sendMessageFromView({
-        type: "open-in-main-window",
-        path,
-      });
-      return;
-    }
-    logDiagnostic("session_menu_forward_unhandled", { id, session_id: ref.session_id });
-    showHelperToast(`Action "${id}" is not available from Helper yet`);
+    return nativeLabelCount >= 2;
   }
 
-  async function showExtendedSessionContextMenu(row, ref) {
-    await refreshFeatureSettings();
+  function appendHelperSessionMenuItems(items) {
+    const context = pendingSessionMenuContext;
+    if (
+      !Array.isArray(items) ||
+      !context?.row?.isConnected ||
+      !context?.ref?.session_id ||
+      Date.now() - context.openedAt >= SESSION_CONTEXT_MENU_MAX_AGE_MS
+    ) {
+      clearPendingSessionMenuContext();
+      return;
+    }
+    const hasHelperItem = hasHelperSessionMenuItem(items);
+    if (hasHelperItem) {
+      clearPendingSessionMenuContext();
+      return;
+    }
+    if (
+      !looksLikeCodexSessionMenuItems(items) ||
+      !hasNativeSessionMenuLabels(items)
+    ) {
+      return;
+    }
     const actions = enabledSessionActions();
-    const bridge = window.electronBridge;
-    if (actions.length === 0 || typeof bridge?.showContextMenu !== "function") {
-      return;
-    }
-    const remoteProjects = actions.includes("fork")
-      ? await loadRemoteProjectMetadataOrEmpty()
+    const remoteProjects = cachedRemoteProjectMetadataLoaded
+      ? cachedRemoteProjectMetadata
       : [];
-    const items = [
-      ...buildCodexSessionNativeMenuItems(row, ref),
-      ...buildHelperSessionNativeMenuItems(actions, row, remoteProjects),
-    ];
-    const result = await bridge.showContextMenu(items);
-    pendingSessionMenuContext = null;
-    const helperAction = helperSessionActionFromId(result?.id);
-    if (helperAction) {
-      await handleSessionAction(helperAction, row, ref);
-      return;
-    }
-    if (result?.id) {
-      await forwardSessionMenuAction(result.id, row, ref);
-    }
+    const helperItems = buildHelperSessionMenuModelItems(
+      actions,
+      context,
+      remoteProjects,
+    );
+    if (helperItems.length > 0) items.push(...helperItems);
+    clearPendingSessionMenuContext();
+  }
+
+  function installSessionContextMenuBridge() {
+    if (sessionContextMenuMapRestore) return;
+    const originalArrayMap = Array.prototype.map;
+    const patchedArrayMap = function patchedArrayMap(callback, thisArg) {
+      try {
+        appendHelperSessionMenuItems(this);
+      } catch (error) {
+        clearPendingSessionMenuContext();
+        logDiagnostic("session_menu_patch_failed", {
+          error: error?.message || String(error),
+        });
+      }
+      return originalArrayMap.call(this, callback, thisArg);
+    };
+    Object.defineProperty(Array.prototype, "map", {
+      value: patchedArrayMap,
+      writable: true,
+      configurable: true,
+    });
+    sessionContextMenuMapRestore = () => {
+      if (Array.prototype.map === patchedArrayMap) {
+        Object.defineProperty(Array.prototype, "map", {
+          value: originalArrayMap,
+          writable: true,
+          configurable: true,
+        });
+      }
+      sessionContextMenuMapRestore = null;
+    };
   }
 
   function displayProjectName(path) {
@@ -295,13 +281,27 @@
 
   async function loadRemoteProjectMetadataOrEmpty() {
     try {
-      return await loadRemoteProjectMetadata();
+      const projects = await loadRemoteProjectMetadata();
+      cachedRemoteProjectMetadata = projects;
+      cachedRemoteProjectMetadataLoaded = true;
+      return projects;
     } catch (error) {
       logDiagnostic("remote_project_metadata_unavailable", {
         error: error?.message || String(error),
       });
+      cachedRemoteProjectMetadata = [];
+      cachedRemoteProjectMetadataLoaded = true;
       return [];
     }
+  }
+
+  function sessionContextMenuReady() {
+    return featureSettingsLoaded && cachedRemoteProjectMetadataLoaded;
+  }
+
+  async function prepareSessionContextMenu() {
+    await refreshFeatureSettings();
+    await loadRemoteProjectMetadataOrEmpty();
   }
 
   function remoteProjectMetadataById(remoteProjects) {
@@ -566,9 +566,9 @@
     return {
       autoRename: "Regenerate chat title",
       export: "Export Markdown",
-      forkRemoteProject: "Fork into Remote Project...",
-      forkLocalProject: "Fork into Local Project...",
-      forkAnotherProject: "Fork into Another Project...",
+      forkRemoteProject: "Fork into remote project...",
+      forkLocalProject: "Fork into local project...",
+      forkAnotherProject: "Fork into another project...",
     };
   }
 
@@ -600,25 +600,6 @@
     return id.slice(helperSessionActionPrefix.length) || null;
   }
 
-  function buildHelperSessionNativeMenuItems(actions, row, remoteProjects = []) {
-    if (actions.length === 0) return [];
-    const entries = sessionActionEntries(actions, row, remoteProjects);
-    if (entries.length === 0) return [];
-    const labels = sessionActionMenuLabels();
-    const items = [{ type: "separator" }];
-    for (const action of entries) {
-      const item = {
-        id: helperSessionActionId(action),
-        label: labels[action] || action,
-        enabled: true,
-      };
-      const icon = helperSessionMenuIcon(action);
-      if (icon) item.icon = icon;
-      items.push(item);
-    }
-    return items;
-  }
-
   function setSessionMenuItemLabel(item, label) {
     const textNodes = [];
     const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT);
@@ -635,31 +616,6 @@
     const labelNode = document.createElement("span");
     labelNode.textContent = label;
     item.appendChild(labelNode);
-  }
-
-  function rowHref(row) {
-    const href =
-      row.getAttribute("href") ||
-      row.querySelector("a[href]")?.getAttribute("href") ||
-      "";
-    if (!href) return "";
-    try {
-      return new URL(href, window.location.href).href;
-    } catch (_) {
-      return href;
-    }
-  }
-
-  function clickElement(element) {
-    if (!(element instanceof HTMLElement)) return false;
-    element.dispatchEvent(
-      new MouseEvent("pointerdown", { bubbles: true, cancelable: true }),
-    );
-    element.dispatchEvent(
-      new MouseEvent("mousedown", { bubbles: true, cancelable: true }),
-    );
-    element.click();
-    return true;
   }
 
   function forkedSessionPath(result, target) {
