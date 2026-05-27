@@ -25,7 +25,7 @@ test("reserveEphemeralPort holds the port until released", () => {
 	expect(isPortFree(held.port)).toBe(true);
 });
 
-test("default launch resolution reserves a random launch port", async () => {
+test("default launch resolution reserves a managed launch port", async () => {
 	const preferred = reserveEphemeralPort();
 	const preferredPort = preferred.port;
 	preferred.release();

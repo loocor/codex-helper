@@ -64,12 +64,14 @@ function printHelp(): void {
 }
 
 function ensureLocalCdpBypassesProxy(): void {
-	const bypassHosts = ["127.0.0.1", "localhost"];
+	const bypassHosts = ["127.0.0.1", "localhost", "::1"];
 	const existing = (process.env.NO_PROXY ?? process.env.no_proxy ?? "")
 		.split(",")
 		.map((entry) => entry.trim())
 		.filter(Boolean);
-	process.env.NO_PROXY = [...new Set([...existing, ...bypassHosts])].join(",");
+	const noProxy = [...new Set([...existing, ...bypassHosts])].join(",");
+	process.env.NO_PROXY = noProxy;
+	process.env.no_proxy = noProxy;
 }
 
 async function main(): Promise<void> {

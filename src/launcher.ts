@@ -6,82 +6,34 @@ import type { PortHold } from "./debug-port";
 import { describePortBlockers, listenPidsOnPort, processCommand } from "./port";
 
 export function codexBinaryPath(appPath: string): string {
-	return `${appPath}/Contents/MacOS/Codex`;
+	if (appPath.endsWith(".app")) return `${appPath}/Contents/MacOS/Codex`;
+	return appPath;
 }
 
 export function codexDebugArgs(debugPort: number): string[] {
 	return [
 		`--remote-debugging-port=${debugPort}`,
+		"--remote-debugging-address=127.0.0.1",
 		`--remote-allow-origins=http://127.0.0.1:${debugPort}`,
 	];
 }
 
-export function isCodexRunning(): boolean {
-	return codexPids().length > 0;
-}
-
-export function parsePidList(output: string): number[] {
-	return output
-		.split(/\s+/)
-		.map((value) => Number(value.trim()))
-		.filter((pid) => Number.isInteger(pid) && pid > 0);
-}
-
-export function codexPids(): number[] {
-	const result = spawnSync("pgrep", ["-x", "Codex"], {
-		encoding: "utf8",
-	} as never) as {
-		status: number | null;
-		stdout?: string;
-		error?: Error;
+export function codexLaunchCommand(
+	appPath: string,
+	debugPort: number,
+	platform = process.platform,
+): { program: string; args: string[] } {
+	const debugArgs = codexDebugArgs(debugPort);
+	if (platform === "darwin" && appPath.endsWith(".app")) {
+		return {
+			program: "open",
+			args: ["-na", appPath, "--args", ...debugArgs],
+		};
+	}
+	return {
+		program: codexBinaryPath(appPath),
+		args: debugArgs,
 	};
-	if (result.error) {
-		throw new Error(`pgrep failed for Codex: ${result.error.message}`);
-	}
-	if (result.status !== 0) return [];
-	return parsePidList(String(result.stdout ?? ""));
-}
-
-export async function quitCodex(
-	timer: LaunchTimer,
-	timeoutMs = 15000,
-): Promise<void> {
-	spawnSync("osascript", ["-e", 'tell application "Codex" to quit'], {
-		stdio: "ignore",
-	});
-	const startedAt = Date.now();
-	let lastProgressAt = startedAt;
-	while (Date.now() - startedAt < timeoutMs) {
-		if (!isCodexRunning()) {
-			timer.stage("quit codex done", { waitedMs: Date.now() - startedAt });
-			return;
-		}
-		const now = Date.now();
-		if (now - lastProgressAt >= 2000) {
-			timer.stage("quit codex waiting", { waitedMs: now - startedAt });
-			lastProgressAt = now;
-		}
-		await Bun.sleep(250);
-	}
-	const remainingPids = codexPids();
-	if (remainingPids.length === 0) return;
-	timer.stage("quit codex force start", { pids: remainingPids.join(",") });
-	for (const pid of remainingPids) {
-		await terminatePid(pid, "SIGTERM");
-	}
-	await Bun.sleep(1000);
-	const stubbornPids = codexPids();
-	for (const pid of stubbornPids) {
-		await terminatePid(pid, "SIGKILL");
-	}
-	if (stubbornPids.length > 0) {
-		timer.stage("quit codex force kill", { pids: stubbornPids.join(",") });
-		await Bun.sleep(500);
-	}
-	if (isCodexRunning()) {
-		throw new Error("Timed out waiting for Codex to quit");
-	}
-	timer.stage("quit codex force done", { waitedMs: Date.now() - startedAt });
 }
 
 export function isKillablePortBlocker(command: string): boolean {
@@ -93,21 +45,14 @@ export function isKillablePortBlocker(command: string): boolean {
 	);
 }
 
-async function terminatePid(
-	pid: number,
-	signal: "SIGTERM" | "SIGKILL",
-): Promise<void> {
-	await new Promise<void>((resolve) => {
-		const child = spawn(
-			"kill",
-			[signal === "SIGKILL" ? "-9" : "", String(pid)].filter(Boolean),
-			{
-				stdio: "ignore",
-			},
-		);
-		child.on("close", () => resolve());
-		child.on("error", () => resolve());
-	});
+function terminatePid(pid: number, signal: "SIGTERM" | "SIGKILL"): void {
+	spawnSync(
+		"kill",
+		[signal === "SIGKILL" ? "-9" : "", String(pid)].filter(Boolean),
+		{
+			stdio: "ignore",
+		},
+	);
 }
 
 export async function releaseBlockedDebugPort(
@@ -177,13 +122,16 @@ export function spawnCodexWithDebugPort(
 	debugPort: number,
 	timer: LaunchTimer,
 ): void {
-	const args = ["-na", appPath, "--args", ...codexDebugArgs(debugPort)];
+	const command = codexLaunchCommand(appPath, debugPort);
 	timer.stage("open codex", {
 		app: appPath,
 		port: debugPort,
-		launchArgs: codexDebugArgs(debugPort).join(" "),
+		launchArgs: command.args.join(" "),
 	});
-	const child = spawn("open", args, { stdio: "ignore", detached: true });
+	const child = spawn(command.program, command.args, {
+		stdio: "ignore",
+		detached: true,
+	});
 	child.unref();
 }
 
@@ -226,18 +174,6 @@ export async function ensureCodexLaunchedWithDebugPort(
 
 		if (!heldPort) {
 			await releaseBlockedDebugPort(debugPort, timer);
-		}
-
-		const codexRunning = isCodexRunning();
-		timer.stage("check codex process", { running: codexRunning });
-		if (codexRunning) {
-			timer.stage("quit codex start");
-			await quitCodex(timer);
-			await Bun.sleep(500);
-			timer.stage("post-quit delay", { delayMs: 500 });
-			if (!heldPort) {
-				await releaseBlockedDebugPort(debugPort, timer);
-			}
 		}
 
 		releaseHeldPort();

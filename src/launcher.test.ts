@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 
-import { isKillablePortBlocker, parsePidList } from "./launcher";
+import {
+	codexLaunchCommand,
+	isKillablePortBlocker,
+} from "./launcher";
 
 test("isKillablePortBlocker allows Codex listeners only", () => {
 	expect(
@@ -17,6 +20,27 @@ test("isKillablePortBlocker allows Codex listeners only", () => {
 	expect(isKillablePortBlocker("codex --serve")).toBe(false);
 });
 
-test("parsePidList keeps valid pids only", () => {
-	expect(parsePidList("123\nabc\n0\n456\n")).toEqual([123, 456]);
+test("codex launch command starts macOS app bundles through LaunchServices", () => {
+	const command = codexLaunchCommand("/Applications/Codex.app", 9229, "darwin");
+
+	expect(command.program).toBe("open");
+	expect(command.args).toEqual([
+		"-na",
+		"/Applications/Codex.app",
+		"--args",
+		"--remote-debugging-port=9229",
+		"--remote-debugging-address=127.0.0.1",
+		"--remote-allow-origins=http://127.0.0.1:9229",
+	]);
+});
+
+test("codex launch command starts executables directly off macOS", () => {
+	const command = codexLaunchCommand("/opt/codex/codex", 9229, "linux");
+
+	expect(command.program).toBe("/opt/codex/codex");
+	expect(command.args).toEqual([
+		"--remote-debugging-port=9229",
+		"--remote-debugging-address=127.0.0.1",
+		"--remote-allow-origins=http://127.0.0.1:9229",
+	]);
 });

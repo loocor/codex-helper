@@ -57,6 +57,15 @@ pub async fn has_codex_cdp_target(debug_port: u16) -> bool {
     }
 }
 
+pub async fn find_existing_codex_debug_port(ports: impl IntoIterator<Item = u16>) -> Option<u16> {
+    for port in ports {
+        if has_codex_cdp_target(port).await {
+            return Some(port);
+        }
+    }
+    None
+}
+
 pub async fn wait_for_debug_port(debug_port: u16, timeout: Duration) -> anyhow::Result<()> {
     let started_at = std::time::Instant::now();
     while started_at.elapsed() < timeout {
@@ -71,11 +80,56 @@ pub async fn wait_for_debug_port(debug_port: u16, timeout: Duration) -> anyhow::
     );
 }
 
+pub async fn wait_for_debug_port_to_close(
+    debug_port: u16,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let started_at = std::time::Instant::now();
+    while started_at.elapsed() < timeout {
+        if !is_debug_port_ready(debug_port).await {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    anyhow::bail!(
+        "Timed out waiting for Codex debug port {debug_port} to close after {:?}",
+        started_at.elapsed()
+    );
+}
+
+pub async fn wait_for_codex_targets(
+    debug_port: u16,
+    timeout: Duration,
+) -> anyhow::Result<Vec<CdpTarget>> {
+    let started_at = std::time::Instant::now();
+    let mut last_error = "No injectable Codex page target found".to_string();
+    while started_at.elapsed() < timeout {
+        match list_browser_targets(debug_port).await {
+            Ok(targets) => {
+                let codex_targets = codex_injectable_page_targets(&targets);
+                if !codex_targets.is_empty() {
+                    return Ok(codex_targets);
+                }
+                last_error = format!(
+                    "No injectable Codex page target found among {}",
+                    targets.len()
+                );
+            }
+            Err(error) => {
+                last_error = error.to_string();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    anyhow::bail!(
+        "Timed out waiting for Codex CDP targets on port {debug_port} after {:?}: {last_error}",
+        started_at.elapsed()
+    );
+}
+
 pub async fn browser_websocket_url(debug_port: u16) -> anyhow::Result<String> {
     let url = format!("http://127.0.0.1:{debug_port}/json/version");
-    let client = reqwest::Client::builder()
-        .timeout(CDP_HTTP_TIMEOUT)
-        .build()?;
+    let client = cdp_http_client()?;
     let response = client
         .get(&url)
         .send()
@@ -100,9 +154,7 @@ pub async fn browser_websocket_url(debug_port: u16) -> anyhow::Result<String> {
 
 pub async fn list_targets(debug_port: u16) -> anyhow::Result<Vec<CdpTarget>> {
     let url = format!("http://127.0.0.1:{debug_port}/json");
-    let client = reqwest::Client::builder()
-        .timeout(CDP_HTTP_TIMEOUT)
-        .build()?;
+    let client = cdp_http_client()?;
     let response = client
         .get(&url)
         .send()
@@ -119,6 +171,13 @@ pub async fn list_targets(debug_port: u16) -> anyhow::Result<Vec<CdpTarget>> {
         .json::<Vec<CdpTarget>>()
         .await
         .map_err(|error| anyhow::anyhow!("CDP target response decode failed: {error}"))
+}
+
+fn cdp_http_client() -> anyhow::Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .no_proxy()
+        .timeout(CDP_HTTP_TIMEOUT)
+        .build()?)
 }
 
 pub async fn list_browser_targets(debug_port: u16) -> anyhow::Result<Vec<CdpTarget>> {
@@ -156,6 +215,7 @@ fn browser_targets_from_result(result: Value) -> anyhow::Result<Vec<CdpTarget>> 
         .collect())
 }
 
+#[cfg(test)]
 pub fn pick_codex_page_target(targets: &[CdpTarget]) -> anyhow::Result<CdpTarget> {
     let pages = targets
         .iter()
@@ -185,6 +245,7 @@ pub fn codex_injectable_page_targets(targets: &[CdpTarget]) -> Vec<CdpTarget> {
         .collect()
 }
 
+#[cfg(test)]
 pub fn find_codex_page_target(targets: &[CdpTarget]) -> Option<&CdpTarget> {
     targets
         .iter()
@@ -207,6 +268,7 @@ fn is_codex_page_target(target: &CdpTarget) -> bool {
     .contains("codex")
 }
 
+#[cfg(test)]
 fn has_target_websocket(target: &CdpTarget) -> bool {
     target
         .web_socket_debugger_url
@@ -229,34 +291,6 @@ pub async fn connect_cdp_websocket(
         })?
         .map_err(|error| anyhow::anyhow!("failed to connect CDP websocket: {error}"))?;
     Ok(socket)
-}
-
-pub async fn reload_codex_page(debug_port: u16) -> anyhow::Result<()> {
-    let websocket_url = browser_websocket_url(debug_port).await?;
-    let targets = list_targets(debug_port).await?;
-    let target = pick_codex_page_target(&targets)?;
-    let target_id = target.id;
-
-    let socket = connect_cdp_websocket(&websocket_url).await?;
-    let mut session = OneShotCdpSession::new(socket);
-    let attached = session
-        .send_command(
-            1,
-            "Target.attachToTarget",
-            json!({ "targetId": target_id, "flatten": true }),
-        )
-        .await?;
-    let session_id = attached
-        .get("result")
-        .and_then(|result| result.get("sessionId"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("CDP attach response did not include sessionId"))?
-        .to_string();
-    session.set_session_id(session_id);
-    session
-        .send_command(2, "Page.reload", json!({ "ignoreCache": false }))
-        .await?;
-    Ok(())
 }
 
 pub async fn close_browser(debug_port: u16) -> anyhow::Result<()> {
@@ -297,10 +331,6 @@ where
             responses: HashMap::new(),
             session_id: None,
         }
-    }
-
-    fn set_session_id(&mut self, session_id: String) {
-        self.session_id = Some(session_id);
     }
 
     async fn send_command(
@@ -477,5 +507,12 @@ mod tests {
         let targets = vec![target("one", "page", "Other", Some("ws://one"))];
 
         assert!(find_codex_page_target(&targets).is_none());
+    }
+
+    #[tokio::test]
+    async fn cdp_wait_for_debug_port_to_close_returns_when_port_is_absent() {
+        wait_for_debug_port_to_close(9, Duration::from_millis(50))
+            .await
+            .expect("closed port");
     }
 }

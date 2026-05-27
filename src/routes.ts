@@ -284,7 +284,9 @@ function openPath(path: string, reveal = false): JsonValue {
 	}
 }
 
-function localBrowserUrlFromPayload(payload: Record<string, JsonValue>): string {
+function localBrowserUrlFromPayload(
+	payload: Record<string, JsonValue>,
+): string {
 	const raw = typeof payload.url === "string" ? payload.url.trim() : "";
 	if (!raw) throw new Error("URL is required");
 	let url: URL;

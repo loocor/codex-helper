@@ -64,6 +64,11 @@ fn empty_payload() -> Value {
     json!({})
 }
 
+pub struct InstalledBridge {
+    pub binding_task: JoinHandle<()>,
+    pub script_identifiers: Vec<String>,
+}
+
 fn parse_bridge_request(payload_text: &str) -> anyhow::Result<BridgeRequest> {
     Ok(serde_json::from_str(payload_text)?)
 }
@@ -110,7 +115,7 @@ pub async fn install_bridge(
     caller: BridgeCaller,
     ctx: BridgeContext,
     runtime_scripts: Vec<String>,
-) -> anyhow::Result<JoinHandle<()>> {
+) -> anyhow::Result<InstalledBridge> {
     let handler = bridge_handler(ctx);
     let socket = connect_cdp_websocket(websocket_url).await?;
     let mut session = BindingCdpSession::new(socket).with_handler(handler);
@@ -146,13 +151,17 @@ pub async fn install_bridge(
         .await?;
 
     let bridge_script = build_bridge_script(BRIDGE_BINDING_NAME, &caller);
-    session
+    let mut script_identifiers = Vec::new();
+    let bridge_script_response = session
         .send_command(
             5,
             "Page.addScriptToEvaluateOnNewDocument",
             json!({ "source": bridge_script }),
         )
         .await?;
+    if let Some(identifier) = script_identifier_from_add_script_response(&bridge_script_response) {
+        script_identifiers.push(identifier);
+    }
     session
         .send_command(
             6,
@@ -163,13 +172,16 @@ pub async fn install_bridge(
 
     for script in runtime_scripts {
         let message_id = next_message_id();
-        session
+        let add_script_response = session
             .send_command(
                 message_id,
                 "Page.addScriptToEvaluateOnNewDocument",
                 json!({ "source": script }),
             )
             .await?;
+        if let Some(identifier) = script_identifier_from_add_script_response(&add_script_response) {
+            script_identifiers.push(identifier);
+        }
         let message_id = next_message_id();
         session
             .send_command(
@@ -192,7 +204,70 @@ pub async fn install_bridge(
         }
     });
 
-    Ok(binding_task)
+    Ok(InstalledBridge {
+        binding_task,
+        script_identifiers,
+    })
+}
+
+pub async fn restore_injected_runtime(
+    websocket_url: &str,
+    target_id: &str,
+    script_identifiers: &[String],
+) -> anyhow::Result<()> {
+    let socket = connect_cdp_websocket(websocket_url).await?;
+    let mut session = BindingCdpSession::new(socket);
+    let attached = session
+        .send_command(
+            next_message_id(),
+            "Target.attachToTarget",
+            json!({ "targetId": target_id, "flatten": true }),
+        )
+        .await?;
+    let session_id = attached
+        .get("result")
+        .and_then(|result| result.get("sessionId"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("CDP attach response did not include sessionId"))?
+        .to_string();
+    session = session.with_session_id(session_id.clone());
+    session
+        .send_command(next_message_id(), "Runtime.enable", json!({}))
+        .await?;
+    session
+        .send_command(
+            next_message_id(),
+            "Runtime.evaluate",
+            runtime_evaluate_params(&build_runtime_restore_script()),
+        )
+        .await?;
+    let _ = session
+        .send_command(
+            next_message_id(),
+            "Runtime.removeBinding",
+            json!({ "name": BRIDGE_BINDING_NAME }),
+        )
+        .await;
+    for identifier in script_identifiers
+        .iter()
+        .filter(|value| !value.trim().is_empty())
+    {
+        let _ = session
+            .send_command(
+                next_message_id(),
+                "Page.removeScriptToEvaluateOnNewDocument",
+                json!({ "identifier": identifier }),
+            )
+            .await;
+    }
+    let _ = session
+        .send_command(
+            next_message_id(),
+            "Target.detachFromTarget",
+            json!({ "sessionId": session_id }),
+        )
+        .await;
+    Ok(())
 }
 
 fn bridge_handler(ctx: BridgeContext) -> BridgeHandler {
@@ -208,6 +283,45 @@ fn runtime_evaluate_params(expression: &str) -> Value {
         "awaitPromise": false,
         "allowUnsafeEvalBlockedByCSP": true,
     })
+}
+
+pub fn build_runtime_restore_script() -> String {
+    r#"
+(() => {
+  try {
+    if (typeof window.__codexHelperRuntimeCleanup === "function") {
+      window.__codexHelperRuntimeCleanup();
+    }
+  } catch (error) {
+    console.warn("[Codex Helper] runtime restore failed", error);
+  }
+  for (const key of [
+    "__codexHelperBridge",
+    "__codexHelperCallbacks",
+    "__codexHelperCaller",
+    "__codexHelperCallerBase",
+    "__codexHelperResolve",
+    "__codexHelperReject",
+    "__codexHelperRuntimeCleanup",
+    "__codexHelperSeq",
+  ]) {
+    try {
+      delete window[key];
+    } catch (_error) {
+      window[key] = undefined;
+    }
+  }
+})();
+"#
+    .to_string()
+}
+
+fn script_identifier_from_add_script_response(response: &Value) -> Option<String> {
+    response
+        .get("result")
+        .and_then(|result| result.get("identifier"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
 }
 
 fn cdp_command(id: u64, method: &str, params: Value, session_id: Option<&str>) -> Value {
@@ -501,6 +615,32 @@ mod tests {
         assert!(script.contains("\"helperInstanceId\":\"instance-1\""));
         assert!(script.contains("document.hasFocus()"));
         assert!(script.contains("document.visibilityState"));
+    }
+
+    #[test]
+    fn runtime_restore_script_runs_cleanup_and_removes_bridge_globals() {
+        let script = build_runtime_restore_script();
+
+        assert!(script.contains("__codexHelperRuntimeCleanup"));
+        assert!(script.contains("__codexHelperBridge"));
+        assert!(script.contains("__codexHelperCallbacks"));
+        assert!(script.contains("__codexHelperResolve"));
+        assert!(script.contains("__codexHelperReject"));
+        assert!(script.contains("delete window[key]"));
+    }
+
+    #[test]
+    fn script_identifier_reads_add_script_response() {
+        let response = json!({
+            "result": {
+                "identifier": "script-1",
+            },
+        });
+
+        assert_eq!(
+            script_identifier_from_add_script_response(&response).as_deref(),
+            Some("script-1"),
+        );
     }
 
     #[test]

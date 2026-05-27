@@ -1,66 +1,66 @@
 use std::net::TcpListener;
 
-use crate::cdp;
-use crate::launcher::listen_pids_on_port;
-
 pub const PREFERRED_DEBUG_PORT: u16 = 9229;
-pub const DEBUG_PORT_SCAN_LIMIT: u16 = 32;
-
-pub enum DebugPortMode {
-    Attach,
-    Launch,
-}
+pub const DEBUG_PORT_SCAN_END: u16 = 9260;
 
 pub struct DebugPortResolution {
     pub port: u16,
-    pub mode: DebugPortMode,
     pub port_hold: Option<TcpListener>,
 }
 
-pub async fn find_attachable_debug_port(preferred: u16, scan_limit: u16) -> Option<u16> {
-    for offset in 0..scan_limit {
-        let port = preferred.saturating_add(offset);
-        if cdp::has_codex_cdp_target(port).await {
-            return Some(port);
-        }
-    }
-    None
-}
-
-pub fn find_free_debug_port(preferred: u16, scan_limit: u16) -> anyhow::Result<Option<u16>> {
-    for offset in 0..scan_limit {
-        let port = preferred.saturating_add(offset);
-        if listen_pids_on_port(port)?.is_empty() {
-            return Ok(Some(port));
-        }
-    }
-    Ok(None)
+fn reserve_port(port: u16) -> anyhow::Result<TcpListener> {
+    Ok(TcpListener::bind(("127.0.0.1", port))?)
 }
 
 pub fn reserve_ephemeral_port() -> anyhow::Result<(u16, TcpListener)> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let listener = reserve_port(0)?;
     Ok((listener.local_addr()?.port(), listener))
 }
 
 pub async fn resolve_debug_port(preferred: u16) -> anyhow::Result<DebugPortResolution> {
-    if let Some(port) = find_attachable_debug_port(preferred, DEBUG_PORT_SCAN_LIMIT).await {
-        return Ok(DebugPortResolution {
-            port,
-            mode: DebugPortMode::Attach,
-            port_hold: None,
-        });
-    }
-    if let Some(port) = find_free_debug_port(preferred, DEBUG_PORT_SCAN_LIMIT)? {
-        return Ok(DebugPortResolution {
-            port,
-            mode: DebugPortMode::Launch,
-            port_hold: None,
-        });
+    for port in debug_port_scan_candidates(preferred) {
+        if let Ok(port_hold) = reserve_port(port) {
+            return Ok(DebugPortResolution {
+                port,
+                port_hold: Some(port_hold),
+            });
+        }
     }
     let (port, port_hold) = reserve_ephemeral_port()?;
     Ok(DebugPortResolution {
         port,
-        mode: DebugPortMode::Launch,
         port_hold: Some(port_hold),
     })
+}
+
+pub fn debug_port_scan_candidates(preferred: u16) -> impl Iterator<Item = u16> {
+    preferred..=DEBUG_PORT_SCAN_END
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn resolve_debug_port_reserves_managed_launch_port() {
+        let Some((preferred, preferred_hold)) = debug_port_scan_candidates(PREFERRED_DEBUG_PORT)
+            .find_map(|port| reserve_port(port).ok().map(|hold| (port, hold)))
+        else {
+            return;
+        };
+        drop(preferred_hold);
+
+        let resolved = resolve_debug_port(preferred).await.unwrap();
+
+        assert_eq!(resolved.port, preferred);
+        assert!(resolved.port_hold.is_some());
+    }
+
+    #[test]
+    fn debug_port_scan_candidates_cover_helper_range() {
+        let ports = debug_port_scan_candidates(PREFERRED_DEBUG_PORT).collect::<Vec<_>>();
+
+        assert_eq!(ports.first(), Some(&9229));
+        assert_eq!(ports.last(), Some(&9260));
+    }
 }

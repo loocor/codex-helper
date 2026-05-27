@@ -8,25 +8,29 @@ export type PortHold = {
 	release: () => void;
 };
 
-export function reserveEphemeralPort(): PortHold {
+function reservePort(requestedPort: number): PortHold {
 	const server = Bun.listen({
 		hostname: "127.0.0.1",
-		port: 0,
+		port: requestedPort,
 		socket: {
 			data() {},
 		},
 	});
-	const port = server.port;
-	if (!port) {
+	const reservedPort = server.port;
+	if (!reservedPort) {
 		server.stop();
 		throw new Error("Failed to reserve a free local TCP port");
 	}
 	return {
-		port,
+		port: reservedPort,
 		release: () => {
 			server.stop();
 		},
 	};
+}
+
+export function reserveEphemeralPort(): PortHold {
+	return reservePort(0);
 }
 
 /** @deprecated Use reserveEphemeralPort when the port must stay reserved until Codex binds. */
@@ -76,8 +80,19 @@ export async function resolveDebugPort(
 	preferred = PREFERRED_DEBUG_PORT,
 	scanLimit = DEBUG_PORT_SCAN_LIMIT,
 ): Promise<DebugPortResolution> {
-	void preferred;
-	void scanLimit;
+	const attachablePort = await findAttachableDebugPort(preferred, scanLimit);
+	if (attachablePort !== null) return { port: attachablePort, mode: "attach" };
+
+	for (let offset = 0; offset < scanLimit; offset += 1) {
+		const port = preferred + offset;
+		try {
+			const portHold = reservePort(port);
+			return { port: portHold.port, mode: "launch", portHold };
+		} catch {
+			continue;
+		}
+	}
+
 	const portHold = reserveEphemeralPort();
 	return { port: portHold.port, mode: "launch", portHold };
 }
