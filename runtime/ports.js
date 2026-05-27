@@ -493,7 +493,8 @@ function ensurePortScanLoop() {
   portScanIntervalId = window.setInterval(() => {
     if (
       !featureSettings.portForwardingEnabled ||
-      !hasRemoteForwardingContext()
+      !hasRemoteForwardingContext() ||
+      !helperWindowIsPortOwner()
     ) {
       stopPortScanLoop();
       return;
@@ -524,7 +525,7 @@ function findTerminalPortScanRoots() {
   for (const node of document.querySelectorAll(selector)) {
     if (!(node instanceof HTMLElement)) continue;
     if (!isVisibleElement(node)) continue;
-    if (node.closest(`[${helperPageAttribute}], [${helperToastAttribute}]`)) {
+    if (node.closest(`[${helperNativeSettingsPageAttribute}], [${helperToastAttribute}]`)) {
       continue;
     }
     if (roots.some((root) => root.contains(node))) continue;
@@ -541,7 +542,7 @@ function appendTerminalTextFromRoot(root, parts, seen) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   while (walker.nextNode()) {
     const parent = walker.currentNode.parentElement;
-    if (parent?.closest(`[${helperPageAttribute}], [${helperToastAttribute}]`)) {
+    if (parent?.closest(`[${helperNativeSettingsPageAttribute}], [${helperToastAttribute}]`)) {
       continue;
     }
     const text = (walker.currentNode.nodeValue || "").trim();
@@ -558,7 +559,7 @@ function terminalTextForPortScan() {
     appendTerminalTextFromRoot(root, parts, seen);
   }
   for (const xterm of document.querySelectorAll(".xterm, [class*='xterm' i]")) {
-    if (xterm.closest(`[${helperPageAttribute}], [${helperToastAttribute}]`)) {
+    if (xterm.closest(`[${helperNativeSettingsPageAttribute}], [${helperToastAttribute}]`)) {
       continue;
     }
     appendTerminalTextFromRoot(xterm, parts, seen);
@@ -624,7 +625,11 @@ function shouldAutoForwardDetectedPort(entry, context) {
 }
 
 function scanTerminalWebPorts() {
-  if (!featureSettings.portForwardingEnabled || !hasRemoteForwardingContext()) {
+  if (
+    !featureSettings.portForwardingEnabled ||
+    !hasRemoteForwardingContext() ||
+    !helperWindowIsPortOwner()
+  ) {
     return;
   }
   if (pruneDetectedPortsForSessionChange()) {
@@ -942,8 +947,11 @@ function reconcileDiscoveredRemotePorts(
   discoveredRemotePorts = discoveredRemotePortSet(ports),
 ) {
   let changed = markRemotePortDiscoverySucceeded(context);
+  const canOwnPorts = helperWindowIsPortOwner();
   const activeForwardedPorts = activeForwardedPortMap(activePorts, context);
-  changed = pruneStaleDetectedPorts(context, discoveredRemotePorts) || changed;
+  changed =
+    (canOwnPorts && pruneStaleDetectedPorts(context, discoveredRemotePorts)) ||
+    changed;
   for (const port of ports) {
     const remotePort = Number(port.remotePort);
     if (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535)
@@ -981,6 +989,7 @@ function reconcileDiscoveredRemotePorts(
         existing.status === "detected" &&
         !activeForward &&
         featureSettings.portForwardingEnabled &&
+        helperWindowIsPortOwner() &&
         shouldAutoForwardDetectedPort(existing, context)
       ) {
         changed = true;
@@ -1018,6 +1027,7 @@ function reconcileDiscoveredRemotePorts(
     if (
       !activeForward &&
       featureSettings.portForwardingEnabled &&
+      helperWindowIsPortOwner() &&
       shouldAutoForwardDetectedPort(entry, context)
     ) {
       forwardDetectedPort(entry).catch((error) => {
@@ -1053,11 +1063,26 @@ function remoteForwardingContextChanged(initialSessionKey) {
   return !currentSessionKey || currentSessionKey !== initialSessionKey;
 }
 
+function remotePortSyncIsThrottled(sessionKey) {
+  const now = Date.now();
+  if (
+    sessionKey === lastRemotePortSyncSessionKey &&
+    now - lastRemotePortSyncStartedAt < REMOTE_PORT_SYNC_MIN_INTERVAL_MS
+  ) {
+    return true;
+  }
+  lastRemotePortSyncSessionKey = sessionKey;
+  lastRemotePortSyncStartedAt = now;
+  return false;
+}
+
 async function syncRemoteSessionPortsOnce() {
   if (!featureSettings.portForwardingEnabled) return;
+  if (!helperWindowIsPortOwner()) return;
   const context = await resolveRemoteForwardingContext();
   if (!remoteForwardingContextIsReady(context)) return;
   const initialSessionKey = contextSessionKey(context);
+  if (remotePortSyncIsThrottled(initialSessionKey)) return;
   const result = await bridge("/ports/discover", {
     hostId: context.hostId,
     remotePath: context.path,
@@ -1079,6 +1104,7 @@ async function syncRemoteSessionPortsOnce() {
     activeResult?.status === "ok" && Array.isArray(activeResult.ports)
       ? activeResult.ports
       : [];
+  if (!helperWindowIsPortOwner()) return;
   const stopped = await stopStaleForwardedTunnels(
     context,
     discoveredRemotePorts,

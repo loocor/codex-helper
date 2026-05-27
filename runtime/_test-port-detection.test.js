@@ -727,6 +727,21 @@ test("remote port lifecycle loop is not gated by pinned summary visibility", () 
   expect(maintainPortsPanelNow).not.toContain("stopPortScanLoop();");
 });
 
+test("remote port sync is throttled between session changes", () => {
+  const syncRemoteSessionPortsOnce = extractFunction("syncRemoteSessionPortsOnce");
+
+  expect(source).toContain("REMOTE_PORT_SYNC_MIN_INTERVAL_MS");
+  expect(source).toContain("lastRemotePortSyncStartedAt");
+  expect(source).toContain("lastRemotePortSyncSessionKey");
+  expect(source).toContain("function remotePortSyncIsThrottled(");
+  expect(syncRemoteSessionPortsOnce).toContain(
+    "remotePortSyncIsThrottled(initialSessionKey)",
+  );
+  expect(syncRemoteSessionPortsOnce.indexOf("remotePortSyncIsThrottled")).toBeLessThan(
+    syncRemoteSessionPortsOnce.indexOf('bridge("/ports/discover"'),
+  );
+});
+
 test("runtime keeps managed tunnels outside the active session", () => {
   const syncRemoteSessionPortsOnce = extractFunction("syncRemoteSessionPortsOnce");
   const maintainPortsPanelNow = extractFunction("maintainPortsPanelNow");

@@ -26,13 +26,29 @@ type CdpMessage = {
 	sessionId?: string;
 };
 
+type BridgeCaller = {
+	targetId: string;
+	helperInstanceId: string;
+	href?: string;
+	hasFocus?: boolean;
+	visibilityState?: string;
+};
+
 let nextMessageId = 100;
 
-function buildBridgeScript(bindingName: string): string {
+function buildBridgeScript(bindingName: string, caller: BridgeCaller): string {
+	const callerJson = JSON.stringify(caller);
 	return `
 (() => {
   window.__codexHelperCallbacks = new Map();
   window.__codexHelperSeq = 0;
+  window.__codexHelperCallerBase = ${callerJson};
+  window.__codexHelperCaller = () => ({
+    ...window.__codexHelperCallerBase,
+    href: window.location.href,
+    hasFocus: document.hasFocus(),
+    visibilityState: document.visibilityState || "",
+  });
   window.__codexHelperResolve = (id, result) => {
     const callback = window.__codexHelperCallbacks.get(id);
     if (!callback) return;
@@ -48,7 +64,7 @@ function buildBridgeScript(bindingName: string): string {
   window.__codexHelperBridge = (path, payload = {}) => new Promise((resolve) => {
     const id = String(++window.__codexHelperSeq);
     window.__codexHelperCallbacks.set(id, { resolve });
-    window.${bindingName}(JSON.stringify({ id, path, payload }));
+    window.${bindingName}(JSON.stringify({ id, path, payload, caller: window.__codexHelperCaller() }));
   });
 })();
 `;
@@ -122,8 +138,15 @@ export function bridgeRequestTimeoutMessage(
 
 class BindingCdpSession {
 	private socket: WebSocket;
-	private responses = new Map<number, CdpMessage>();
-	private bindingCalls: CdpMessage[] = [];
+	private pendingResponses = new Map<
+		number,
+		{
+			method: string;
+			resolve: (message: CdpMessage) => void;
+			reject: (error: Error) => void;
+			timer: ReturnType<typeof setTimeout>;
+		}
+	>();
 	private sessionId?: string;
 	private closed = false;
 
@@ -132,15 +155,24 @@ class BindingCdpSession {
 		this.socket.addEventListener("message", (event) => {
 			const message = JSON.parse(String(event.data)) as CdpMessage;
 			if (message.method === "Runtime.bindingCalled") {
-				this.bindingCalls.push(message);
+				this.routeBindingCall(message).catch((error: unknown) => {
+					console.warn("[Codex Helper] bridge route failed", error);
+				});
 				return;
 			}
 			if (message.id !== undefined) {
-				this.responses.set(message.id, message);
+				this.resolveCommandResponse(message);
 			}
 		});
 		this.socket.addEventListener("close", () => {
 			this.closed = true;
+			for (const [id, pending] of this.pendingResponses) {
+				clearTimeout(pending.timer);
+				pending.reject(
+					new Error(`CDP command ${pending.method} closed before response`),
+				);
+				this.pendingResponses.delete(id);
+			}
 		});
 	}
 
@@ -154,8 +186,9 @@ class BindingCdpSession {
 		method: string,
 		params: JsonValue,
 	): Promise<CdpMessage> {
+		const response = this.waitForCommandResponse(id, method);
 		this.socket.send(cdpCommand(id, method, params, this.sessionId));
-		return this.waitForResponse(id, method);
+		return response;
 	}
 
 	async sendCommandWithoutWait(
@@ -166,41 +199,40 @@ class BindingCdpSession {
 		this.socket.send(cdpCommand(id, method, params, this.sessionId));
 	}
 
-	private async waitForResponse(
-		id: number,
-		method: string,
-	): Promise<CdpMessage> {
-		const startedAt = Date.now();
-		while (!this.closed) {
-			const response = this.responses.get(id);
-			if (response) {
-				this.responses.delete(id);
-				if (response.error) {
-					throw new Error(
-						`CDP command ${method} failed: ${JSON.stringify(response.error)}`,
-					);
-				}
-				return response;
-			}
-			if (Date.now() - startedAt > CDP_COMMAND_TIMEOUT_MS) {
-				throw new Error(
-					`Timed out waiting for CDP command ${method} after ${CDP_COMMAND_TIMEOUT_MS}ms`,
-				);
-			}
-			await Bun.sleep(10);
+	private waitForCommandResponse(id: number, method: string): Promise<CdpMessage> {
+		if (this.closed) {
+			return Promise.reject(
+				new Error(`CDP command ${method} closed before response`),
+			);
 		}
-		throw new Error(`CDP command ${method} closed before response`);
+		return new Promise((resolve, reject) => {
+			const timer = setTimeout(() => {
+				this.pendingResponses.delete(id);
+				reject(
+					new Error(
+						`Timed out waiting for CDP command ${method} after ${CDP_COMMAND_TIMEOUT_MS}ms`,
+					),
+				);
+			}, CDP_COMMAND_TIMEOUT_MS);
+			this.pendingResponses.set(id, { method, resolve, reject, timer });
+		});
 	}
 
-	async drainBindingQueue(): Promise<void> {
-		while (this.bindingCalls.length > 0) {
-			const message = this.bindingCalls.shift();
-			if (message) {
-				this.routeBindingCall(message).catch((error: unknown) => {
-					console.warn("[Codex Helper] bridge route failed", error);
-				});
-			}
+	private resolveCommandResponse(message: CdpMessage): void {
+		if (message.id === undefined) return;
+		const pending = this.pendingResponses.get(message.id);
+		if (!pending) return;
+		this.pendingResponses.delete(message.id);
+		clearTimeout(pending.timer);
+		if (message.error) {
+			pending.reject(
+				new Error(
+					`CDP command ${pending.method} failed: ${JSON.stringify(message.error)}`,
+				),
+			);
+			return;
 		}
+		pending.resolve(message);
 	}
 
 	private async routeBindingCall(message: CdpMessage): Promise<void> {
@@ -217,11 +249,12 @@ class BindingCdpSession {
 		const requestId = stringValue(parsed.id);
 		const path = stringValue(parsed.path);
 		const payload = (parsed.payload ?? {}) as Record<string, JsonValue>;
+		const caller = parsed.caller as BridgeCaller | undefined;
 		if (!requestId) return;
 
 		try {
 			const result = await withBridgeRequestTimeout(
-				handleBridgeRequest(path, payload),
+				handleBridgeRequest(path, payload, caller),
 				path,
 			);
 			const expression = `window.__codexHelperResolve(${JSON.stringify(requestId)}, ${JSON.stringify(result)})`;
@@ -258,6 +291,7 @@ export function buildRuntimeBundle(paths: string[]): string {
 export async function installBridge(options: {
 	debugPort: number;
 	targetId: string;
+	helperInstanceId: string;
 	runtimeScripts: string[];
 	timer: LaunchTimer;
 }): Promise<() => void> {
@@ -306,7 +340,13 @@ export async function installBridge(options: {
 	});
 	timer.stage("inject binding registered");
 
-	const bridgeScript = buildBridgeScript(BRIDGE_BINDING_NAME);
+	const bridgeScript = buildBridgeScript(BRIDGE_BINDING_NAME, {
+		targetId: options.targetId,
+		helperInstanceId: options.helperInstanceId,
+		href: "",
+		hasFocus: false,
+		visibilityState: "",
+	});
 	await session.sendCommand(5, "Page.addScriptToEvaluateOnNewDocument", {
 		source: bridgeScript,
 	});
@@ -340,14 +380,7 @@ export async function installBridge(options: {
 		bytes: runtimeBytes,
 	});
 
-	const pump = async () => {
-		while (socket.readyState === WebSocket.OPEN) {
-			await session.drainBindingQueue();
-			await Bun.sleep(10);
-		}
-	};
-	void pump();
-	timer.stage("inject binding pump");
+	timer.stage("inject binding listener");
 
 	return () => {
 		socket.close();

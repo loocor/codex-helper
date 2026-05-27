@@ -1,7 +1,13 @@
 import { installBridge } from "./bridge";
-import { waitForCodexTarget } from "./cdp";
+import { waitForCodexTargets } from "./cdp";
 import { createLaunchTimer } from "./debug";
 import { resolveDebugPortForLaunch } from "./debug-port";
+import {
+	disconnectInjectedTargets,
+	startCodexTargetWatcher,
+	syncInjectedTargetsForTargets,
+	type InjectedTarget,
+} from "./injection-sync";
 import { ensureCodexLaunchedWithDebugPort } from "./launcher";
 import { buildRuntimeScripts, resolveCodexAppPath } from "./paths";
 import { stopPortForwards } from "./routes";
@@ -11,6 +17,13 @@ type LaunchOptions = {
 	preferredDebugPort: number;
 	explicitDebugPort?: number;
 };
+
+let nextHelperInstanceId = 0;
+
+function createHelperInstanceId(): string {
+	nextHelperInstanceId += 1;
+	return `dev-helper-${Date.now()}-${nextHelperInstanceId}`;
+}
 
 function parseArgs(args: string[]): LaunchOptions {
 	const options: LaunchOptions = { preferredDebugPort: 9229 };
@@ -45,18 +58,20 @@ function printHelp(): void {
 	);
 	console.log("");
 	console.log(
-		"By default the launcher scans for an existing Codex CDP port or picks a free local port.",
+		"By default the launcher starts a Helper-managed Codex on a reserved random local port.",
 	);
-	console.log("Pass --debug-port only when you need a specific port.");
+	console.log("Pass --debug-port only when you intentionally want a specific CDP port.");
 }
 
 function ensureLocalCdpBypassesProxy(): void {
-	const bypassHosts = ["127.0.0.1", "localhost"];
+	const bypassHosts = ["127.0.0.1", "localhost", "::1"];
 	const existing = (process.env.NO_PROXY ?? process.env.no_proxy ?? "")
 		.split(",")
 		.map((entry) => entry.trim())
 		.filter(Boolean);
-	process.env.NO_PROXY = [...new Set([...existing, ...bypassHosts])].join(",");
+	const noProxy = [...new Set([...existing, ...bypassHosts])].join(",");
+	process.env.NO_PROXY = noProxy;
+	process.env.no_proxy = noProxy;
 }
 
 async function main(): Promise<void> {
@@ -85,24 +100,57 @@ async function main(): Promise<void> {
 		mode,
 		portHold,
 	);
-	const target = await waitForCodexTarget(debugPort, timer);
+	const targets = await waitForCodexTargets(debugPort, timer);
 	const runtimeScripts = buildRuntimeScripts();
-	const disconnect = await installBridge({
-		debugPort,
-		targetId: target.id,
-		runtimeScripts,
+	const injectedTargets = new Map<string, InjectedTarget>();
+	const initialSync = await syncInjectedTargetsForTargets({
+		targets,
+		injectedTargets,
 		timer,
+		installTarget: (target) =>
+			installBridge({
+				debugPort,
+				targetId: target.id,
+				helperInstanceId: createHelperInstanceId(),
+				runtimeScripts,
+				timer,
+			}),
 	});
-	timer.stage("ready", { targetId: target.id, port: debugPort });
+	if (initialSync.failures.length > 0 || injectedTargets.size !== targets.length) {
+		for (const injected of injectedTargets.values()) injected.disconnect();
+		injectedTargets.clear();
+		throw new Error(
+			`Codex Helper failed to inject all ${targets.length} target(s): ${initialSync.failures.join("; ")}`,
+		);
+	}
+	timer.stage("ready", {
+		targetIds: targets.map((target) => target.id).join(","),
+		injected: injectedTargets.size,
+		failures: initialSync.failures.join("; "),
+		port: debugPort,
+	});
 	console.log(
-		`Codex Helper injected into target ${target.id} on debug port ${debugPort}`,
+		`Codex Helper injected into ${injectedTargets.size} target(s) on debug port ${debugPort}`,
 	);
 	let cleanedUp = false;
+	const cleanupManagedCodexResources = () => {
+		stopPortForwards();
+		disconnectInjectedTargets(injectedTargets);
+	};
+	const stopTargetWatcher = startCodexTargetWatcher({
+		debugPort,
+		runtimeScripts,
+		injectedTargets,
+		timer,
+		createHelperInstanceId,
+		onCodexDisconnected: cleanupManagedCodexResources,
+		debugTargetEvents: process.env.CODEX_HELPER_DEBUG_TARGET_EVENTS === "1",
+	});
 	const cleanupOnce = () => {
 		if (cleanedUp) return;
 		cleanedUp = true;
-		stopPortForwards();
-		disconnect();
+		stopTargetWatcher();
+		cleanupManagedCodexResources();
 	};
 	const exitAfterSignal = () => {
 		cleanupOnce();

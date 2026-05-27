@@ -8,7 +8,9 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const CDP_HTTP_TIMEOUT: Duration = Duration::from_secs(3);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const CODEX_APP_URL: &str = "app://-/index.html";
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -28,15 +30,40 @@ pub struct CdpVersion {
     pub web_socket_debugger_url: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct CdpTargetInfo {
+    target_id: Option<String>,
+    #[serde(rename = "type")]
+    target_type: Option<String>,
+    title: Option<String>,
+    url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct CdpTargetInfosResult {
+    target_infos: Option<Vec<CdpTargetInfo>>,
+}
+
 pub async fn is_debug_port_ready(debug_port: u16) -> bool {
     browser_websocket_url(debug_port).await.is_ok()
 }
 
 pub async fn has_codex_cdp_target(debug_port: u16) -> bool {
-    match list_targets(debug_port).await {
-        Ok(targets) => find_codex_page_target(&targets).is_some(),
+    match list_browser_targets(debug_port).await {
+        Ok(targets) => !codex_injectable_page_targets(&targets).is_empty(),
         Err(_) => false,
     }
+}
+
+pub async fn find_existing_codex_debug_port(ports: impl IntoIterator<Item = u16>) -> Option<u16> {
+    for port in ports {
+        if has_codex_cdp_target(port).await {
+            return Some(port);
+        }
+    }
+    None
 }
 
 pub async fn wait_for_debug_port(debug_port: u16, timeout: Duration) -> anyhow::Result<()> {
@@ -53,9 +80,59 @@ pub async fn wait_for_debug_port(debug_port: u16, timeout: Duration) -> anyhow::
     );
 }
 
+pub async fn wait_for_debug_port_to_close(
+    debug_port: u16,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let started_at = std::time::Instant::now();
+    while started_at.elapsed() < timeout {
+        if !is_debug_port_ready(debug_port).await {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    anyhow::bail!(
+        "Timed out waiting for Codex debug port {debug_port} to close after {:?}",
+        started_at.elapsed()
+    );
+}
+
+pub async fn wait_for_codex_targets(
+    debug_port: u16,
+    timeout: Duration,
+) -> anyhow::Result<Vec<CdpTarget>> {
+    let started_at = std::time::Instant::now();
+    let mut last_error = "No injectable Codex page target found".to_string();
+    while started_at.elapsed() < timeout {
+        match list_browser_targets(debug_port).await {
+            Ok(targets) => {
+                let codex_targets = codex_injectable_page_targets(&targets);
+                if !codex_targets.is_empty() {
+                    return Ok(codex_targets);
+                }
+                last_error = format!(
+                    "No injectable Codex page target found among {}",
+                    targets.len()
+                );
+            }
+            Err(error) => {
+                last_error = error.to_string();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    anyhow::bail!(
+        "Timed out waiting for Codex CDP targets on port {debug_port} after {:?}: {last_error}",
+        started_at.elapsed()
+    );
+}
+
 pub async fn browser_websocket_url(debug_port: u16) -> anyhow::Result<String> {
     let url = format!("http://127.0.0.1:{debug_port}/json/version");
-    let response = reqwest::get(&url)
+    let client = cdp_http_client()?;
+    let response = client
+        .get(&url)
+        .send()
         .await
         .map_err(|error| anyhow::anyhow!("CDP version query failed: {error}"))?;
     if !response.status().is_success() {
@@ -77,7 +154,10 @@ pub async fn browser_websocket_url(debug_port: u16) -> anyhow::Result<String> {
 
 pub async fn list_targets(debug_port: u16) -> anyhow::Result<Vec<CdpTarget>> {
     let url = format!("http://127.0.0.1:{debug_port}/json");
-    let response = reqwest::get(&url)
+    let client = cdp_http_client()?;
+    let response = client
+        .get(&url)
+        .send()
         .await
         .map_err(|error| anyhow::anyhow!("CDP target query failed: {error}"))?;
     if !response.status().is_success() {
@@ -93,6 +173,49 @@ pub async fn list_targets(debug_port: u16) -> anyhow::Result<Vec<CdpTarget>> {
         .map_err(|error| anyhow::anyhow!("CDP target response decode failed: {error}"))
 }
 
+fn cdp_http_client() -> anyhow::Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .no_proxy()
+        .timeout(CDP_HTTP_TIMEOUT)
+        .build()?)
+}
+
+pub async fn list_browser_targets(debug_port: u16) -> anyhow::Result<Vec<CdpTarget>> {
+    let websocket_url = browser_websocket_url(debug_port).await?;
+    let socket = connect_cdp_websocket(&websocket_url).await?;
+    let mut session = OneShotCdpSession::new(socket);
+    let response = session
+        .send_command(1, "Target.getTargets", json!({ "filter": [{}] }))
+        .await?;
+    let result = response
+        .get("result")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Target.getTargets response did not include result"))?;
+    browser_targets_from_result(result)
+}
+
+fn browser_targets_from_result(result: Value) -> anyhow::Result<Vec<CdpTarget>> {
+    let result = serde_json::from_value::<CdpTargetInfosResult>(result)?;
+    Ok(result
+        .target_infos
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|target| {
+            let id = target.target_id?;
+            let target_type = target.target_type?;
+            Some(CdpTarget {
+                id,
+                target_type,
+                title: Some(target.title.unwrap_or_default()),
+                url: Some(target.url.unwrap_or_default()),
+                devtools_frontend_url: None,
+                web_socket_debugger_url: None,
+            })
+        })
+        .collect())
+}
+
+#[cfg(test)]
 pub fn pick_codex_page_target(targets: &[CdpTarget]) -> anyhow::Result<CdpTarget> {
     let pages = targets
         .iter()
@@ -105,35 +228,52 @@ pub fn pick_codex_page_target(targets: &[CdpTarget]) -> anyhow::Result<CdpTarget
     selected.ok_or_else(|| anyhow::anyhow!("No injectable Codex page target found"))
 }
 
-pub fn find_codex_page_target(targets: &[CdpTarget]) -> Option<&CdpTarget> {
-    targets.iter().find(|target| {
-        target.target_type == "page"
-            && target.web_socket_debugger_url.is_some()
-            && format!(
-                "{} {}",
-                target.title.as_deref().unwrap_or_default(),
-                target.url.as_deref().unwrap_or_default()
-            )
-            .to_lowercase()
-            .contains("codex")
-    })
+#[cfg(test)]
+pub fn codex_page_targets(targets: &[CdpTarget]) -> Vec<CdpTarget> {
+    targets
+        .iter()
+        .filter(|target| is_codex_page_target(target) && has_target_websocket(target))
+        .cloned()
+        .collect()
 }
 
-pub async fn wait_for_codex_target(debug_port: u16) -> anyhow::Result<CdpTarget> {
-    let mut last_error = None;
-    for _ in 0..40 {
-        match list_targets(debug_port)
-            .await
-            .and_then(|targets| pick_codex_page_target(&targets))
-        {
-            Ok(target) => return Ok(target),
-            Err(error) => {
-                last_error = Some(error);
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            }
-        }
+pub fn codex_injectable_page_targets(targets: &[CdpTarget]) -> Vec<CdpTarget> {
+    targets
+        .iter()
+        .filter(|target| is_codex_page_target(target))
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+pub fn find_codex_page_target(targets: &[CdpTarget]) -> Option<&CdpTarget> {
+    targets
+        .iter()
+        .find(|target| is_codex_page_target(target) && has_target_websocket(target))
+}
+
+fn is_codex_page_target(target: &CdpTarget) -> bool {
+    if target.target_type != "page" {
+        return false;
     }
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Timed out waiting for Codex CDP target")))
+    if target.url.as_deref() == Some(CODEX_APP_URL) {
+        return true;
+    }
+    format!(
+        "{} {}",
+        target.title.as_deref().unwrap_or_default(),
+        target.url.as_deref().unwrap_or_default()
+    )
+    .to_lowercase()
+    .contains("codex")
+}
+
+#[cfg(test)]
+fn has_target_websocket(target: &CdpTarget) -> bool {
+    target
+        .web_socket_debugger_url
+        .as_deref()
+        .is_some_and(|url| !url.trim().is_empty())
 }
 
 pub async fn connect_cdp_websocket(
@@ -153,32 +293,14 @@ pub async fn connect_cdp_websocket(
     Ok(socket)
 }
 
-pub async fn reload_codex_page(debug_port: u16) -> anyhow::Result<()> {
+pub async fn close_browser(debug_port: u16) -> anyhow::Result<()> {
     let websocket_url = browser_websocket_url(debug_port).await?;
-    let targets = list_targets(debug_port).await?;
-    let target = pick_codex_page_target(&targets)?;
-    let target_id = target.id;
-
     let socket = connect_cdp_websocket(&websocket_url).await?;
     let mut session = OneShotCdpSession::new(socket);
-    let attached = session
-        .send_command(
-            1,
-            "Target.attachToTarget",
-            json!({ "targetId": target_id, "flatten": true }),
-        )
-        .await?;
-    let session_id = attached
-        .get("result")
-        .and_then(|result| result.get("sessionId"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("CDP attach response did not include sessionId"))?
-        .to_string();
-    session.set_session_id(session_id);
     session
-        .send_command(2, "Page.reload", json!({ "ignoreCache": false }))
-        .await?;
-    Ok(())
+        .send_command(1, "Browser.close", json!({}))
+        .await
+        .map(|_| ())
 }
 
 fn cdp_command(id: u64, method: &str, params: Value, session_id: Option<&str>) -> Value {
@@ -209,10 +331,6 @@ where
             responses: HashMap::new(),
             session_id: None,
         }
-    }
-
-    fn set_session_id(&mut self, session_id: String) {
-        self.session_id = Some(session_id);
     }
 
     async fn send_command(
@@ -303,6 +421,79 @@ mod tests {
     }
 
     #[test]
+    fn cdp_returns_all_codex_page_targets() {
+        let mut settling = target(
+            "settling",
+            "page",
+            "app://-/index.html",
+            Some("ws://settling"),
+        );
+        settling.url = Some("app://-/index.html".to_string());
+        let targets = vec![
+            target("one", "page", "Codex", Some("ws://one")),
+            target("two", "page", "Codex", Some("ws://two")),
+            settling,
+            target("worker", "worker", "Codex", Some("ws://worker")),
+            target("missing", "page", "Codex", None),
+            target("empty", "page", "Codex", Some("")),
+        ];
+
+        let selected = codex_page_targets(&targets);
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|target| target.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["one", "two", "settling"]
+        );
+    }
+
+    #[test]
+    fn cdp_injectable_targets_accept_browser_target_infos() {
+        let mut browser_page = target("browser-page", "page", "", None);
+        browser_page.url = Some("app://-/index.html".to_string());
+        let mut browser_tab = target("browser-tab", "tab", "Codex", None);
+        browser_tab.url = Some("app://-/index.html".to_string());
+        let mut worker = target("worker", "worker", "Codex", None);
+        worker.url = Some("app://-/index.html".to_string());
+
+        let selected = codex_injectable_page_targets(&[browser_page, browser_tab, worker]);
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|target| target.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["browser-page"]
+        );
+    }
+
+    #[test]
+    fn cdp_converts_browser_target_infos() {
+        let targets = browser_targets_from_result(json!({
+            "targetInfos": [
+                {
+                    "targetId": "page",
+                    "type": "page",
+                    "title": "Codex",
+                    "url": "app://-/index.html"
+                },
+                {
+                    "targetId": "missing-type",
+                    "title": "Codex"
+                }
+            ]
+        }))
+        .expect("targets");
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id, "page");
+        assert_eq!(targets[0].target_type, "page");
+        assert_eq!(targets[0].web_socket_debugger_url, None);
+    }
+
+    #[test]
     fn cdp_rejects_missing_websocket_targets() {
         let targets = vec![target("one", "page", "Codex", None)];
 
@@ -316,5 +507,12 @@ mod tests {
         let targets = vec![target("one", "page", "Other", Some("ws://one"))];
 
         assert!(find_codex_page_target(&targets).is_none());
+    }
+
+    #[tokio::test]
+    async fn cdp_wait_for_debug_port_to_close_returns_when_port_is_absent() {
+        wait_for_debug_port_to_close(9, Duration::from_millis(50))
+            .await
+            .expect("closed port");
     }
 }

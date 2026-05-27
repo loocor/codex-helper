@@ -7,7 +7,7 @@ import {
 	bridgeRequestTimeoutMessage,
 	bridgeRequestTimeoutMs,
 } from "./bridge";
-import { handleBridgeRequest } from "./routes";
+import { devtoolsUrlForTargetId, handleBridgeRequest } from "./routes";
 
 test("dev bridge exposes port forwarding list route", async () => {
 	const result = await handleBridgeRequest("/ports/list", {});
@@ -51,6 +51,23 @@ test("dev bridge only opens local forwarded urls externally", async () => {
 	});
 });
 
+test("devtools url uses caller target id", () => {
+	const url = devtoolsUrlForTargetId(9229, "caller", [
+		{
+			id: "first",
+			webSocketDebuggerUrl: "ws://127.0.0.1:9229/devtools/page/first",
+		},
+		{
+			id: "caller",
+			webSocketDebuggerUrl: "ws://127.0.0.1:9229/devtools/page/caller",
+		},
+	]);
+
+	expect(url).toBe(
+		"http://127.0.0.1:9229/devtools/inspector.html?ws=127.0.0.1:9229/devtools/page/caller",
+	);
+});
+
 test("dev bridge returns helper directory paths for native settings", async () => {
 	const previous = process.env.CODEX_HELPER_HOME;
 	const root = mkdtempSync(join(tmpdir(), "codex-helper-routes-"));
@@ -67,6 +84,37 @@ test("dev bridge returns helper directory paths for native settings", async () =
 			path: join(root, "scripts"),
 			scripts: ["custom.js"],
 		});
+		expect(log).toMatchObject({
+			status: "ok",
+			path: join(root, "logs", "codex-helper.jsonl"),
+			contents: "",
+		});
+	} finally {
+		if (previous === undefined) delete process.env.CODEX_HELPER_HOME;
+		else process.env.CODEX_HELPER_HOME = previous;
+	}
+});
+
+test("dev bridge does not log routine runtime activity", async () => {
+	const previous = process.env.CODEX_HELPER_HOME;
+	const root = mkdtempSync(join(tmpdir(), "codex-helper-routes-"));
+	try {
+		process.env.CODEX_HELPER_HOME = root;
+
+		const result = await handleBridgeRequest(
+			"/runtime/activity",
+			{},
+			{
+				targetId: "target-1",
+				helperInstanceId: "helper-1",
+				href: "app://-/index.html",
+				hasFocus: true,
+				visibilityState: "visible",
+			},
+		);
+		const log = await handleBridgeRequest("/diagnostics/read-latest", {});
+
+		expect(result).toEqual({ status: "ok" });
 		expect(log).toMatchObject({
 			status: "ok",
 			path: join(root, "logs", "codex-helper.jsonl"),
@@ -102,7 +150,7 @@ test("dev bridge rejects malformed settings files explicitly", async () => {
 	}
 });
 
-test("dev bridge accepts known removed settings keys", async () => {
+test("dev bridge accepts settings with known removed keys", async () => {
 	const previous = process.env.CODEX_HELPER_HOME;
 	const root = mkdtempSync(join(tmpdir(), "codex-helper-routes-"));
 	try {
@@ -110,7 +158,14 @@ test("dev bridge accepts known removed settings keys", async () => {
 		mkdirSync(root, { recursive: true });
 		writeFileSync(
 			join(root, "config.json"),
-			'{ "markdownExportEnabled": true, "sessionDeleteEnabled": true }',
+			`{
+  "markdownExportEnabled": true,
+  "sessionDeleteEnabled": true,
+  "autoRenameMenuEnabled": true,
+  "markdownFriendlyFilenameEnabled": true,
+  "autoNamingMinChars": 8,
+  "autoNamingMaxChars": 12
+}`,
 			"utf8",
 		);
 
@@ -124,10 +179,10 @@ test("dev bridge accepts known removed settings keys", async () => {
 				portForwardingEnabled: false,
 				portAutoForwardWeb: true,
 				portSameLocalPort: true,
-				autoRenameMenuEnabled: false,
+				autoRenameMenuEnabled: true,
 				markdownFriendlyFilenameEnabled: true,
-				autoNamingMinChars: 4,
-				autoNamingMaxChars: 10,
+				autoNamingMinChars: 8,
+				autoNamingMaxChars: 12,
 			},
 		});
 	} finally {

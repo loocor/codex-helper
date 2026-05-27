@@ -213,14 +213,18 @@ mod tests {
     }
 
     #[test]
-    fn read_settings_ignores_known_removed_keys() {
+    fn read_settings_accepts_settings_with_known_removed_keys() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let path = temp_dir.path().join("config.json");
         fs::write(
             &path,
             r#"{
   "markdownExportEnabled": true,
-  "sessionDeleteEnabled": true
+  "sessionDeleteEnabled": true,
+  "autoRenameMenuEnabled": true,
+  "markdownFriendlyFilenameEnabled": true,
+  "autoNamingMinChars": 8,
+  "autoNamingMaxChars": 12
 }
 "#,
         )
@@ -230,6 +234,10 @@ mod tests {
 
         assert!(settings.markdown_export_enabled);
         assert!(!settings.session_move_enabled);
+        assert!(settings.auto_rename_menu_enabled);
+        assert!(settings.markdown_friendly_filename_enabled);
+        assert_eq!(settings.auto_naming_min_chars, 8);
+        assert_eq!(settings.auto_naming_max_chars, 12);
     }
 
     #[test]

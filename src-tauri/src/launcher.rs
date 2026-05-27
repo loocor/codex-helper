@@ -2,9 +2,13 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use tokio::process::{Child, Command};
+
 use crate::cdp;
+use crate::proxy_env::loopback_no_proxy_value;
 
 pub const DEFAULT_CODEX_APP_PATH: &str = "/Applications/Codex.app";
+
 pub fn resolve_codex_app_path(explicit_path: Option<&Path>) -> anyhow::Result<PathBuf> {
     let candidate = explicit_path
         .map(Path::to_path_buf)
@@ -15,148 +19,64 @@ pub fn resolve_codex_app_path(explicit_path: Option<&Path>) -> anyhow::Result<Pa
     Ok(candidate)
 }
 
+pub fn codex_executable_path(app_path: &Path) -> PathBuf {
+    if app_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        == Some("app")
+    {
+        return app_path.join("Contents").join("MacOS").join("Codex");
+    }
+    app_path.to_path_buf()
+}
+
 pub fn codex_debug_args(debug_port: u16) -> Vec<String> {
     vec![
         format!("--remote-debugging-port={debug_port}"),
+        "--remote-debugging-address=127.0.0.1".to_string(),
         format!("--remote-allow-origins=http://127.0.0.1:{debug_port}"),
     ]
 }
 
-pub fn process_command(pid: u32) -> anyhow::Result<String> {
-    let output = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "command="])
-        .output()
-        .map_err(|error| anyhow::anyhow!("ps failed for pid {pid}: {error}"))?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "ps failed for pid {pid} with status {}: {}",
-            output
-                .status
-                .code()
-                .map_or_else(|| "signal".to_string(), |code| code.to_string()),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexLaunchCommand {
+    program: PathBuf,
+    args: Vec<String>,
+    keeps_child: bool,
 }
 
-pub fn is_killable_port_blocker(command: &str) -> bool {
-    let normalized = command.to_lowercase();
-    normalized.contains("codex.app")
-        || normalized.split_whitespace().any(|word| word == "codex")
-        || normalized.contains("/codex.app/")
+fn codex_launch_command(app_path: &Path, debug_port: u16) -> CodexLaunchCommand {
+    codex_launch_command_for_platform(app_path, debug_port, std::env::consts::OS)
 }
 
-pub fn listen_pids_on_port(port: u16) -> anyhow::Result<Vec<u32>> {
-    let listen_arg = format!("-tiTCP:{port}");
-    let output = std::process::Command::new("lsof")
-        .args([&listen_arg, "-sTCP:LISTEN"])
-        .output()
-        .map_err(|error| anyhow::anyhow!("lsof failed for port {port}: {error}"))?;
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if stdout.is_empty() && stderr.is_empty() {
-            return Ok(Vec::new());
-        }
-        anyhow::bail!(
-            "lsof failed for port {port} with status {}: {}",
-            output
-                .status
-                .code()
-                .map_or_else(|| "signal".to_string(), |code| code.to_string()),
-            if stderr.is_empty() { stdout } else { stderr }
-        );
+fn codex_launch_command_for_platform(
+    app_path: &Path,
+    debug_port: u16,
+    platform: &str,
+) -> CodexLaunchCommand {
+    let debug_args = codex_debug_args(debug_port);
+    if platform == "macos" && is_app_bundle_path(app_path) {
+        let mut args = vec![
+            "-na".to_string(),
+            app_path.to_string_lossy().into_owned(),
+            "--args".to_string(),
+        ];
+        args.extend(debug_args);
+        return CodexLaunchCommand {
+            program: PathBuf::from("open"),
+            args,
+            keeps_child: false,
+        };
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .filter_map(|value| value.parse::<u32>().ok())
-        .collect())
+    CodexLaunchCommand {
+        program: codex_executable_path(app_path),
+        args: debug_args,
+        keeps_child: true,
+    }
 }
 
-pub fn is_codex_running() -> bool {
-    std::process::Command::new("pgrep")
-        .args(["-x", "Codex"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
-
-pub async fn quit_codex(timeout: Duration) -> anyhow::Result<()> {
-    let _ = std::process::Command::new("osascript")
-        .args(["-e", r#"tell application "Codex" to quit"#])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    let started_at = std::time::Instant::now();
-    while started_at.elapsed() < timeout {
-        if !is_codex_running() {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    anyhow::bail!("Timed out waiting for Codex to quit")
-}
-
-pub async fn release_blocked_debug_port(debug_port: u16) -> anyhow::Result<()> {
-    if cdp::is_debug_port_ready(debug_port).await {
-        if cdp::has_codex_cdp_target(debug_port).await {
-            return Ok(());
-        }
-        anyhow::bail!(
-            "Debug port {debug_port} exposes a browser CDP endpoint but not Codex. Stop the other app or let Codex Helper auto-select another port."
-        );
-    }
-    let initial_pids = listen_pids_on_port(debug_port)?;
-    if initial_pids.is_empty() {
-        return Ok(());
-    }
-
-    let mut killable_pids = Vec::new();
-    for pid in &initial_pids {
-        if is_killable_port_blocker(&process_command(*pid)?) {
-            killable_pids.push(*pid);
-        }
-    }
-    let blocked_by: Vec<String> = initial_pids
-        .iter()
-        .filter(|pid| !killable_pids.contains(pid))
-        .map(|pid| process_command(*pid).map(|command| format!("{pid}:{command}")))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    if !blocked_by.is_empty() {
-        anyhow::bail!(
-            "Debug port {debug_port} is blocked by a non-Codex process: {}. Stop it manually or let Codex Helper auto-select a port.",
-            blocked_by.join("; ")
-        );
-    }
-
-    for pid in &killable_pids {
-        let _ = std::process::Command::new("kill")
-            .arg(pid.to_string())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    tokio::time::sleep(Duration::from_millis(750)).await;
-    if cdp::is_debug_port_ready(debug_port).await {
-        return Ok(());
-    }
-    for pid in listen_pids_on_port(debug_port)? {
-        if is_killable_port_blocker(&process_command(pid)?) {
-            let _ = std::process::Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
-    }
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    if !listen_pids_on_port(debug_port)?.is_empty() {
-        anyhow::bail!("Debug port {debug_port} is still blocked after releasing Codex listeners");
-    }
-    Ok(())
+fn is_app_bundle_path(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()) == Some("app")
 }
 
 pub async fn ensure_codex_launched_with_debug_port(
@@ -164,36 +84,57 @@ pub async fn ensure_codex_launched_with_debug_port(
     debug_port: u16,
     attach_only: bool,
     port_hold: Option<std::net::TcpListener>,
-) -> anyhow::Result<()> {
-    let _port_hold = port_hold;
+) -> anyhow::Result<Option<Child>> {
+    let mut port_hold = port_hold;
     if attach_only {
         if cdp::has_codex_cdp_target(debug_port).await {
-            return Ok(());
+            return Ok(None);
         }
         anyhow::bail!(
             "Codex CDP is not ready on port {debug_port}. Start Codex with remote debugging on that port or let Codex Helper auto-select."
         );
     }
-    if cdp::is_debug_port_ready(debug_port).await {
-        return Ok(());
+    if port_hold.is_none() && cdp::is_debug_port_ready(debug_port).await {
+        if cdp::has_codex_cdp_target(debug_port).await {
+            anyhow::bail!(
+                "Debug port {debug_port} already exposes Codex CDP. Use an explicit debug port only when you intend to attach to that existing Codex, or let Codex Helper launch a managed Codex on a random port."
+            );
+        }
+        anyhow::bail!(
+            "Debug port {debug_port} exposes a browser CDP endpoint but not Codex. Stop the other app or let Codex Helper auto-select another port."
+        );
     }
-    release_blocked_debug_port(debug_port).await?;
-    if is_codex_running() {
-        quit_codex(Duration::from_secs(15)).await?;
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        release_blocked_debug_port(debug_port).await?;
+
+    let launch_command = codex_launch_command(app_path, debug_port);
+    if !launch_command.program.exists() && launch_command.program != PathBuf::from("open") {
+        anyhow::bail!(
+            "Codex executable not found: {}",
+            launch_command.program.display()
+        );
     }
-    let app_path_string = app_path.to_string_lossy().to_string();
-    let mut open_args = vec!["-na".to_string(), app_path_string, "--args".to_string()];
-    open_args.extend(codex_debug_args(debug_port));
-    std::process::Command::new("open")
-        .args(open_args)
+
+    drop(port_hold.take());
+    let no_proxy = loopback_no_proxy_value();
+    let mut command = Command::new(&launch_command.program);
+    command
+        .args(&launch_command.args)
+        .env("NO_PROXY", &no_proxy)
+        .env("no_proxy", &no_proxy)
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    let child = command
         .spawn()
-        .map_err(|error| anyhow::anyhow!("failed to open Codex app: {error}"))?;
-    cdp::wait_for_debug_port(debug_port, Duration::from_secs(60)).await?;
-    Ok(())
+        .map_err(|error| anyhow::anyhow!("failed to launch Codex executable: {error}"))?;
+    let mut child = child;
+    if let Err(error) = cdp::wait_for_debug_port(debug_port, Duration::from_secs(60)).await {
+        let _ = child.kill().await;
+        return Err(error);
+    }
+    if !launch_command.keeps_child {
+        return Ok(None);
+    }
+    Ok(Some(child))
 }
 
 #[cfg(test)]
@@ -207,17 +148,8 @@ mod tests {
         let args = codex_debug_args(9229);
 
         assert!(args.contains(&"--remote-debugging-port=9229".to_string()));
+        assert!(args.contains(&"--remote-debugging-address=127.0.0.1".to_string()));
         assert!(args.contains(&"--remote-allow-origins=http://127.0.0.1:9229".to_string()));
-    }
-
-    #[test]
-    fn launcher_identifies_codex_port_blockers() {
-        assert!(is_killable_port_blocker(
-            "/Applications/Codex.app/Contents/MacOS/Codex"
-        ));
-        assert!(!is_killable_port_blocker(
-            "/System/Library/PrivateFrameworks/SkyComputerUseService"
-        ));
     }
 
     #[test]
@@ -230,5 +162,59 @@ mod tests {
             error.to_string(),
             "Codex app not found: /tmp/codex-helper-missing/Codex.app"
         );
+    }
+
+    #[test]
+    fn launcher_resolves_macos_bundle_executable_path() {
+        let executable = codex_executable_path(Path::new("/Applications/Codex.app"));
+
+        assert_eq!(
+            executable,
+            PathBuf::from("/Applications/Codex.app/Contents/MacOS/Codex")
+        );
+    }
+
+    #[test]
+    fn launcher_preserves_direct_executable_path() {
+        let executable = codex_executable_path(Path::new("/usr/local/bin/codex"));
+
+        assert_eq!(executable, PathBuf::from("/usr/local/bin/codex"));
+    }
+
+    #[test]
+    fn launcher_uses_launchservices_for_macos_app_bundles() {
+        let command =
+            codex_launch_command_for_platform(Path::new("/Applications/Codex.app"), 9229, "macos");
+
+        assert_eq!(command.program, PathBuf::from("open"));
+        assert_eq!(
+            command.args,
+            vec![
+                "-na",
+                "/Applications/Codex.app",
+                "--args",
+                "--remote-debugging-port=9229",
+                "--remote-debugging-address=127.0.0.1",
+                "--remote-allow-origins=http://127.0.0.1:9229",
+            ]
+        );
+        assert!(!command.keeps_child);
+    }
+
+    #[test]
+    fn launcher_starts_direct_executables_without_launchservices() {
+        let command =
+            codex_launch_command_for_platform(Path::new("/usr/local/bin/codex"), 9229, "linux");
+
+        assert_eq!(command.program, PathBuf::from("/usr/local/bin/codex"));
+        assert_eq!(
+            command.args,
+            vec![
+                "--remote-debugging-port=9229",
+                "--remote-debugging-address=127.0.0.1",
+                "--remote-allow-origins=http://127.0.0.1:9229",
+            ]
+        );
+        assert!(command.keeps_child);
     }
 }

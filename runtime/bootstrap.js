@@ -202,11 +202,45 @@ function onHelperRuntimeChange(event) {
   });
 }
 
+function runtimeActivityKey(detail) {
+  return [
+    detail?.targetId || "",
+    detail?.helperInstanceId || "",
+    detail?.href || "",
+    detail?.hasFocus ? "focused" : "blurred",
+    detail?.visibilityState || "",
+  ].join("\n");
+}
+
+function reportHelperRuntimeActivity() {
+  const detail = helperRuntimeActivityDetail();
+  const key = runtimeActivityKey(detail);
+  const now = Date.now();
+  if (
+    key === lastRuntimeActivityKey &&
+    now - lastRuntimeActivityAt < RUNTIME_ACTIVITY_REPORT_MIN_INTERVAL_MS
+  ) {
+    return;
+  }
+  lastRuntimeActivityKey = key;
+  lastRuntimeActivityAt = now;
+  bridge("/runtime/activity", detail).catch((error) => {
+    console.warn("[Codex Helper] runtime activity report failed", error);
+  });
+}
+
+function onHelperRuntimeActivity() {
+  reportHelperRuntimeActivity();
+}
+
 function removeHelperRuntimeEventListeners() {
   document.removeEventListener("click", onHelperRuntimeClick, true);
   document.removeEventListener("contextmenu", onHelperRuntimeContextMenu, true);
   document.removeEventListener("keydown", onHelperRuntimeKeydown, true);
   document.removeEventListener("change", onHelperRuntimeChange, true);
+  window.removeEventListener("focus", onHelperRuntimeActivity, true);
+  window.removeEventListener("blur", onHelperRuntimeActivity, true);
+  document.removeEventListener("visibilitychange", onHelperRuntimeActivity, true);
 }
 
 function installHelperRuntimeEventListeners() {
@@ -215,6 +249,9 @@ function installHelperRuntimeEventListeners() {
   document.addEventListener("contextmenu", onHelperRuntimeContextMenu, true);
   document.addEventListener("keydown", onHelperRuntimeKeydown, true);
   document.addEventListener("change", onHelperRuntimeChange, true);
+  window.addEventListener("focus", onHelperRuntimeActivity, true);
+  window.addEventListener("blur", onHelperRuntimeActivity, true);
+  document.addEventListener("visibilitychange", onHelperRuntimeActivity, true);
 }
 
 window.__codexHelperRuntimeCleanup = () => {
@@ -233,6 +270,12 @@ window.__codexHelperRuntimeCleanup = () => {
   maintainPortsPanelTimer = 0;
   refreshPortsPanelTimer = 0;
   pinnedSummaryHideTimer = 0;
+  lastRuntimeActivityKey = "";
+  lastRuntimeActivityAt = 0;
+  lastRemotePortSyncStartedAt = 0;
+  lastRemotePortSyncSessionKey = "";
+  cachedRemoteProjectMetadata = [];
+  cachedRemoteProjectMetadataLoaded = false;
   observerInstalled = false;
   helperRuntimeObserver = null;
 };
@@ -242,6 +285,8 @@ installHelperStyles();
 removeLegacyPortsBottomPanelUi();
 maintainPortsPanel();
 installNativeHelperSettingsGroup();
+logDiagnostic("runtime.ready", helperRuntimeActivityDetail());
+reportHelperRuntimeActivity();
 refreshFeatureSettings().catch((error) => {
   logDiagnostic("settings_feature_refresh_failed", {
     error: error?.message || String(error),

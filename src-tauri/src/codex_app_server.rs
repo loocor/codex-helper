@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use crate::proxy_env::loopback_no_proxy_value;
 use crate::zed::SshTarget;
 
 const GENERATED_TITLE_TIMEOUT_SECS: u64 = 120;
@@ -70,8 +71,12 @@ impl CodexAppServerClient {
                 .arg(remote_app_server_command(&self.codex_command));
             return command;
         }
+        let no_proxy = loopback_no_proxy_value();
         let mut command = Command::new(&self.codex_command);
         command.arg("app-server").arg("--listen").arg("stdio://");
+        command
+            .env("NO_PROXY", &no_proxy)
+            .env("no_proxy", &no_proxy);
         command
     }
 

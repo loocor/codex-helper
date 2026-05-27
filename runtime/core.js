@@ -9,6 +9,25 @@
     return window.__codexHelperBridge(path, payload);
   }
 
+  function helperCallerSnapshot() {
+    if (typeof window.__codexHelperCaller === "function") {
+      return window.__codexHelperCaller();
+    }
+    return {
+      href: window.location.href,
+      hasFocus: document.hasFocus(),
+      visibilityState: document.visibilityState || "",
+    };
+  }
+
+  function helperRuntimeActivityDetail() {
+    return helperCallerSnapshot();
+  }
+
+  function helperWindowIsPortOwner() {
+    return document.hasFocus();
+  }
+
   function logDiagnostic(event, detail = {}) {
     bridge("/diagnostics/log", {
       event,

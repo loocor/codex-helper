@@ -523,9 +523,20 @@ async fn wait_for_tunnel_start(child: &mut Child, local_port: u16) -> Result<(),
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{MutexGuard, OnceLock};
+
     use serde_json::json;
 
     use super::*;
+
+    static LOCAL_PORT_TEST_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+
+    fn local_port_test_guard() -> MutexGuard<'static, ()> {
+        LOCAL_PORT_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .expect("local port test lock")
+    }
 
     #[test]
     fn parse_port_accepts_valid_port() {
@@ -567,6 +578,7 @@ mod tests {
 
     #[test]
     fn local_port_available_reports_bound_ports() {
+        let _port_guard = local_port_test_guard();
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind free port");
         let port = listener.local_addr().expect("local addr").port();
 
@@ -759,6 +771,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_rejects_tunnel_when_ssh_exits_immediately() {
+        let _port_guard = local_port_test_guard();
         let manager = PortForwardManager::with_ssh_program("/bin/false");
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind free port");
         let local_port = listener.local_addr().expect("local addr").port();

@@ -20,6 +20,28 @@ test("ports UI uses allowlisted bridge routes", () => {
   expect(source).toContain('bridge("/ports/stop"');
 });
 
+test("runtime reports window activity with caller identity", () => {
+  expect(source).toContain("runtime.ready");
+  expect(source).toContain('bridge("/runtime/activity"');
+  expect(source).toContain("document.hasFocus()");
+  expect(source).toContain("document.visibilityState");
+  expect(source).toContain("helperRuntimeActivityDetail()");
+});
+
+test("runtime activity reports are deduplicated", () => {
+  expect(source).toContain("RUNTIME_ACTIVITY_REPORT_MIN_INTERVAL_MS");
+  expect(source).toContain("lastRuntimeActivityKey");
+  expect(source).toContain("lastRuntimeActivityAt");
+  expect(source).toContain("runtimeActivityKey(detail)");
+  expect(source).toContain('bridge("/runtime/activity", detail)');
+});
+
+test("port automation is gated to the active helper window", () => {
+  expect(source).toContain("function helperWindowIsPortOwner()");
+  expect(source).toContain("!helperWindowIsPortOwner()");
+  expect(source).toContain("helperWindowIsPortOwner() &&");
+});
+
 test("ports render only in pinned summary card", () => {
   expect(source).toContain("function findPinnedSummaryCard()");
   expect(source).toContain("function findSourcesSummarySection(");

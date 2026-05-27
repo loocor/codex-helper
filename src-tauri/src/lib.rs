@@ -9,6 +9,7 @@ mod logging;
 mod markdown;
 mod models;
 mod ports;
+mod proxy_env;
 mod routes;
 mod runtime;
 pub mod session_actions;
