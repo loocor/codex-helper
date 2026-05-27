@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use serde_json::{json, Value};
+use tauri_plugin_opener::{open_path, open_url, reveal_item_in_dir};
 
 use crate::cdp::{list_targets, pick_codex_page_target, CdpTarget};
 use crate::logging::DiagnosticLogger;
@@ -145,12 +146,9 @@ fn read_latest_log_response(logger: &DiagnosticLogger) -> Value {
 
 fn reveal_path_response(path: &std::path::Path) -> Value {
     let result = if path.is_dir() {
-        std::process::Command::new("open").arg(path).spawn()
+        open_path(path, None::<&str>)
     } else {
-        std::process::Command::new("open")
-            .arg("-R")
-            .arg(path)
-            .spawn()
+        reveal_item_in_dir(path)
     };
     match result {
         Ok(_) => json!({ "status": "ok", "path": path.to_string_lossy() }),
@@ -177,7 +175,8 @@ async fn open_devtools_response(debug_port: u16) -> Value {
         Ok(url) => url,
         Err(error) => return json!({ "status": "failed", "message": error.to_string() }),
     };
-    match std::process::Command::new("open").arg(&url).spawn() {
+    let target_id = target_id.trim();
+    match open_url(&url, None::<&str>) {
         Ok(_) => json!({ "status": "ok", "targetId": target_id, "url": url }),
         Err(error) => json!({ "status": "failed", "message": error.to_string() }),
     }
@@ -188,7 +187,7 @@ fn open_external_local_url_response(payload: &Value) -> Value {
         Ok(url) => url,
         Err(message) => return json!({ "status": "failed", "message": message }),
     };
-    match std::process::Command::new("open").arg(&url).spawn() {
+    match open_url(&url, None::<&str>) {
         Ok(_) => json!({ "status": "ok", "url": url }),
         Err(error) => json!({ "status": "failed", "message": error.to_string() }),
     }

@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import {
 	appendFileSync,
 	existsSync,
@@ -11,12 +10,13 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { listTargets, pickCodexPageTarget } from "./cdp";
 import {
-	PortForwardManager,
 	discoverRemoteListeningPorts,
 	discoveryRequestFromPayload,
+	PortForwardManager,
 	requestFromPayload,
 } from "./ports";
 import { invokeRustBridge, isRustBridgePath } from "./rust-bridge";
+import { launchSystemOpen } from "./system-open";
 
 import {
 	fallbackOpenRequestResponse,
@@ -241,9 +241,7 @@ function readLatestLogContents(): string {
 
 function openPath(path: string, reveal = false): JsonValue {
 	try {
-		const args = reveal ? ["-R", path] : [path];
-		const child = spawn("open", args, { stdio: "ignore", detached: true });
-		child.unref();
+		launchSystemOpen(path, { reveal });
 		return { status: "ok", path };
 	} catch (error) {
 		return {
