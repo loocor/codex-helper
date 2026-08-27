@@ -8,8 +8,26 @@ const RUNTIME_FOOTER: &str = "\n})();\n";
 
 include!(concat!(env!("OUT_DIR"), "/runtime_modules.rs"));
 
+const BUILD_DATE_PLACEHOLDER_LITERAL: &str = "\"__CODEX_HELPER_BUILD_DATE__\"";
+
+fn helper_build_date() -> &'static str {
+    let date = env!("CODEX_HELPER_BUILD_DATE");
+    if date.is_empty() {
+        panic!("CODEX_HELPER_BUILD_DATE was empty at compile time");
+    }
+    date
+}
+
+fn helper_build_date_literal() -> String {
+    serde_json::to_string(helper_build_date()).expect("serialize helper build date")
+}
+
 fn bundled_runtime() -> String {
     let body = RUNTIME_MODULE_SOURCES.join("\n\n");
+    if !body.contains(BUILD_DATE_PLACEHOLDER_LITERAL) {
+        panic!("runtime bundle is missing the helper build date placeholder");
+    }
+    let body = body.replace(BUILD_DATE_PLACEHOLDER_LITERAL, &helper_build_date_literal());
     format!("{RUNTIME_HEADER}{body}{RUNTIME_FOOTER}")
 }
 
@@ -78,5 +96,19 @@ mod tests {
         );
         assert_eq!(bundle[2], "window.a = true;");
         assert_eq!(bundle[3], "window.b = true;");
+    }
+
+    #[test]
+    fn runtime_bundle_injects_helper_build_date() {
+        let bundled = bundled_runtime();
+        let expected = format!("const helperBuildDate = {};", helper_build_date_literal());
+        assert!(
+            !bundled.contains("__CODEX_HELPER_BUILD_DATE__"),
+            "packaged runtime left the build date placeholder in place"
+        );
+        assert!(
+            bundled.contains(&expected),
+            "packaged runtime did not inject the compile-time helper build date"
+        );
     }
 }
