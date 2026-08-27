@@ -252,11 +252,20 @@ pub fn find_codex_page_target(targets: &[CdpTarget]) -> Option<&CdpTarget> {
         .find(|target| is_codex_page_target(target) && has_target_websocket(target))
 }
 
+fn is_codex_app_url(url: Option<&str>) -> bool {
+    let Some(url) = url else {
+        return false;
+    };
+    url == CODEX_APP_URL
+        || url.starts_with("app://-/index.html?")
+        || url.starts_with("app://-/index.html#")
+}
+
 fn is_codex_page_target(target: &CdpTarget) -> bool {
     if target.target_type != "page" {
         return false;
     }
-    if target.url.as_deref() == Some(CODEX_APP_URL) {
+    if is_codex_app_url(target.url.as_deref()) {
         return true;
     }
     format!(
@@ -507,6 +516,20 @@ mod tests {
         let targets = vec![target("one", "page", "Other", Some("ws://one"))];
 
         assert!(find_codex_page_target(&targets).is_none());
+    }
+
+    #[test]
+    fn cdp_accepts_chatgpt_desktop_index_url() {
+        let mut chatgpt = target("chatgpt", "page", "ChatGPT", Some("ws://chatgpt"));
+        chatgpt.url = Some("app://-/index.html".to_string());
+        let mut hash = target("chatgpt-hash", "page", "ChatGPT", Some("ws://hash"));
+        hash.url = Some("app://-/index.html#/settings".to_string());
+        let mut root = target("chatgpt-root", "page", "ChatGPT", Some("ws://root"));
+        root.url = Some("app://-/".to_string());
+
+        assert!(is_codex_page_target(&chatgpt));
+        assert!(is_codex_page_target(&hash));
+        assert!(!is_codex_page_target(&root));
     }
 
     #[tokio::test]

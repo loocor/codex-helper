@@ -1,11 +1,11 @@
 import { existsSync } from "node:fs";
 
-export const defaultCodexAppPath = "/Applications/Codex.app";
+export const defaultCodexAppPath = "/Applications/ChatGPT.app";
 
 export function resolveCodexAppPath(explicitPath?: string): string {
 	const candidate = explicitPath?.trim() || defaultCodexAppPath;
 	if (!existsSync(candidate)) {
-		throw new Error(`Codex app not found: ${candidate}`);
+		throw new Error(`Desktop app not found: ${candidate}`);
 	}
 	return candidate;
 }

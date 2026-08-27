@@ -150,11 +150,16 @@ export function pickCodexPageTarget(targets: CdpTarget[]): CdpTarget {
 	return selected;
 }
 
+export function isCodexAppUrl(url?: string): boolean {
+	if (!url) return false;
+	return url === CODEX_APP_URL || url.startsWith(`${CODEX_APP_URL}?`) || url.startsWith(`${CODEX_APP_URL}#`);
+}
+
 export function isCodexPageTarget(target: CdpTarget): boolean {
 	const titleAndUrl = `${target.title ?? ""} ${target.url ?? ""}`.toLowerCase();
 	return (
 		target.type === "page" &&
-		(target.url === CODEX_APP_URL || titleAndUrl.includes("codex"))
+		(isCodexAppUrl(target.url) || titleAndUrl.includes("codex"))
 	);
 }
 

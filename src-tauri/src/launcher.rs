@@ -7,25 +7,23 @@ use tokio::process::{Child, Command};
 use crate::cdp;
 use crate::proxy_env::loopback_no_proxy_value;
 
-pub const DEFAULT_CODEX_APP_PATH: &str = "/Applications/Codex.app";
+pub const DEFAULT_CODEX_APP_PATH: &str = "/Applications/ChatGPT.app";
 
 pub fn resolve_codex_app_path(explicit_path: Option<&Path>) -> anyhow::Result<PathBuf> {
     let candidate = explicit_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_CODEX_APP_PATH));
     if !candidate.exists() {
-        anyhow::bail!("Codex app not found: {}", candidate.display());
+        anyhow::bail!("Desktop app not found: {}", candidate.display());
     }
     Ok(candidate)
 }
 
 pub fn codex_executable_path(app_path: &Path) -> PathBuf {
-    if app_path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        == Some("app")
-    {
-        return app_path.join("Contents").join("MacOS").join("Codex");
+    if is_app_bundle_path(app_path) {
+        if let Some(bundle_name) = app_path.file_stem() {
+            return app_path.join("Contents").join("MacOS").join(bundle_name);
+        }
     }
     app_path.to_path_buf()
 }
@@ -154,20 +152,27 @@ mod tests {
 
     #[test]
     fn launcher_reports_missing_codex_app_path() {
-        let missing = Path::new("/tmp/codex-helper-missing/Codex.app");
+        let missing = Path::new("/tmp/codex-helper-missing/ChatGPT.app");
 
         let error = resolve_codex_app_path(Some(missing)).unwrap_err();
 
         assert_eq!(
             error.to_string(),
-            "Codex app not found: /tmp/codex-helper-missing/Codex.app"
+            "Desktop app not found: /tmp/codex-helper-missing/ChatGPT.app"
         );
     }
 
     #[test]
     fn launcher_resolves_macos_bundle_executable_path() {
-        let executable = codex_executable_path(Path::new("/Applications/Codex.app"));
+        assert_eq!(DEFAULT_CODEX_APP_PATH, "/Applications/ChatGPT.app");
 
+        let chatgpt = codex_executable_path(Path::new("/Applications/ChatGPT.app"));
+        assert_eq!(
+            chatgpt,
+            PathBuf::from("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT")
+        );
+
+        let executable = codex_executable_path(Path::new("/Applications/Codex.app"));
         assert_eq!(
             executable,
             PathBuf::from("/Applications/Codex.app/Contents/MacOS/Codex")
@@ -183,15 +188,18 @@ mod tests {
 
     #[test]
     fn launcher_uses_launchservices_for_macos_app_bundles() {
-        let command =
-            codex_launch_command_for_platform(Path::new("/Applications/Codex.app"), 9229, "macos");
+        let command = codex_launch_command_for_platform(
+            Path::new("/Applications/ChatGPT.app"),
+            9229,
+            "macos",
+        );
 
         assert_eq!(command.program, PathBuf::from("open"));
         assert_eq!(
             command.args,
             vec![
                 "-na",
-                "/Applications/Codex.app",
+                "/Applications/ChatGPT.app",
                 "--args",
                 "--remote-debugging-port=9229",
                 "--remote-debugging-address=127.0.0.1",

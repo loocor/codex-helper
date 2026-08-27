@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { basename } from "node:path";
 
 import { hasCodexCdpTarget, isDebugPortReady, waitForDebugPort } from "./cdp";
 import type { LaunchTimer } from "./debug";
@@ -6,7 +7,10 @@ import type { PortHold } from "./debug-port";
 import { describePortBlockers, listenPidsOnPort, processCommand } from "./port";
 
 export function codexBinaryPath(appPath: string): string {
-	if (appPath.endsWith(".app")) return `${appPath}/Contents/MacOS/Codex`;
+	if (appPath.endsWith(".app")) {
+		const bundleName = basename(appPath, ".app");
+		return `${appPath}/Contents/MacOS/${bundleName}`;
+	}
 	return appPath;
 }
 
@@ -39,6 +43,9 @@ export function codexLaunchCommand(
 export function isKillablePortBlocker(command: string): boolean {
 	const normalized = command.toLowerCase();
 	return (
+		normalized.includes("chatgpt.app") ||
+		normalized.includes("/chatgpt.app/") ||
+		normalized.includes("/contents/macos/chatgpt") ||
 		normalized.includes("codex.app") ||
 		normalized.includes("/codex.app/") ||
 		normalized.includes("/contents/macos/codex")

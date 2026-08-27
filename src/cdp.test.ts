@@ -4,6 +4,7 @@ import {
 	codexInjectablePageTargets,
 	codexPageTargets,
 	findCodexPageTarget,
+	isCodexPageTarget,
 	pickCodexPageTarget,
 	type CdpTarget,
 } from "./cdp";
@@ -85,4 +86,23 @@ test("codexInjectablePageTargets accepts browser target infos", () => {
 	expect(
 		codexInjectablePageTargets(targets).map((target) => target.id),
 	).toEqual(["browser-page"]);
+});
+
+test("isCodexPageTarget accepts ChatGPT desktop app:// pages", () => {
+	expect(
+		isCodexPageTarget(target("chatgpt", "ChatGPT", "app://-/index.html")),
+	).toBe(true);
+	expect(
+		isCodexPageTarget(
+			target("chatgpt-query", "ChatGPT", "app://-/index.html#/settings"),
+		),
+	).toBe(true);
+	expect(
+		isCodexPageTarget(target("chatgpt-root", "ChatGPT", "app://-/")),
+	).toBe(false);
+	expect(
+		isCodexPageTarget(
+			target("web", "ChatGPT", "https://chatgpt.com/"),
+		),
+	).toBe(false);
 });
