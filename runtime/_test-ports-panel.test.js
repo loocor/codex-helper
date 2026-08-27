@@ -217,9 +217,11 @@ test("pinned ports row template falls back when Sources has no rows", () => {
     source.indexOf("function findSummaryIconRowTemplate("),
   );
 
-  expect(findSummaryRowTemplate).toContain("host.querySelectorAll");
+  expect(findSummaryRowTemplate).toContain("querySummaryPanelRows(host)");
   expect(findSummaryRowTemplate).toContain("helperPortsPinnedAttribute");
   expect(findSummaryRowTemplate).toContain("summary-panel-row-accessory");
+  expect(source).toContain("summary-panel-item");
+  expect(source).toContain("function querySummaryPanelRows(");
 });
 
 test("detected lifecycle state overrides active tunnel rows in summary", () => {
@@ -235,7 +237,7 @@ test("port forwarding disabled removes pinned summary UI", () => {
   expect(source).toContain("stopPortScanLoop();");
 });
 
-test("non-remote sessions do not render pinned port forwarding UI", () => {
+test("non-remote sessions still render pinned port forwarding UI when enabled", () => {
   const maintainPortsPanelNow = source.slice(
     source.indexOf("function maintainPortsPanelNow("),
     source.indexOf("function activePortsForCurrentSession("),
@@ -244,10 +246,20 @@ test("non-remote sessions do not render pinned port forwarding UI", () => {
     source.indexOf("async function refreshPortsPanelIfVisible("),
     source.indexOf("async function handlePortCommand("),
   );
+  const portForwardingUiAvailable = source.slice(
+    source.indexOf("function portForwardingUiAvailable("),
+    source.indexOf("function renderPortsPinnedSummary("),
+  );
 
+  expect(portForwardingUiAvailable).toContain(
+    "return featureSettings.portForwardingEnabled;",
+  );
+  expect(portForwardingUiAvailable).not.toContain("hasRemoteForwardingContext()");
   expect(maintainPortsPanelNow).toContain("!portForwardingUiAvailable()");
+  expect(maintainPortsPanelNow).toContain("isPortForwardingOperational()");
   expect(refreshPortsPanelIfVisible).toContain("!portForwardingUiAvailable()");
-  expect(source).toContain("function portForwardingUiAvailable()");
+  expect(source).toContain("Available on remote sessions");
+  expect(source).toContain("Connect to a remote session to forward ports.");
 });
 
 test("ports detection uses session sidebar state and debounced pinned UI", () => {

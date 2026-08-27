@@ -724,7 +724,11 @@ test("remote port lifecycle loop is not gated by pinned summary visibility", () 
   expect(maintainPortsPanelNow.indexOf("ensurePortScanLoop();")).toBeLessThan(
     maintainPortsPanelNow.indexOf("const card = findPinnedSummaryCard();"),
   );
-  expect(maintainPortsPanelNow).not.toContain("stopPortScanLoop();");
+  expect(maintainPortsPanelNow).toContain("isPortForwardingOperational()");
+  expect(maintainPortsPanelNow).toContain("stopPortScanLoop();");
+  expect(maintainPortsPanelNow.indexOf("stopPortScanLoop();")).toBeLessThan(
+    maintainPortsPanelNow.indexOf("const card = findPinnedSummaryCard();"),
+  );
 });
 
 test("remote port sync is throttled between session changes", () => {

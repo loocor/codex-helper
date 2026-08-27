@@ -384,9 +384,8 @@ function hasActiveTerminal() {
 function pinnedSummaryHasRow(label) {
   const card = findPinnedSummaryCard();
   if (!(card instanceof HTMLElement)) return false;
-  return Array.from(card.querySelectorAll("[class*='summary-panel-row']")).some(
-    (row) =>
-      row instanceof HTMLElement && isVisibleElement(row) && exactText(row, label),
+  return querySummaryPanelRows(card).some(
+    (row) => isVisibleElement(row) && exactText(row, label),
   );
 }
 
@@ -1283,10 +1282,34 @@ function findPinnedSummaryCard() {
   return best;
 }
 
+const SUMMARY_PANEL_ROW_SELECTOR =
+  "[class*='summary-panel-item'], [class*='summary-panel-row']";
+
+function isSummaryPanelRow(node) {
+  if (!(node instanceof HTMLElement)) return false;
+  const className = String(node.className || "");
+  if (className.includes("summary-panel-row-accessory")) return false;
+  return (
+    className.includes("summary-panel-item") ||
+    className.includes("summary-panel-row")
+  );
+}
+
+function querySummaryPanelRows(root) {
+  if (!(root instanceof Element)) return [];
+  return Array.from(root.querySelectorAll(SUMMARY_PANEL_ROW_SELECTOR)).filter(
+    isSummaryPanelRow,
+  );
+}
+
+function querySummaryPanelRow(root) {
+  return querySummaryPanelRows(root)[0] || null;
+}
+
 function findPinnedSummarySectionsHost(card) {
   return (
     card.querySelector(
-      ".flex.h-fit.max-h-full.min-h-0.flex-col.gap-3.overflow-y-auto",
+      ".flex.h-fit.max-h-full.min-h-0.flex-col.overflow-y-auto",
     ) ||
     Array.from(card.children).find(
       (child) =>
@@ -1298,59 +1321,50 @@ function findPinnedSummarySectionsHost(card) {
   );
 }
 
-function findEnvironmentSummarySection(host) {
+function findSummarySectionByLabel(host, label) {
   return Array.from(host.querySelectorAll("section")).find(
     (section) =>
       section instanceof HTMLElement &&
       !section.hasAttribute(helperPortsPinnedAttribute) &&
-      (section.textContent || "").includes("Environment"),
+      (section.textContent || "").includes(label),
   );
 }
 
+function findEnvironmentSummarySection(host) {
+  return findSummarySectionByLabel(host, "Environment");
+}
+
 function findSourcesSummarySection(host) {
-  return Array.from(host.querySelectorAll("section")).find(
-    (section) =>
-      section instanceof HTMLElement &&
-      !section.hasAttribute(helperPortsPinnedAttribute) &&
-      (section.textContent || "").includes("Sources"),
-  );
+  return findSummarySectionByLabel(host, "Sources");
 }
 
 function findSummaryRowTemplate(host) {
   const environment = findEnvironmentSummarySection(host);
   if (environment instanceof HTMLElement) {
-    const commitRow = Array.from(
-      environment.querySelectorAll("[class*='summary-panel-row']"),
-    ).find(
-      (row) =>
-        row instanceof HTMLElement && textOf(row).includes("Commit"),
-    );
+    const envRows = querySummaryPanelRows(environment);
+    const commitRow = envRows.find((row) => textOf(row).includes("Commit"));
     if (commitRow instanceof HTMLElement) return commitRow;
 
-    const actionRow = Array.from(
-      environment.querySelectorAll("[class*='summary-panel-row']"),
-    ).find(
+    const actionRow = envRows.find(
       (row) =>
-        row instanceof HTMLElement &&
-        row.querySelector("[class*='summary-panel-row-accessory']"),
+        row.querySelector("[class*='summary-panel-row-accessory']") ||
+        row.querySelector("button"),
     );
     if (actionRow instanceof HTMLElement) return actionRow;
-
-    const row = environment.querySelector("[class*='summary-panel-row']");
-    if (row instanceof HTMLElement) return row;
+    if (envRows[0] instanceof HTMLElement) return envRows[0];
   }
 
   const sources = findSourcesSummarySection(host);
   if (!(sources instanceof HTMLElement)) return null;
-  const row = sources.querySelector("[class*='summary-panel-row']");
+  const row = querySummaryPanelRow(sources);
   if (row instanceof HTMLElement) return row;
   const fallback = fallbackSummaryRowTemplate(sources);
   if (fallback instanceof HTMLElement) return fallback;
-  return Array.from(host.querySelectorAll("[class*='summary-panel-row']")).find(
+  return querySummaryPanelRows(host).find(
     (candidate) =>
-      candidate instanceof HTMLElement &&
       !candidate.closest(`[${helperPortsPinnedAttribute}]`) &&
-      candidate.querySelector("[class*='summary-panel-row-accessory']"),
+      (candidate.querySelector("[class*='summary-panel-row-accessory']") ||
+        candidate.querySelector("button")),
   );
 }
 
@@ -1363,14 +1377,12 @@ function fallbackSummaryRowTemplate(sources) {
 function findSummaryIconRowTemplate(host, label) {
   const environment = findEnvironmentSummarySection(host);
   if (environment instanceof HTMLElement) {
-    const row = Array.from(
-      environment.querySelectorAll("[class*='summary-panel-row']"),
-    ).find((candidate) => exactText(candidate, label));
+    const row = querySummaryPanelRows(environment).find((candidate) =>
+      exactText(candidate, label),
+    );
     if (row instanceof HTMLElement) return row;
   }
-  return Array.from(host.querySelectorAll("[class*='summary-panel-row']")).find(
-    (row) => row instanceof HTMLElement && exactText(row, label),
-  );
+  return querySummaryPanelRows(host).find((row) => exactText(row, label));
 }
 
 function findPortForwardListContainer(section) {
@@ -1402,6 +1414,7 @@ function setSummarySectionTitle(section, title) {
 
 function summaryRowLabelNode(row) {
   return (
+    row.querySelector("span.min-w-0.flex-1") ||
     row.querySelector("span.flex.min-w-0.flex-1 span") ||
     row.querySelector("span.flex.min-w-0.flex-1") ||
     row.querySelector("span")
@@ -1822,6 +1835,9 @@ function emptyPortForwardLabel(rows, context = sessionContextFromDom()) {
   if (state?.status === "unreachable") {
     return "Remote unavailable";
   }
+  if (!hasRemoteForwardingContext()) {
+    return "Available on remote sessions";
+  }
   if (rows.length === 0) {
     return "No ports detected yet";
   }
@@ -1891,7 +1907,7 @@ function portForwardPinnedSectionHasRows(section) {
   const list = findPortForwardListContainer(section);
   return Boolean(
     list instanceof HTMLElement &&
-    list.querySelector("[class*='summary-panel-row']"),
+    querySummaryPanelRow(list),
   );
 }
 
@@ -2016,7 +2032,7 @@ function ensurePortsPinnedSection(card) {
     if (
       existing.getAttribute("data-codex-helper-ports-template") ===
       "environment" &&
-      existing.querySelector("[class*='summary-panel-row']")
+      querySummaryPanelRow(existing)
     ) {
       installPortForwardPinnedDisclosure(existing);
       installPortForwardSectionSettings(existing, host);
@@ -2044,7 +2060,7 @@ function ensurePortsPinnedSection(card) {
 }
 
 function portForwardingUiAvailable() {
-  return featureSettings.portForwardingEnabled && hasRemoteForwardingContext();
+  return featureSettings.portForwardingEnabled;
 }
 
 function renderPortsPinnedSummary(activePorts) {
@@ -2094,10 +2110,14 @@ function maintainPortsPanelNow() {
     removePortsPinnedSummaryUi();
     return;
   }
-  ensurePortScanLoop();
-  syncRemoteSessionPorts().catch((error) => {
-    handleRemotePortDiscoveryFailure(error);
-  });
+  if (isPortForwardingOperational()) {
+    ensurePortScanLoop();
+    syncRemoteSessionPorts().catch((error) => {
+      handleRemotePortDiscoveryFailure(error);
+    });
+  } else {
+    stopPortScanLoop();
+  }
 
   const card = findPinnedSummaryCard();
   if (!(card instanceof HTMLElement)) {
