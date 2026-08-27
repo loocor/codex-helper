@@ -45,13 +45,13 @@ export type BridgeCaller = {
 type HelperSettings = {
 	markdownExportEnabled: boolean;
 	sessionMoveEnabled: boolean;
-	autoRenameMenuEnabled: boolean;
 	markdownFriendlyFilenameEnabled: boolean;
 	autoNamingMinChars: number;
 	autoNamingMaxChars: number;
 	portForwardingEnabled: boolean;
 	portAutoForwardWeb: boolean;
 	portSameLocalPort: boolean;
+	hideUsageLimitBannerEnabled: boolean;
 };
 type HelperSettingKey = keyof HelperSettings;
 type AutoNamingAliasKey = "autoNamingMinWords" | "autoNamingMaxWords";
@@ -59,15 +59,18 @@ type AutoNamingAliasKey = "autoNamingMinWords" | "autoNamingMaxWords";
 const defaultSettings: HelperSettings = {
 	markdownExportEnabled: false,
 	sessionMoveEnabled: false,
-	autoRenameMenuEnabled: true,
 	markdownFriendlyFilenameEnabled: true,
 	autoNamingMinChars: 4,
 	autoNamingMaxChars: 10,
 	portForwardingEnabled: false,
 	portAutoForwardWeb: true,
 	portSameLocalPort: true,
+	hideUsageLimitBannerEnabled: false,
 };
-const legacySettingsKeys = new Set(["sessionDeleteEnabled"]);
+const legacySettingsKeys = new Set([
+	"sessionDeleteEnabled",
+	"autoRenameMenuEnabled",
+]);
 
 const portManager = new PortForwardManager();
 
@@ -230,9 +233,6 @@ function setSettingValue(
 		case "sessionMoveEnabled":
 			settings.sessionMoveEnabled = value;
 			return;
-		case "autoRenameMenuEnabled":
-			settings.autoRenameMenuEnabled = value;
-			return;
 		case "markdownFriendlyFilenameEnabled":
 			settings.markdownFriendlyFilenameEnabled = value;
 			return;
@@ -244,6 +244,9 @@ function setSettingValue(
 			return;
 		case "portSameLocalPort":
 			settings.portSameLocalPort = value;
+			return;
+		case "hideUsageLimitBannerEnabled":
+			settings.hideUsageLimitBannerEnabled = value;
 			return;
 	}
 }
@@ -405,7 +408,8 @@ export async function handleBridgeRequest(
 				const targetId = requiredCallerTargetId(caller);
 				const targets = await listTargets(debugPort);
 				const url = devtoolsUrlForTargetId(debugPort, targetId, targets);
-				return openPath(url);
+				launchSystemOpen(url, { preferChrome: true });
+				return { status: "ok", targetId, url };
 			} catch (error) {
 				return {
 					status: "failed",

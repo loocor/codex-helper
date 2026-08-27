@@ -12,6 +12,7 @@ function installObserver() {
   observerInstalled = true;
   const observer = new MutationObserver(() => {
     maintainPortsPanel();
+    maintainUsageLimitBanner();
     installNativeHelperSettingsGroup();
     if (helperNativeSettingsRoot && !helperNativeSettingsRoot.isConnected) {
       clearNativeHelperSettingsPage();
@@ -284,6 +285,7 @@ installHelperRuntimeEventListeners();
 installHelperStyles();
 removeLegacyPortsBottomPanelUi();
 maintainPortsPanel();
+maintainUsageLimitBanner();
 installNativeHelperSettingsGroup();
 logDiagnostic("runtime.ready", helperRuntimeActivityDetail());
 reportHelperRuntimeActivity();

@@ -10,9 +10,7 @@ use crate::ports::{
     discover_remote_listening_ports, discovery_request_from_payload, request_from_payload,
     PortForwardManager,
 };
-use crate::session_actions::{
-    auto_rename_chat_response, export_markdown_response, fork_thread_project_response,
-};
+use crate::session_actions::{export_markdown_response, fork_thread_project_response};
 use crate::settings::{read_settings, update_settings};
 use crate::state_dir::StateDir;
 use crate::zed::{
@@ -115,7 +113,6 @@ pub async fn handle_bridge_request(ctx: BridgeContext, request: BridgeRequest) -
         "/state/reveal" => reveal_path_response(&ctx.state_dir.root),
         "/devtools/open" => open_devtools_response(ctx.debug_port, &caller.target_id).await,
         "/url/open-external" => open_external_local_url_response(&payload),
-        "/auto-rename-chat" => auto_rename_chat_response(&payload),
         "/export-markdown" => export_markdown_response(&payload),
         "/fork-thread-project" => fork_thread_project_response(&payload),
         "/ports/list" => ctx.port_manager.list().await,
@@ -254,10 +251,23 @@ async fn open_devtools_response(debug_port: u16, target_id: &str) -> Value {
         Err(error) => return json!({ "status": "failed", "message": error.to_string() }),
     };
     let target_id = target_id.trim();
-    match open_url(&url, None::<&str>) {
+    match open_devtools_url(&url) {
         Ok(_) => json!({ "status": "ok", "targetId": target_id, "url": url }),
-        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+        Err(error) => json!({ "status": "failed", "message": error }),
     }
+}
+
+fn open_devtools_url(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        const CHROME_APP: &str = "/Applications/Google Chrome.app";
+        if !std::path::Path::new(CHROME_APP).exists() {
+            return Err("Google Chrome is required to open DevTools".to_string());
+        }
+        return open_url(url, Some(CHROME_APP)).map_err(|error| error.to_string());
+    }
+    #[cfg(not(target_os = "macos"))]
+    open_url(url, None::<&str>).map_err(|error| error.to_string())
 }
 
 fn open_external_local_url_response(payload: &Value) -> Value {
@@ -321,27 +331,27 @@ fn local_browser_url_from_payload(payload: &Value) -> Result<String, String> {
 }
 
 pub fn devtools_url(debug_port: u16, target: &CdpTarget) -> anyhow::Result<String> {
-    if let Some(frontend_url) = target
-        .devtools_frontend_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-    {
-        return Ok(normalize_devtools_frontend_url(debug_port, frontend_url));
-    }
-
     let websocket_url = target
         .web_socket_debugger_url
         .as_deref()
         .map(str::trim)
+        .filter(|url| !url.is_empty());
+    if let Some(websocket_url) = websocket_url {
+        let websocket_endpoint = websocket_url
+            .strip_prefix("ws://")
+            .ok_or_else(|| anyhow::anyhow!("Codex DevTools websocket URL must start with ws://"))?;
+        return Ok(format!(
+            "http://127.0.0.1:{debug_port}/devtools/inspector.html?ws={websocket_endpoint}"
+        ));
+    }
+
+    let frontend_url = target
+        .devtools_frontend_url
+        .as_deref()
+        .map(str::trim)
         .filter(|url| !url.is_empty())
         .ok_or_else(|| anyhow::anyhow!("Selected Codex DevTools target has no websocket URL"))?;
-    let websocket_endpoint = websocket_url
-        .strip_prefix("ws://")
-        .ok_or_else(|| anyhow::anyhow!("Codex DevTools websocket URL must start with ws://"))?;
-    Ok(format!(
-        "http://127.0.0.1:{debug_port}/devtools/inspector.html?ws={websocket_endpoint}"
-    ))
+    Ok(normalize_devtools_frontend_url(debug_port, frontend_url))
 }
 
 fn devtools_url_for_target_id(
@@ -411,6 +421,25 @@ mod tests {
         assert_eq!(
             devtools_url(9229, &target).expect("devtools url"),
             "http://127.0.0.1:9229/devtools/inspector.html?ws=localhost:9229/devtools/page/reported-target"
+        );
+    }
+
+    #[test]
+    fn devtools_url_prefers_local_inspector_over_hosted_frontend() {
+        let target = CdpTarget {
+            id: "target-1".to_string(),
+            target_type: "page".to_string(),
+            title: Some("ChatGPT".to_string()),
+            url: Some("app://-/index.html".to_string()),
+            devtools_frontend_url: Some(
+                "https://chrome-devtools-frontend.appspot.com/serve_rev/@abc/inspector.html?ws=127.0.0.1:9229/devtools/page/target-1".to_string(),
+            ),
+            web_socket_debugger_url: Some("ws://127.0.0.1:9229/devtools/page/target-1".to_string()),
+        };
+
+        assert_eq!(
+            devtools_url(9229, &target).expect("devtools url"),
+            "http://127.0.0.1:9229/devtools/inspector.html?ws=127.0.0.1:9229/devtools/page/target-1"
         );
     }
 

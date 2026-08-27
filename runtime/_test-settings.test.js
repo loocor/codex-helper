@@ -117,10 +117,7 @@ function loadSidebarRefreshHelpers(document = null) {
       extractFunction("normalizeSidebarRefreshExpectation"),
       extractFunction("sidebarRefreshExpectationMatches"),
       extractFunction("refreshSidebarStateForHost"),
-      extractFunction("setSidebarConversationTitleForHost"),
-      extractFunction("sidebarThreadRowsBySessionId"),
-      extractFunction("setSidebarConversationTitleInDom"),
-      "return { diagnostics, setManagers(value) { managers = value; }, refreshSidebarStateForHost, setSidebarConversationTitleForHost, setSidebarConversationTitleInDom };",
+      "return { diagnostics, setManagers(value) { managers = value; }, refreshSidebarStateForHost };",
     ].join("\n"),
   )(document, Element);
 }
@@ -207,7 +204,16 @@ test("settings page exposes port forwarding policy switches", () => {
 test("settings updates refresh port forwarding panel visibility", () => {
   expect(source).toContain("function applySettings(");
   expect(source).toContain("maintainPortsPanel();");
+  expect(source).toContain("maintainUsageLimitBanner();");
   expect(source).toContain("if (featureSettings.portForwardingEnabled) schedulePortScan();");
+});
+
+test("settings page exposes usage-limit overlay hide switch", () => {
+  expect(source).toContain('nativeSettingsGroupSection("Interface"');
+  expect(source).toContain("Hide usage-limit overlay");
+  expect(source).toContain("This does not reset or bypass account limits.");
+  expect(source).toContain('"hideUsageLimitBannerEnabled"');
+  expect(source).toContain("hideUsageLimitBannerEnabled: false");
 });
 
 test("disabling port forwarding stops managed tunnels", () => {
@@ -222,7 +228,8 @@ test("disabling port forwarding stops managed tunnels", () => {
 test("settings page groups options by feature area", () => {
   expect(source).toContain('nativeSettingsGroupSection("Integrations"');
   expect(source).toContain('nativeSettingsGroupSection("Session actions"');
-  expect(source).toContain('nativeSettingsGroupSection("Chat titles"');
+  expect(source).toContain('nativeSettingsGroupSection("Interface"');
+  expect(source).not.toContain('nativeSettingsGroupSection("Chat titles"');
   expect(source).toContain('nativeSettingsGroupSection("Port forwarding"');
   expect(source).not.toContain('>Basic</div>');
   expect(source).not.toContain('sectionHeading("Loaded scripts"');
@@ -237,12 +244,9 @@ test("settings page groups options by feature area", () => {
   expect(source).toContain('forkRemoteProject: "Fork into remote project..."');
   expect(source).toContain('forkLocalProject: "Fork into local project..."');
   expect(source).toContain('forkAnotherProject: "Fork into another project..."');
-  expect(source).toContain('const order = ["autoRename", "export", "fork"]');
-  expect(source).toContain('autoRename: "Regenerate chat title"');
-  expect(source).toContain('bridge("/auto-rename-chat"');
-  expect(source).toContain('logDiagnostic("auto_rename_chat_succeeded"');
-  expect(source).toContain('logDiagnostic("auto_rename_chat_failed"');
-  expect(source).toContain("await setSidebarConversationTitleForHost(");
+  expect(source).toContain('const order = ["export", "fork"]');
+  expect(source).not.toContain('autoRename: "Regenerate chat title"');
+  expect(source).not.toContain('bridge("/auto-rename-chat"');
   expect(source).toContain("autoNamingRangePayload()");
   expect(source).not.toContain('move: "Move Session"');
   expect(source).not.toContain('copy: "Copy Session"');
@@ -279,8 +283,9 @@ test("native settings exposes a dedicated Helper group", () => {
   expect(source).not.toContain('label: "Deleted Sessions"');
   expect(source).toContain('label: "Logs"');
   expect(source).toContain('label: "About"');
+  expect(source).toContain("padding-bottom: 10px");
   expect(source).toContain("installNativeHelperSettingsGroup");
-  expect(source).toContain("heading-base text-token-text-primary");
+  expect(source).toContain("heading-lg font-normal");
   expect(source).toContain("codex-helper-native-settings-page-description");
 });
 
@@ -296,6 +301,18 @@ test("native settings pages follow worktree-style sparse list layout", () => {
   expect(source).not.toContain('nativeSettingsSection("User Scripts"');
   expect(source).not.toContain('nativeSettingsSection("Deleted Sessions"');
   expect(source).not.toContain('nativeSettingsSection("Logs"');
+});
+
+test("native settings switches stay visible when unchecked", () => {
+  expect(source).toContain("codex-helper-switch-track");
+  expect(source).toContain("codex-helper-switch-thumb");
+  expect(source).toContain("transform: translateX(12px)");
+  expect(source).toContain("heading-lg font-normal");
+  expect(source).toContain("rounded-2xl");
+  expect(source).toContain("max-w-3xl");
+  expect(source).toContain("max-width: 48rem");
+  expect(source).toContain("text-xs leading-4 text-balance text-secondary");
+  expect(source).toContain("inset-inline: 1rem");
 });
 
 test("native settings sidebar uses contextual helper icons", () => {
@@ -525,7 +542,7 @@ test("session context menu hooks Codex native menu model", () => {
   expect(source).toContain("replaySessionContextMenu");
   expect(source).toContain("openProjectForkMenu");
   expect(source).toContain("navigateAfterFork(result, target)");
-  expect(source).toContain("Regenerate chat title");
+  expect(source).not.toContain("Regenerate chat title");
   expect(source).toContain("markdown_friendly_filename_succeeded");
   expect(source).toContain("markdown_friendly_filename_failed");
   expect(source).toContain("finishTaskToast(result.warning || result.message || \"Forked\")");
@@ -560,10 +577,6 @@ test("long session actions show a persistent task toast before bridge work", () 
   expect(toastTask).toContain("return (finalMessage) => showHelperToast(finalMessage)");
 
   const actionHandler = extractFunction("handleSessionAction");
-  expect(actionHandler).toContain('showHelperTaskToast("Regenerating chat title...")');
-  expect(actionHandler.indexOf('showHelperTaskToast("Regenerating chat title...")')).toBeLessThan(
-    actionHandler.indexOf('bridge("/auto-rename-chat"'),
-  );
   expect(actionHandler).toContain('showHelperTaskToast("Exporting Markdown...")');
   expect(actionHandler.indexOf('showHelperTaskToast("Exporting Markdown...")')).toBeLessThan(
     actionHandler.indexOf('bridge("/export-markdown"'),
@@ -575,16 +588,8 @@ test("long session actions show a persistent task toast before bridge work", () 
   expect(actionHandler.indexOf('showHelperTaskToast("Forking conversation...")')).toBeLessThan(
     actionHandler.indexOf('bridge("/fork-thread-project"'),
   );
-  expect(actionHandler).toContain(
-    'finishTaskToast(result.message || "Regenerated chat title")',
-  );
   expect(actionHandler).toContain('finishTaskToast(result.message || "Exported")');
   expect(actionHandler).toContain('finishTaskToast(result.warning || result.message || "Forked")');
-  expect(
-    actionHandler.indexOf('finishTaskToast(result.message || "Regenerated chat title")'),
-  ).toBeLessThan(
-    actionHandler.indexOf("await refreshSidebarStateForHost(context.hostId, {"),
-  );
   expect(
     actionHandler.indexOf('finishTaskToast(result.warning || result.message || "Forked")'),
   ).toBeLessThan(
@@ -983,107 +988,7 @@ test("sidebar refresh without expectation reports refresh failures", async () =>
   });
 });
 
-test("auto rename refreshes the sidebar before applying the generated title", () => {
-  expect(source).toContain("function codexThreadId(sessionId)");
-  expect(source).toContain(
-    "async function setSidebarConversationTitleForHost(hostId, sessionId, title)",
-  );
-  expect(source).not.toContain('manager.sendRequest("thread/name/set"');
-  expect(source).toContain("manager.applyThreadTitleUpdateAndNotify({");
-  expect(source).toContain('"sidebar_title_update_failed"');
-  const actionHandler = extractFunction("handleSessionAction");
-  const refreshIndex = actionHandler.indexOf(
-    "await refreshSidebarStateForHost(context.hostId, {\n        conversationId: ref.session_id,\n      });",
-  );
-  const titleUpdateIndex = actionHandler.lastIndexOf(
-    "await setSidebarConversationTitleForHost(",
-  );
-  const domTitleUpdateIndex = actionHandler.lastIndexOf(
-    "setSidebarConversationTitleInDom(row, ref.session_id, result.name || \"\")",
-  );
-  expect(refreshIndex).toBeGreaterThan(-1);
-  expect(titleUpdateIndex).toBeGreaterThan(-1);
-  expect(domTitleUpdateIndex).toBeGreaterThan(-1);
-  expect(refreshIndex).toBeLessThan(titleUpdateIndex);
-  expect(refreshIndex).toBeLessThan(domTitleUpdateIndex);
-});
-
-test("sidebar title update falls back to recent conversations", async () => {
-  const helpers = loadSidebarRefreshHelpers();
-  let patchedConversation = null;
-  helpers.setManagers([
-    {
-      hostId: "local",
-      getConversation() {
-        return null;
-      },
-      getRecentConversations() {
-        return [{ id: "thread-1", title: "Old title" }];
-      },
-      applyThreadTitleUpdateAndNotify(conversation) {
-        patchedConversation = conversation;
-      },
-    },
-  ]);
-
-  const result = await helpers.setSidebarConversationTitleForHost(
-    "",
-    "local:thread-1",
-    "New title",
-  );
-
-  expect(result).toBe(true);
-  expect(patchedConversation).toEqual({ id: "thread-1", title: "New title" });
-});
-
-test("sidebar DOM title update targets the refreshed session row", () => {
-  class Element {
-    constructor(attrs = {}, titleNode = null) {
-      this.attrs = attrs;
-      this.titleNode = titleNode;
-      this.textContent = "";
-    }
-
-    getAttribute(name) {
-      return this.attrs[name] || null;
-    }
-
-    querySelector(selector) {
-      return selector.includes("[data-thread-title]") ? this.titleNode : null;
-    }
-  }
-  const staleTitle = new Element();
-  staleTitle.textContent = "Stale title";
-  const refreshedTitle = new Element();
-  refreshedTitle.textContent = "Old title";
-  const staleRow = new Element(
-    { "data-app-action-sidebar-thread-id": "thread-old" },
-    staleTitle,
-  );
-  const refreshedRow = new Element(
-    { "data-app-action-sidebar-thread-id": "thread-1" },
-    refreshedTitle,
-  );
-  const document = {
-    Element,
-    querySelectorAll() {
-      return [refreshedRow];
-    },
-  };
-  const helpers = loadSidebarRefreshHelpers(document);
-
-  const result = helpers.setSidebarConversationTitleInDom(
-    staleRow,
-    "local:thread-1",
-    "New title",
-  );
-
-  expect(result).toBe(true);
-  expect(staleTitle.textContent).toBe("Stale title");
-  expect(refreshedTitle.textContent).toBe("New title");
-});
-
-test("auto rename preserves remote host context for sidebar title updates", () => {
+test("session export preserves remote host context", () => {
   const document = fakeProjectDocument([], "/srv/current");
   const helpers = loadForkProjectHelpers(document);
   const row = new document.Element({
@@ -1102,9 +1007,6 @@ test("auto rename preserves remote host context for sidebar title updates", () =
   );
   expect(helpers.codexThreadId("remote:thread-1")).toBe("thread-1");
   expect(source).toContain("host_id: context.hostId");
-  expect(source).toContain(
-    "setSidebarConversationTitleForHost(\n        context.hostId",
-  );
 });
 
 test("codex app-server helpers normalize host ids", () => {

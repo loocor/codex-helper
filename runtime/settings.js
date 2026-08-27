@@ -146,6 +146,7 @@ function applySettings(result) {
     }
   }
   maintainPortsPanel();
+  maintainUsageLimitBanner();
   if (featureSettings.portForwardingEnabled) schedulePortScan();
   else if (wasPortForwardingEnabled) handlePortForwardingDisabled();
 }
@@ -240,6 +241,7 @@ async function refreshFeatureSettings() {
     featureSettingsLoaded = true;
   }
   maintainPortsPanel();
+  maintainUsageLimitBanner();
   if (featureSettings.portForwardingEnabled) schedulePortScan();
   return featureSettings;
 }
