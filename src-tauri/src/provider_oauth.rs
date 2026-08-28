@@ -15,7 +15,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::codex_live::set_secret_file_permissions;
+use crate::codex_live::write_secret_file_atomic;
 
 const GITHUB_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
 const COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.38.2";
@@ -131,13 +131,7 @@ fn oauth_path(state_root: &Path, kind: OAuthKind) -> PathBuf {
 }
 
 fn write_secret_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, serde_json::to_vec_pretty(value)?)
-        .with_context(|| format!("Failed to write {}", path.display()))?;
-    set_secret_file_permissions(path)?;
-    Ok(())
+    write_secret_file_atomic(path, serde_json::to_vec_pretty(value)?)
 }
 
 fn http_client() -> anyhow::Result<reqwest::Client> {

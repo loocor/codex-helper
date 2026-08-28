@@ -196,7 +196,9 @@ function renderProviders(result) {
   providerActiveId = typeof result?.activeId === "string" ? result.activeId : "";
   const statusText =
     result?.status === "ok"
-      ? `${providers.length} provider${providers.length === 1 ? "" : "s"}`
+      ? result.proxyError
+        ? String(result.proxyError)
+        : `${providers.length} provider${providers.length === 1 ? "" : "s"}`
       : resultText(result);
   setProviderStatus(statusText);
   const lists = helperSettingsRoots()

@@ -382,6 +382,11 @@ test("native settings pages follow worktree-style sparse list layout", () => {
   expect(settingsSource).toContain("codex-helper-endpoint-models");
   expect(settingsSource).toContain("codex-helper-endpoint-model-tag");
   expect(settingsSource).toContain("data-codex-helper-endpoint-models");
+  expect(settingsSource).toContain('bridge("/endpoint/get")');
+  expect(settingsSource).toContain("result?.proxyError");
+  expect(settingsSource).not.toContain(
+    'result?.baseUrl || "http://127.0.0.1:3721/v1"',
+  );
   expect(source).toContain('"open-log-file": "/diagnostics/reveal-log"');
   expect(settingsSource).not.toContain("codex-helper-native-settings-list-status");
   expect(settingsSource).not.toContain('nativeSettingsSection("User Scripts"');

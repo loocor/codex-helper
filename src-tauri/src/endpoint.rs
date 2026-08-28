@@ -8,9 +8,8 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::codex_live::set_secret_file_permissions;
+use crate::codex_live::write_secret_file_atomic;
 use crate::provider_oauth::HELPER_OAUTH_LIVE_TOKEN;
-use crate::provider_proxy::PROVIDER_PROXY_PORT;
 use crate::providers::{provider_available_models, Provider, ProviderKind};
 
 const KEY_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -56,16 +55,9 @@ pub fn read_store(state_root: &Path) -> anyhow::Result<EndpointStore> {
 }
 
 pub fn write_store(state_root: &Path, store: &EndpointStore) -> anyhow::Result<()> {
-    fs::create_dir_all(state_root)
-        .with_context(|| format!("Failed to create {}", state_root.display()))?;
     let path = endpoint_path(state_root);
     let contents = format!("{}\n", serde_json::to_string_pretty(store)?);
-    fs::write(&path, contents).with_context(|| format!("Failed to write {}", path.display()))?;
-    set_secret_file_permissions(&path)
-}
-
-pub fn default_base_url() -> String {
-    format!("http://127.0.0.1:{PROVIDER_PROXY_PORT}/v1")
+    write_secret_file_atomic(&path, contents)
 }
 
 pub fn list_response(store: &EndpointStore, base_url: &str, provider: Option<&Provider>) -> Value {
@@ -74,11 +66,7 @@ pub fn list_response(store: &EndpointStore, base_url: &str, provider: Option<&Pr
     let models = provider.map(provider_available_models).unwrap_or_default();
     json!({
         "status": "ok",
-        "baseUrl": if base_url.trim().is_empty() {
-            default_base_url()
-        } else {
-            base_url.to_string()
-        },
+        "baseUrl": base_url,
         "keys": store.keys,
         "officialActive": official,
         "models": models,
@@ -253,6 +241,13 @@ mod tests {
     }
 
     #[test]
+    fn list_response_keeps_empty_base_url() {
+        let response = list_response(&EndpointStore::default(), "", None);
+        assert_eq!(response["status"], "ok");
+        assert_eq!(response["baseUrl"], "");
+    }
+
+    #[test]
     fn list_response_includes_active_provider_models() {
         let store = EndpointStore::default();
         let provider = Provider {
@@ -262,10 +257,7 @@ mod tests {
         };
         let response = list_response(&store, "http://127.0.0.1:3721/v1", Some(&provider));
         assert_eq!(response["status"], "ok");
-        assert_eq!(
-            response["models"],
-            json!(["grok-4.6", "grok-4.5"])
-        );
+        assert_eq!(response["models"], json!(["grok-4.6", "grok-4.5"]));
     }
 
     #[test]

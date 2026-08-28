@@ -34,11 +34,13 @@ function nativeSettingsEndpointPageContent() {
 }
 
 function renderEndpoint(result) {
-  const baseUrl = result?.baseUrl || "http://127.0.0.1:3721/v1";
+  const baseUrl = typeof result?.baseUrl === "string" ? result.baseUrl.trim() : "";
   setHelperText("[data-codex-helper-endpoint-base]", baseUrl);
-  const note = result?.officialActive
-    ? "Official ChatGPT is active, so this endpoint is not serving requests."
-    : "Other agents should set this Base URL and one of the keys below. Helper uses the active provider.";
+  const note = result?.proxyError
+    ? result.proxyError
+    : result?.officialActive
+      ? "Official ChatGPT is active, so this endpoint is not serving requests."
+      : "Other agents should set this Base URL and one of the keys below. Helper uses the active provider.";
   setHelperText("[data-codex-helper-endpoint-note]", note);
   renderEndpointModels(result);
   const keys = Array.isArray(result?.keys) ? result.keys : [];

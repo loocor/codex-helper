@@ -16,6 +16,27 @@ pub(crate) fn set_secret_file_permissions(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub(crate) fn write_secret_file_atomic(
+    path: &Path,
+    contents: impl AsRef<[u8]>,
+) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Invalid secret file path: {}", path.display()))?;
+    let temp = path.with_file_name(format!("{file_name}.helper-tmp"));
+    fs::write(&temp, contents.as_ref())
+        .with_context(|| format!("Failed to write {}", temp.display()))?;
+    set_secret_file_permissions(&temp)?;
+    fs::rename(&temp, path).with_context(|| format!("Failed to replace {}", path.display()))?;
+    set_secret_file_permissions(path)?;
+    Ok(())
+}
+
 pub fn default_codex_home() -> PathBuf {
     std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)

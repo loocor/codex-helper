@@ -184,19 +184,31 @@ pub async fn handle_bridge_request(ctx: BridgeContext, request: BridgeRequest) -
             response
         }
         "/providers/reorder" => {
-            let response = providers_reorder_response(&ctx.state_dir.root, &payload);
-            log_provider_event(&ctx.logger, "providers.reordered", &response);
-            response
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                let response = providers_reorder_response(&ctx.state_dir.root, &payload);
+                log_provider_event(&ctx.logger, "providers.reordered", &response);
+                response
+            }
         }
         "/providers/test" => {
-            let response = providers_test_response(&ctx.state_dir.root, &payload).await;
-            log_provider_event(&ctx.logger, "providers.tested", &response);
-            response
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                let response = providers_test_response(&ctx.state_dir.root, &payload).await;
+                log_provider_event(&ctx.logger, "providers.tested", &response);
+                response
+            }
         }
         "/providers/models" => {
-            let response = providers_models_response(&ctx.state_dir.root, &payload).await;
-            log_provider_event(&ctx.logger, "providers.models_fetched", &response);
-            response
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                let response = providers_models_response(&ctx.state_dir.root, &payload).await;
+                log_provider_event(&ctx.logger, "providers.models_fetched", &response);
+                response
+            }
         }
         "/providers/oauth/start" => {
             if let Some(response) = settings_only_action(&caller) {
@@ -240,7 +252,13 @@ pub async fn handle_bridge_request(ctx: BridgeContext, request: BridgeRequest) -
                 response
             }
         }
-        "/endpoint/get" => endpoint_get_response(&ctx.state_dir.root),
+        "/endpoint/get" => {
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                endpoint_get_response(&ctx.state_dir.root)
+            }
+        }
         "/endpoint/keys" => {
             if let Some(response) = settings_only_action(&caller) {
                 response
@@ -423,10 +441,14 @@ fn endpoint_store_response(state_root: &std::path::Path, store: endpoint::Endpoi
                         .find(|item| item.id == active_id)
                 })
         });
-    let base_url = global_provider_proxy()
-        .base_url()
-        .unwrap_or_else(|_| endpoint::default_base_url());
-    endpoint::list_response(&store, &base_url, provider.as_ref())
+    match global_provider_proxy().base_url() {
+        Ok(url) => endpoint::list_response(&store, &url, provider.as_ref()),
+        Err(error) => {
+            let mut response = endpoint::list_response(&store, "", provider.as_ref());
+            response["proxyError"] = json!(error.to_string());
+            response
+        }
+    }
 }
 
 fn providers_list_response(state_root: &std::path::Path) -> Value {

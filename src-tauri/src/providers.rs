@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use crate::codex_live::{
     apply_api_provider, apply_official_provider, auth_has_oauth_login, read_auth,
-    read_config_document, set_secret_file_permissions, write_config_atomic, LiveProviderWrite,
+    read_config_document, write_config_atomic, write_secret_file_atomic, LiveProviderWrite,
     UNIFIED_SESSION_PROVIDER_ID,
 };
 use crate::model_catalog::{apply_provider_catalog, clear_helper_catalog};
@@ -207,12 +207,9 @@ pub fn providers_in_display_order(store: &ProviderStore) -> Vec<&Provider> {
 }
 
 pub fn write_store(state_root: &Path, store: &ProviderStore) -> anyhow::Result<()> {
-    fs::create_dir_all(state_root)
-        .with_context(|| format!("Failed to create {}", state_root.display()))?;
     let path = providers_path(state_root);
     let contents = format!("{}\n", serde_json::to_string_pretty(store)?);
-    fs::write(&path, contents).with_context(|| format!("Failed to write {}", path.display()))?;
-    set_secret_file_permissions(&path)
+    write_secret_file_atomic(&path, contents)
 }
 
 pub fn public_store(store: &ProviderStore) -> ProviderStore {
@@ -948,7 +945,9 @@ mod tests {
     fn read_store_pins_official_provider_first() {
         let dir = tempdir().unwrap();
         let mut store = ProviderStore::default();
-        store.providers.insert(0, sample_api_provider("grok", "Grok"));
+        store
+            .providers
+            .insert(0, sample_api_provider("grok", "Grok"));
         write_store(dir.path(), &store).unwrap();
 
         let loaded = read_store(dir.path()).unwrap();
@@ -961,15 +960,18 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut store = ProviderStore::default();
         store.providers.push(sample_api_provider("grok", "Grok"));
-        store.providers.push(sample_api_provider("deepseek", "DeepSeek"));
+        store
+            .providers
+            .push(sample_api_provider("deepseek", "DeepSeek"));
         write_store(dir.path(), &store).unwrap();
 
-        let loaded = reorder_providers(
-            dir.path(),
-            &json!({ "ids": ["deepseek", "grok"] }),
-        )
-        .unwrap();
-        let ids: Vec<_> = loaded.providers.iter().map(|provider| provider.id.as_str()).collect();
+        let loaded =
+            reorder_providers(dir.path(), &json!({ "ids": ["deepseek", "grok"] })).unwrap();
+        let ids: Vec<_> = loaded
+            .providers
+            .iter()
+            .map(|provider| provider.id.as_str())
+            .collect();
         assert_eq!(ids, ["official", "deepseek", "grok"]);
     }
 
@@ -978,7 +980,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut store = ProviderStore::default();
         store.providers.push(sample_api_provider("grok", "Grok"));
-        store.providers.push(sample_api_provider("deepseek", "DeepSeek"));
+        store
+            .providers
+            .push(sample_api_provider("deepseek", "DeepSeek"));
         write_store(dir.path(), &store).unwrap();
 
         let official = reorder_providers(
