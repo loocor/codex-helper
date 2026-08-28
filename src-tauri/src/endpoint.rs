@@ -1,7 +1,6 @@
 //! Local inbound API keys for the Helper provider proxy.
 
 use std::fs;
-use std::io::Read;
 use std::path::Path;
 
 use anyhow::Context;
@@ -155,9 +154,7 @@ fn random_id() -> anyhow::Result<String> {
 
 fn random_bytes(length: usize) -> anyhow::Result<Vec<u8>> {
     let mut bytes = vec![0u8; length];
-    let mut file = fs::File::open("/dev/urandom").context("Failed to read /dev/urandom")?;
-    file.read_exact(&mut bytes)
-        .context("Failed to read random bytes")?;
+    getrandom::fill(&mut bytes).context("Failed to read random bytes")?;
     Ok(bytes)
 }
 

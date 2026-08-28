@@ -283,7 +283,8 @@ impl ProviderProxy {
         } else {
             anyhow::bail!("Provider API key is required");
         };
-        upstream_request = upstream_request.header("Authorization", format!("Bearer {bearer}"));
+        upstream_request =
+            upstream_request.header("Authorization", authorization_header_value(&bearer));
         let response = upstream_request
             .body(body)
             .send()
@@ -505,7 +506,7 @@ pub async fn test_provider_connection(
         }
     }
     if !bearer.is_empty() {
-        request = request.header("Authorization", format!("Bearer {bearer}"));
+        request = request.header("Authorization", authorization_header_value(&bearer));
     }
     let response = request
         .send()
@@ -536,7 +537,7 @@ pub async fn fetch_provider_models(
         }
     }
     if !bearer.is_empty() {
-        request = request.header("Authorization", format!("Bearer {bearer}"));
+        request = request.header("Authorization", authorization_header_value(&bearer));
     }
     let response = request
         .send()
@@ -595,6 +596,20 @@ fn collect_model_ids(body: &Value) -> Vec<String> {
     ids.sort();
     ids.dedup();
     ids
+}
+
+fn authorization_header_value(bearer: &str) -> String {
+    let trimmed = bearer.trim();
+    if trimmed
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer "))
+    {
+        trimmed.to_string()
+    } else {
+        let mut value = String::from("Bearer ");
+        value.push_str(trimmed);
+        value
+    }
 }
 
 fn join_provider_upstream_url_for(

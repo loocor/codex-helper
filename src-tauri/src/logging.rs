@@ -75,17 +75,19 @@ pub struct LatestLogRecord {
 fn read_file_tail(path: &std::path::Path, max_bytes: usize) -> std::io::Result<String> {
     let mut file = fs::File::open(path)?;
     let len = file.metadata()?.len();
+    let mut seeked = false;
     if len > max_bytes as u64 {
         file.seek(SeekFrom::End(-(max_bytes as i64)))?;
+        seeked = true;
     }
-    let mut buf = String::new();
-    file.read_to_string(&mut buf)?;
-    if len > max_bytes as u64 {
-        if let Some((_, rest)) = buf.split_once('\n') {
-            return Ok(rest.to_string());
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    if seeked {
+        if let Some(index) = bytes.iter().position(|byte| *byte == b'\n') {
+            bytes = bytes.split_off(index + 1);
         }
     }
-    Ok(buf)
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn parse_latest_records(contents: &str) -> Vec<LatestLogRecord> {
