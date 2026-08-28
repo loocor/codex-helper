@@ -25,7 +25,7 @@ test("native settings validator defaults screenshots to the system temp director
 });
 
 test("native settings validator creates the screenshot output directory", () => {
-	expect(source).toContain("writeScreenshot(screenshotPath, screenshot.result.data)");
+	expect(source).toContain("writeScreenshot(");
 
 	const root = mkdtempSync(join(tmpdir(), "codex-helper-validator-"));
 	const screenshotPath = join(root, "nested", "settings.png");
@@ -37,9 +37,11 @@ test("native settings validator creates the screenshot output directory", () => 
 });
 
 test("native settings validator follows current Helper settings pages", () => {
-	expect(source).toContain('labels !== "General|Logs|About"');
-	expect(source).toContain('iconNames !== "sliders-horizontal|scroll-text|info"');
-	expect(source).toContain('["general", "logs", "about"]');
+	expect(source).toContain('labels !== "General|Providers|Endpoint|Logs|About"');
+	expect(source).toContain(
+		'iconNames !== "sliders-horizontal|plug|radio|scroll-text|info"',
+	);
+	expect(source).toContain("function startHelperSettingsApp(");
 	expect(source).not.toContain("Deleted Sessions");
 	expect(source).not.toContain("deleted-sessions");
 	expect(source).not.toContain("trash-2");

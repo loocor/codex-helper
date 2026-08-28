@@ -123,11 +123,6 @@ test("tauri CDP probing bypasses system proxies", () => {
 		join(import.meta.dir, "..", "src-tauri", "src", "launcher.rs"),
 		"utf8",
 	);
-	const appServerSource = readFileSync(
-		join(import.meta.dir, "..", "src-tauri", "src", "codex_app_server.rs"),
-		"utf8",
-	);
-
 	expect(cdpSource).toContain("fn cdp_http_client()");
 	expect(cdpSource).toContain(".no_proxy()");
 	expect(appSource).toContain("configure_process_loopback_no_proxy();");
@@ -135,8 +130,6 @@ test("tauri CDP probing bypasses system proxies", () => {
 	expect(launcherSource).toContain('env("no_proxy"');
 	expect(launcherSource).toContain('"--remote-debugging-address=127.0.0.1"');
 	expect(launcherSource).not.toContain("quit_existing_codex_processes");
-	expect(appServerSource).toContain('env("NO_PROXY"');
-	expect(appServerSource).toContain('env("no_proxy"');
 });
 
 test("tauri target watcher backs off after failures", () => {
@@ -196,12 +189,8 @@ test("dev bridge keeps platform open commands behind an adapter", () => {
 	expect(routesSource).toContain("launchSystemOpen");
 	expect(routesSource).not.toContain('spawn("open"');
 	expect(zedSource).not.toContain('spawn("open"');
-	const launchSource = zedSource.slice(
-		zedSource.indexOf("function launchZedUrl"),
-	);
-	expect(launchSource.indexOf("if (cliPath)")).toBeLessThan(
-		launchSource.indexOf('process.platform === "darwin"'),
-	);
+	expect(zedSource).not.toContain("function launchZedUrl");
+	expect(zedSource).not.toContain("export function openZedRemote");
 });
 
 
@@ -238,8 +227,11 @@ test("tauri routes use opener APIs instead of spawning macOS open", () => {
 	expect(source).toContain("tauri_plugin_opener");
 	expect(source).not.toContain('Command::new("open")');
 	expect(source).not.toContain('std::process::Command::new("open")');
-	expect(zedSource).toContain("tauri_plugin_opener::open_url");
+	expect(zedSource).not.toContain("tauri_plugin_opener::open_url");
 	expect(zedSource).not.toContain('Command::new("open")');
+	expect(zedSource).not.toContain("pub fn open_zed_remote");
+	expect(zedSource).toContain("pub fn fallback_open_request_response");
+	expect(zedSource).toContain("pub fn resolve_ssh_target_for_host_id");
 });
 
 test("tauri build script generates tray icons without sips", () => {

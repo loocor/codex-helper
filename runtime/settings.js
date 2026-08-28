@@ -26,38 +26,98 @@ function focusHelperSettingsSection(sectionId) {
   return false;
 }
 
+async function openHelperSettingsFromRuntime(pageId = "general") {
+  const result = await bridge("/settings/open", { page: pageId || "general" });
+  if (result?.status !== "ok") {
+    throw new Error(result?.message || "Failed to open Helper Settings");
+  }
+}
+
 async function refreshHelperPage() {
   if (helperSettingsRoots().length === 0) return;
-  const [backend, scripts, settings, zed, log] = await Promise.all([
+  const requests = [
     bridge("/backend/status"),
     bridge("/runtime/user-scripts"),
     bridge("/settings/get"),
-    bridge("/zed-remote/status"),
-    bridge("/diagnostics/read-latest"),
-  ]);
-  setHelperText("[data-codex-helper-backend]", resultText(backend));
+    bridge("/providers/list"),
+  ];
+  if (helperNativeSettingsActivePage === "logs") {
+    requests.push(bridge("/diagnostics/read-latest"));
+  }
+  if (helperNativeSettingsActivePage === "endpoint") {
+    requests.push(bridge("/endpoint/get"));
+  }
+  const [backend, scripts, settings, providers, extra] = await Promise.all(requests);
+  setHelperText(
+    "[data-codex-helper-backend]",
+    resultText(backend),
+    backend?.status === "ok" ? "ok" : "error",
+  );
   applySettings(settings);
   renderLoadedScripts(scripts);
-  setHelperText(
-    "[data-codex-helper-zed-status]",
-    zed?.status === "ok"
-      ? zed.zedAppFound || zed.zedCliFound
-        ? `Ready${zed.zedAppPath ? `: ${zed.zedAppPath}` : ""}${zed.zedCliPath ? ` (${zed.zedCliPath})` : ""}`
-        : "Zed is not installed or not available on PATH"
-      : resultText(zed),
-  );
+  renderProviders(providers);
+  if (helperNativeSettingsActivePage === "logs") {
+    renderLogRecords(extra);
+  }
+  if (helperNativeSettingsActivePage === "endpoint") {
+    renderEndpoint(extra);
+  }
+}
+
+function renderLogRecords(log) {
   setHelperText(
     "[data-codex-helper-log-path]",
     log?.path || "Log path unavailable",
   );
-  setHelperText(
-    "[data-codex-helper-log-status]",
-    log?.status === "ok" ? "Latest diagnostic log" : resultText(log),
-  );
-  setHelperText(
-    "[data-codex-helper-log]",
-    log?.contents || "No diagnostic records yet",
-  );
+  const records = Array.isArray(log?.records) ? log.records : [];
+  const statusText =
+    log?.status === "ok"
+      ? records.length
+        ? `Latest ${records.length} event${records.length === 1 ? "" : "s"}`
+        : "No diagnostic records yet"
+      : resultText(log);
+  setHelperText("[data-codex-helper-log-status]", statusText);
+  const lists = helperSettingsRoots()
+    .map((root) => root.querySelector("[data-codex-helper-log-list]"))
+    .filter((panel) => panel instanceof HTMLElement);
+  for (const list of lists) {
+    list.textContent = "";
+    if (log?.status !== "ok") {
+      list.appendChild(createScrollEmptyMessage(statusText));
+      continue;
+    }
+    if (records.length === 0) {
+      list.appendChild(createScrollEmptyMessage("No diagnostic records yet."));
+      continue;
+    }
+    for (const record of records) {
+      list.appendChild(createLogSummaryRow(record));
+    }
+  }
+}
+
+function createLogSummaryRow(record) {
+  const row = document.createElement("div");
+  row.className = "codex-helper-settings-compact-row";
+  const text = document.createElement("div");
+  text.className = "codex-helper-settings-compact-text";
+  const event = document.createElement("div");
+  event.className = "codex-helper-settings-row-title";
+  event.textContent = record?.event || "event";
+  const summary = document.createElement("div");
+  summary.className = "codex-helper-settings-row-description";
+  const time = formatLogTimestamp(record?.timestamp);
+  summary.textContent = [time, record?.summary].filter(Boolean).join(" · ");
+  text.append(event, summary);
+  row.appendChild(text);
+  return row;
+}
+
+function formatLogTimestamp(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleTimeString();
 }
 
 function renderLoadedScripts(result) {
@@ -145,10 +205,9 @@ function applySettings(result) {
       if (Number.isInteger(settings[key])) input.value = String(settings[key]);
     }
   }
-  maintainPortsPanel();
-  maintainUsageLimitBanner();
-  if (featureSettings.portForwardingEnabled) schedulePortScan();
-  else if (wasPortForwardingEnabled) handlePortForwardingDisabled();
+  if (typeof onHelperSettingsApplied === "function") {
+    onHelperSettingsApplied(wasPortForwardingEnabled);
+  }
 }
 
 function resultText(result) {
@@ -157,14 +216,18 @@ function resultText(result) {
   return result.message || "Request failed";
 }
 
-function setHelperText(selector, value) {
+function setHelperText(selector, value, status) {
   for (const root of helperSettingsRoots()) {
     const node = root.querySelector(selector);
-    if (node) node.textContent = value;
+    if (!node) continue;
+    node.textContent = value;
+    if (selector === "[data-codex-helper-backend]") {
+      node.setAttribute("data-status", status || "error");
+    }
   }
 }
 
-async function handleHelperCommand(command) {
+async function handleHelperCommand(command, source) {
   const route = {
     "open-devtools": "/devtools/open",
     "open-scripts-dir": "/scripts/reveal",
@@ -173,6 +236,17 @@ async function handleHelperCommand(command) {
   }[command];
   if (command === "refresh") {
     await refreshHelperPage();
+    return;
+  }
+  if (command.includes("provider")) {
+    if (typeof handleProviderCommand !== "function") {
+      throw new Error("Provider settings are only available in Helper Settings");
+    }
+    await handleProviderCommand(command, source);
+    return;
+  }
+  if (command.startsWith("endpoint-")) {
+    await handleEndpointCommand(command, source);
     return;
   }
   if (!route) return;
@@ -240,8 +314,8 @@ async function refreshFeatureSettings() {
     };
     featureSettingsLoaded = true;
   }
-  maintainPortsPanel();
-  maintainUsageLimitBanner();
-  if (featureSettings.portForwardingEnabled) schedulePortScan();
+  if (typeof onHelperSettingsApplied === "function") {
+    onHelperSettingsApplied(featureSettings.portForwardingEnabled);
+  }
   return featureSettings;
 }

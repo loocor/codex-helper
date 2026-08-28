@@ -1,15 +1,14 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
-import { buildRuntimeBundle } from "./bundle.ts";
+import { buildRuntimeBundle, buildSettingsBundle } from "./bundle.ts";
 
 const source = buildRuntimeBundle();
+const settingsSource = buildSettingsBundle();
 const nativeSettingsSource = readFileSync(
   join(import.meta.dir, "native-settings.js"),
   "utf8",
 );
-const zedOpenSource = readFileSync(join(import.meta.dir, "zed-open.js"), "utf8");
-
 function extractFunction(name) {
   const marker = `function ${name}(`;
   const start = source.indexOf(marker);
@@ -73,109 +72,29 @@ function extractFunction(name) {
   throw new Error(`${name} closing brace not found`);
 }
 
-function loadForkProjectHelpers(document) {
-  return new Function(
-    "document",
-    "HTMLElement",
-    [
-      extractFunction("displayProjectName"),
-      extractFunction("normalizeWorkspacePath"),
-      extractFunction("sessionRemoteHostId"),
-      extractFunction("isRemoteProjectPath"),
-      extractFunction("remoteProjectMetadataById"),
-      extractFunction("projectsSection"),
-      extractFunction("nativeProjectTargets"),
-      extractFunction("sessionProjectContext"),
-      extractFunction("forkActionTargetPredicate"),
-      extractFunction("forkTargetsForAction"),
-      extractFunction("enabledForkSessionActions"),
-      extractFunction("forkedSessionPath"),
-      extractFunction("codexAppServerHostId"),
-      extractFunction("codexThreadId"),
-      "return { nativeProjectTargets, forkTargetsForAction, enabledForkSessionActions, forkedSessionPath, sessionProjectContext, codexAppServerHostId, codexThreadId };",
-    ].join("\n"),
-  )(document, document.Element);
-}
-
-function loadSidebarRefreshHelpers(document = null) {
-  const Element = document?.Element || class Element {};
-  return new Function(
-    "document",
-    "HTMLElement",
-    [
-      "let managers = [];",
-      "const diagnostics = [];",
-      "function collectSidebarConversationManagers() { return managers; }",
-      "function logDiagnostic(name, payload) { diagnostics.push({ name, payload }); }",
-      extractFunction("sessionRemoteHostId"),
-      extractFunction("codexAppServerHostId"),
-      extractFunction("codexThreadId"),
-      extractFunction("sidebarRefreshDelay"),
-      extractFunction("findSidebarConversationManager"),
-      extractFunction("sidebarConversationById"),
-      extractFunction("sidebarRecentConversationById"),
-      extractFunction("normalizeSidebarRefreshExpectation"),
-      extractFunction("sidebarRefreshExpectationMatches"),
-      extractFunction("refreshSidebarStateForHost"),
-      "return { diagnostics, setManagers(value) { managers = value; }, refreshSidebarStateForHost };",
-    ].join("\n"),
-  )(document, Element);
-}
-
-function fakeProjectDocument(projects, selectedPath = "") {
-  class Element {
-    constructor(attrs, closestAttrs = null) {
-      this.attrs = attrs;
-      this.closestElement = closestAttrs ? new Element(closestAttrs) : null;
-      this.textContent = "";
-    }
-
-    getAttribute(name) {
-      return this.attrs[name] || null;
-    }
-
-    closest(selector) {
-      if (
-        selector === "[data-app-action-sidebar-project-list-id]" &&
-        this.closestElement
-      ) {
-        return this.closestElement;
-      }
-      return null;
-    }
-  }
-
-  return {
-    Element,
-    querySelector(selector) {
-      if (selector === "[data-app-action-sidebar-project-list-id]" && selectedPath) {
-        return new Element({ "data-app-action-sidebar-project-list-id": selectedPath });
-      }
-      return null;
-    },
-    querySelectorAll(selector) {
-      if (selector !== "[data-app-action-sidebar-project-row]") return [];
-      return projects.map((project) => new Element(project));
-    },
-  };
-}
-
-test("settings sidebar detection does not scan arbitrary div containers", () => {
-  expect(source).not.toContain(
-    'document.querySelectorAll("aside, nav, [role=\\\'navigation\\\'], [role=\\\'tablist\\\'], div")',
-  );
-  expect(source).not.toContain(
-    'document.querySelectorAll("aside, nav, [role=\'navigation\'], [role=\'tablist\'], div")',
-  );
+test("chatgpt runtime does not inject helper settings into Codex Settings", () => {
+  expect(source).not.toContain("function installNativeHelperSettingsGroup(");
+  expect(source).not.toContain("function findCodexSettingsSidebar(");
+  expect(source).not.toContain("function ensureCodexNativeSettingsOpen(");
+  expect(source).not.toContain("function openNativeHelperSettingsFromApp(");
+  expect(source).toContain("function openHelperSettingsFromRuntime(");
+  expect(source).toContain('bridge("/settings/open"');
 });
 
-test("clickable settings item selector excludes generic div elements", () => {
-  expect(source).not.toContain(
-    'const selector = "button, a, [role=\\\'button\\\'], [role=\\\'tab\\\'], [role=\\\'menuitem\\\'], div";',
-  );
-  expect(source).not.toContain(
-    'const selector = "button, a, [role=\'button\'], [role=\'tab\'], [role=\'menuitem\'], div";',
-  );
+test("helper settings follow the OS color scheme", () => {
+  expect(settingsSource).toContain("color-scheme: light dark");
+  expect(settingsSource).toContain("background: Canvas");
+  expect(settingsSource).toContain("color: CanvasText");
+});
+
+test("helper settings live in a standalone window bundle", () => {
+  expect(settingsSource).toContain("function startHelperSettingsApp(");
+  expect(settingsSource).toContain("helper-settings-shell");
+  expect(settingsSource).toContain("helper-settings-nav");
+  expect(settingsSource).toContain("id=\"helper-settings-content\"");
+  expect(settingsSource).toContain("function openNativeHelperSettingsPage(");
+  expect(settingsSource).not.toContain("function findCodexSettingsSidebar(");
+  expect(settingsSource).not.toContain("function installNativeHelperSettingsGroup(");
 });
 
 test("settings page exposes port forwarding policy switches", () => {
@@ -183,20 +102,20 @@ test("settings page exposes port forwarding policy switches", () => {
   const helperToggleBinding = templatePlaceholder("helperToggleAttribute");
   const descKeyBinding = templatePlaceholder("descKey");
   const toggleKeyBinding = templatePlaceholder("toggleKey");
-  expect(source).toContain("Enable port forwarding");
-  expect(source).toContain('${helperSettingsSectionAttribute}="${sectionId}"');
-  expect(source).toContain('nativeSettingsGroupSection("Port forwarding"');
-  expect(source).toContain('"port-forwarding")');
+  expect(settingsSource).toContain("Enable port forwarding");
+  expect(settingsSource).toContain('${helperSettingsSectionAttribute}="${sectionId}"');
+  expect(settingsSource).toContain('nativeSettingsGroupSection("Port forwarding"');
+  expect(settingsSource).toContain('"port-forwarding")');
   expect(source).toContain("function focusHelperSettingsSection(");
-  expect(source).toContain(`data-codex-helper-setting-desc="${descKeyBinding}"`);
-  expect(source).toContain(`${helperToggleBinding}="${toggleKeyBinding}"`);
-  expect(source).toContain(
+  expect(settingsSource).toContain(`data-codex-helper-setting-desc="${descKeyBinding}"`);
+  expect(settingsSource).toContain(`${helperToggleBinding}="${toggleKeyBinding}"`);
+  expect(settingsSource).toContain(
     'nativeSettingsSwitchRow("Enable port forwarding", "Detect and forward ports from agent sessions.", "portForwardingEnabled"',
   );
-  expect(source).toContain(
+  expect(settingsSource).toContain(
     'nativeSettingsSwitchRow("Auto-forward detected web ports", "Open forwarded web URLs when a common dev port is detected.", "portAutoForwardWeb"',
   );
-  expect(source).toContain(
+  expect(settingsSource).toContain(
     'nativeSettingsSwitchRow("Use the same local port by default", "Bind forwarded ports to the same local port number when possible.", "portSameLocalPort"',
   );
 });
@@ -208,12 +127,174 @@ test("settings updates refresh port forwarding panel visibility", () => {
   expect(source).toContain("if (featureSettings.portForwardingEnabled) schedulePortScan();");
 });
 
+test("settings page exposes provider management", () => {
+  expect(settingsSource).toContain('id: "providers"');
+  expect(settingsSource).toContain('label: "Providers"');
+  expect(settingsSource).toContain('bridge("/providers/list")');
+  expect(settingsSource).toContain('bridge("/providers/save"');
+  expect(settingsSource).toContain('bridge("/providers/activate"');
+  expect(settingsSource).toContain("function providerLiveRefreshMessage(");
+  expect(settingsSource).toContain(
+    "Helper is already using it. Start a new ChatGPT conversation to pick it up.",
+  );
+  expect(settingsSource).toContain(
+    "Helper is already using it. Restart ChatGPT desktop so login and the model picker refresh.",
+  );
+  expect(settingsSource).not.toContain(
+    "Restart ChatGPT desktop if it does not pick up the change.",
+  );
+  expect(settingsSource).toContain('bridge("/providers/delete"');
+  expect(settingsSource).toContain('bridge("/providers/models"');
+  expect(settingsSource).toContain("new-provider");
+  expect(settingsSource).toContain("codex-helper-provider-add-button");
+  expect(settingsSource).toContain("provider-fetch-models");
+  expect(settingsSource).toContain("Fetch Models");
+  expect(settingsSource).toContain("Add Model");
+  expect(settingsSource).toContain("Catalog");
+  expect(settingsSource).toContain("if (model) model.value = preset.model");
+  expect(settingsSource).not.toContain("if (model && !model.value.trim()) model.value = preset.model");
+  expect(settingsSource).toContain("Menu Display Name");
+  expect(settingsSource).toContain("Actual Request Model");
+  expect(settingsSource).toContain("Context Window");
+  expect(settingsSource).toContain("Reasoning Levels");
+  expect(settingsSource).toContain("catalogModels");
+  expect(settingsSource).toContain("provider-catalog-add");
+  expect(settingsSource).toContain("provider-select-model");
+  expect(settingsSource).toContain("Re-sign in");
+  expect(settingsSource).toContain("DeepSeek");
+  expect(settingsSource).toContain("Kimi");
+  expect(settingsSource).toContain("Usage URL");
+  expect(settingsSource).toContain('data-codex-helper-provider-field="usagePageUrl"');
+  expect(settingsSource).toContain("https://api.deepseek.com/v1");
+  expect(settingsSource).toContain("https://platform.deepseek.com/usage");
+  expect(settingsSource).toContain("https://api.moonshot.cn/v1");
+  expect(settingsSource).toContain("https://platform.moonshot.cn/console");
+  expect(settingsSource).toContain("MiniMax");
+  expect(settingsSource).toContain("DashScope");
+  expect(settingsSource).toContain("https://api.minimaxi.com/v1");
+  expect(settingsSource).toContain("https://platform.minimaxi.com");
+  expect(settingsSource).toContain("https://dashscope.aliyuncs.com/compatible-mode/v1");
+  expect(settingsSource).toContain("https://bailian.console.aliyun.com");
+  expect(settingsSource).toContain("MiniMax-M3");
+  expect(settingsSource).toContain("qwen3-coder-plus");
+  expect(settingsSource).toContain("GitHub Copilot");
+  expect(settingsSource).not.toContain(">Add mapping");
+  expect(settingsSource).not.toContain("provider-test");
+  expect(settingsSource).not.toContain("provider-details");
+  expect(settingsSource).toContain("provider-open");
+  expect(settingsSource).toContain("/providers/reorder");
+  expect(settingsSource).toContain("codex-helper-provider-drag-handle");
+  expect(settingsSource).toContain("grip-vertical");
+  expect(settingsSource).toContain("startProviderReorder");
+  expect(settingsSource).toContain("pointerdown");
+  expect(settingsSource).toContain("codex-helper-provider-reorder-ghost");
+  expect(settingsSource).toContain("codex-helper-provider-reorder-layer");
+  expect(settingsSource).not.toContain("localeCompare");
+  expect(settingsSource).toContain("provider-edit");
+  expect(settingsSource).toContain("github_copilot");
+  expect(settingsSource).toContain("xai_oauth");
+  expect(settingsSource).toContain("https://api.githubcopilot.com");
+  expect(settingsSource).toContain("https://api.x.ai/v1");
+  expect(settingsSource).toContain("isDeviceOauthMode(authMode) ? defaults.baseUrl");
+  expect(settingsSource).toContain("provider-oauth-start");
+  expect(settingsSource).toContain("provider-toggle-api-key");
+  expect(settingsSource).toContain("provider-open-usage-url");
+  expect(settingsSource).toContain("/providers/secret");
+  expect(settingsSource.indexOf("Wire API")).toBeLessThan(settingsSource.indexOf("Default model"));
+  expect(settingsSource).toContain("codex-helper-provider-field-row");
+  expect(settingsSource).toContain("codex-helper-provider-field-label");
+  expect(settingsSource).toContain("codex-helper-provider-reasoning-chip");
+  expect(settingsSource).toContain("line-height: 30px");
+  expect(settingsSource).not.toContain("codex-helper-provider-reasoning-menu");
+  expect(settingsSource).not.toContain("provider-reasoning-toggle");
+  expect(settingsSource).toContain("grid-template-columns: 132px minmax(0, 1fr)");
+  expect(settingsSource).toContain('stroke-width="2.4"');
+  expect(settingsSource).toContain("secret-toggle.is-revealed");
+  expect(settingsSource).toContain("codex-helper-provider-api-only");
+  expect(settingsSource).toContain('providerDialogRoot.setAttribute("data-auth-mode", authMode)');
+  expect(settingsSource).toContain("presetLabel.hidden = oauthMode");
+  expect(settingsSource).toContain(
+    '[data-codex-helper-provider-dialog][data-auth-mode="xai_oauth"] .codex-helper-provider-api-only',
+  );
+  expect(settingsSource).toContain("codex-helper-provider-mapping-body");
+  expect(settingsSource).toContain("margin-left: 148px");
+  expect(settingsSource).toContain("flex-wrap: nowrap");
+  expect(settingsSource).toContain("min-width: 328px");
+  expect(settingsSource).toContain("overflow: visible");
+  expect(settingsSource).not.toContain("codex-helper-provider-mapping-hint");
+  expect(settingsSource).not.toContain("Generates Codex model_catalog_json");
+  expect(settingsSource).toContain("codex-helper-provider-catalog");
+  expect(settingsSource).toContain("display: contents");
+  expect(settingsSource).toContain(
+    "minmax(0, 1fr) minmax(0, 1fr) 132px minmax(328px, max-content) 32px",
+  );
+  expect(settingsSource).not.toContain("2.2fr");
+  expect(settingsSource).toContain("width: max-content");
+  expect(settingsSource).toContain("CONTEXT_WINDOW_PRESETS");
+  expect(settingsSource).toContain('label: "128K"');
+  expect(settingsSource).toContain('label: "512K"');
+  expect(settingsSource).toContain("function catalogContextSelect(");
+  expect(settingsSource).toContain("function parseContextWindowK(");
+  expect(settingsSource).toContain("function commitCatalogContextCustom(");
+  expect(settingsSource).toContain("Math.round(k * 1000)");
+  expect(settingsSource).toContain('empty.textContent = "Default"');
+  expect(settingsSource).toContain('others.textContent = "Others"');
+  expect(settingsSource).toContain("data-codex-helper-catalog-context-custom");
+  expect(settingsSource).toContain("data-codex-helper-catalog-context-custom-option");
+  expect(settingsSource).toContain("codex-helper-provider-catalog-context-unit");
+  expect(settingsSource).toContain('input.placeholder = "500"');
+  expect(settingsSource).toContain("Custom context window in k");
+  expect(settingsSource).not.toContain('input.placeholder = "tokens"');
+  expect(settingsSource).not.toContain('empty.textContent = "Select"');
+  expect(settingsSource).not.toContain("codex-helper-provider-radio");
+  expect(settingsSource).toContain('toggle.className = "codex-helper-switch"');
+  expect(settingsSource).toContain('checkbox.setAttribute("role", "switch")');
+  expect(settingsSource).toContain('data-codex-helper-backend data-status="loading"');
+  expect(settingsSource).toContain('[data-codex-helper-backend][data-status="ok"]');
+  expect(settingsSource).toContain("light-dark(rgb(21, 128, 61), rgb(74, 222, 128))");
+  expect(settingsSource).toContain('node.setAttribute("data-status", status || "error")');
+  expect(settingsSource).toContain('font-weight: 400');
+  expect(settingsSource).toContain("[data-codex-helper-provider-dialog] > .codex-helper-provider-dialog-actions");
+  expect(settingsSource).toContain("padding: 10px 32px");
+  expect(settingsSource).toContain("data-tauri-drag-region");
+  expect(settingsSource).toContain("helper-settings-nav-drag");
+  expect(settingsSource).toContain("helper-settings-content:has([data-codex-helper-provider-dialog])");
+  expect(settingsSource).toContain("helper-settings-back");
+  expect(settingsSource).toContain('nativeSettingsStandardIconSvg("chevron-right")');
+  expect(settingsSource).toContain('nativeSettingsStandardIconSvg("chevron-left")');
+  expect(settingsSource).not.toContain("function openProviderMenu(");
+  expect(settingsSource).not.toContain("data-codex-helper-provider-menu");
+  expect(settingsSource).not.toContain("min-width: min(920px, calc(100vw - 48px))");
+  expect(settingsSource).not.toContain(
+    "[data-codex-helper-provider-dialog] {\n        position: fixed",
+  );
+  expect(settingsSource).not.toContain("oauthProxy");
+  expect(settingsSource).not.toContain("CLIProxyAPI");
+  expect(settingsSource).toContain("The active provider cannot be deleted");
+  expect(settingsSource).toContain("provider-dialog-save");
+  expect(settingsSource).toContain("providers.saved");
+  expect(settingsSource).not.toContain("Reset usage");
+  expect(settingsSource).toContain("createProviderUsagePie");
+  expect(settingsSource).toContain("codex-helper-provider-usage-pie");
+  expect(settingsSource).toContain("open-provider-usage");
+  expect(settingsSource).not.toContain("createProviderUsageLine");
+  expect(settingsSource).not.toContain('link.textContent = "Usage"');
+});
+
 test("settings page exposes usage-limit overlay hide switch", () => {
-  expect(source).toContain('nativeSettingsGroupSection("Interface"');
-  expect(source).toContain("Hide usage-limit overlay");
-  expect(source).toContain("This does not reset or bypass account limits.");
-  expect(source).toContain('"hideUsageLimitBannerEnabled"');
+  expect(settingsSource).toContain('nativeSettingsGroupSection("Interface"');
+  expect(settingsSource).toContain("Hide usage-limit overlay");
+  expect(settingsSource).toContain("This does not reset or bypass account limits.");
+  expect(settingsSource).toContain('"hideUsageLimitBannerEnabled"');
   expect(source).toContain("hideUsageLimitBannerEnabled: false");
+});
+
+test("settings page exposes start at login switch", () => {
+  expect(settingsSource).toContain('nativeSettingsGroupSection("Startup"');
+  expect(settingsSource).toContain("Start at login");
+  expect(settingsSource).toContain("Open Codex Helper when you log in to this Mac.");
+  expect(settingsSource).toContain('"launchAtLoginEnabled"');
+  expect(source).toContain("launchAtLoginEnabled: false");
 });
 
 test("disabling port forwarding stops managed tunnels", () => {
@@ -226,34 +307,29 @@ test("disabling port forwarding stops managed tunnels", () => {
 });
 
 test("settings page groups options by feature area", () => {
-  expect(source).toContain('nativeSettingsGroupSection("Integrations"');
-  expect(source).toContain('nativeSettingsGroupSection("Session actions"');
-  expect(source).toContain('nativeSettingsGroupSection("Interface"');
-  expect(source).not.toContain('nativeSettingsGroupSection("Chat titles"');
-  expect(source).toContain('nativeSettingsGroupSection("Port forwarding"');
-  expect(source).not.toContain('>Basic</div>');
-  expect(source).not.toContain('sectionHeading("Loaded scripts"');
-  expect(source).not.toContain('sectionHeading("Log files"');
-  expect(source).toContain("https://github.com/loocor/codex-helper");
-  expect(source).toContain("function nativeSettingsAboutPageContent(");
-  expect(source).toContain('nativeSettingsActionRow("Open in Zed"');
-  expect(source).toContain("open-scripts-dir");
-  expect(source).toContain("open-logs-dir");
-  expect(source).not.toContain("Helper directory");
-  expect(source).toContain("codex-helper-settings-scroll");
-  expect(source).toContain('forkRemoteProject: "Fork into remote project..."');
-  expect(source).toContain('forkLocalProject: "Fork into local project..."');
-  expect(source).toContain('forkAnotherProject: "Fork into another project..."');
-  expect(source).toContain('const order = ["export", "fork"]');
+  expect(settingsSource).toContain('nativeSettingsGroupSection("Integrations"');
+  expect(settingsSource).not.toContain('nativeSettingsGroupSection("Session actions"');
+  expect(settingsSource).toContain('nativeSettingsGroupSection("Interface"');
+  expect(settingsSource).not.toContain('nativeSettingsGroupSection("Chat titles"');
+  expect(settingsSource).toContain('nativeSettingsGroupSection("Port forwarding"');
+  expect(settingsSource).not.toContain('>Basic</div>');
+  expect(settingsSource).not.toContain('sectionHeading("Loaded scripts"');
+  expect(settingsSource).not.toContain('sectionHeading("Log files"');
+  expect(settingsSource).toContain("https://github.com/loocor/codex-helper");
+  expect(settingsSource).toContain("function nativeSettingsAboutPageContent(");
+  expect(settingsSource).not.toContain('nativeSettingsActionRow("Open in Zed"');
+  expect(settingsSource).toContain("open-scripts-dir");
+  expect(settingsSource).toContain("open-logs-dir");
+  expect(settingsSource).not.toContain("Helper directory");
+  expect(settingsSource).toContain("codex-helper-settings-scroll");
+  expect(source).not.toContain('forkRemoteProject: "Fork into remote project..."');
   expect(source).not.toContain('autoRename: "Regenerate chat title"');
   expect(source).not.toContain('bridge("/auto-rename-chat"');
-  expect(source).toContain("autoNamingRangePayload()");
+  expect(source).not.toContain("autoNamingRangePayload()");
   expect(source).not.toContain('move: "Move Session"');
   expect(source).not.toContain('copy: "Copy Session"');
-  expect(source).not.toContain('const order = ["export", "copy", "move", "delete"]');
-  expect(source).toContain("helperSessionMenuIcon");
-  expect(source).toContain("confirmForkSessionAction");
-  expect(source).toContain("isRemoteProjectPath");
+  expect(source).not.toContain("helperSessionMenuIcon");
+  expect(source).not.toContain("confirmForkSessionAction");
   expect(source).not.toContain('">Other</div>');
 });
 
@@ -274,66 +350,75 @@ test("account menu no longer exposes helper settings dialog entry", () => {
   expect(source).not.toContain("installAccountSettingsMenuItems");
 });
 
-test("native settings exposes a dedicated Helper group", () => {
-  expect(source).toContain("data-codex-helper-native-settings-group");
-  expect(source).toContain("data-codex-helper-native-settings-entry");
-  expect(source).toContain("data-codex-helper-native-settings-page");
-  expect(source).toContain('label: "User Scripts"');
-  expect(source).toContain("hidden: true");
-  expect(source).not.toContain('label: "Deleted Sessions"');
-  expect(source).toContain('label: "Logs"');
-  expect(source).toContain('label: "About"');
-  expect(source).toContain("padding-bottom: 10px");
-  expect(source).toContain("installNativeHelperSettingsGroup");
-  expect(source).toContain("heading-lg font-normal");
-  expect(source).toContain("codex-helper-native-settings-page-description");
+test("helper settings window exposes the settings pages", () => {
+  expect(settingsSource).toContain("data-codex-helper-native-settings-entry");
+  expect(settingsSource).toContain("data-codex-helper-native-settings-page");
+  expect(settingsSource).toContain('label: "User Scripts"');
+  expect(settingsSource).toContain("hidden: true");
+  expect(settingsSource).not.toContain('label: "Deleted Sessions"');
+  expect(settingsSource).toContain('label: "Endpoint"');
+  expect(settingsSource).toContain('label: "Logs"');
+  expect(settingsSource).toContain('label: "About"');
+  expect(settingsSource).toContain("helper-settings-page-title");
+  expect(settingsSource).toContain("helper-settings-page-description");
+  expect(source).not.toContain("installNativeHelperSettingsGroup");
 });
 
 test("native settings pages follow worktree-style sparse list layout", () => {
-  expect(source).toContain("nativeSettingsPathHeader");
-  expect(source).toContain("nativeSettingsListFooter");
-  expect(source).toContain("codex-helper-native-settings-icon-button");
-  expect(source).toContain("data-codex-helper-scripts-path");
-  expect(source).toContain("data-codex-helper-log-status");
-  expect(source).toContain("codex-helper-native-settings-log-panel");
+  expect(settingsSource).toContain("nativeSettingsPathHeader");
+  expect(settingsSource).toContain("nativeSettingsListFooter");
+  expect(settingsSource).toContain("codex-helper-native-settings-icon-button");
+  expect(settingsSource).toContain("data-codex-helper-scripts-path");
+  expect(settingsSource).toContain("data-codex-helper-log-status");
+  expect(settingsSource).toContain("codex-helper-native-settings-log-panel");
+  expect(settingsSource).toContain("data-codex-helper-log-list");
+  expect(settingsSource).toContain('endpoint-generate"');
+  expect(settingsSource).not.toContain("endpoint-generate-16");
+  expect(settingsSource).not.toContain("Generate 16");
+  expect(settingsSource).not.toContain("Generate 32");
+  expect(settingsSource).toContain('nativeSettingsStandardIconSvg("dices")');
+  expect(settingsSource).toContain("endpoint-copy-base");
+  expect(settingsSource).toContain("endpoint-copy-model");
+  expect(settingsSource).toContain("codex-helper-endpoint-models");
+  expect(settingsSource).toContain("codex-helper-endpoint-model-tag");
+  expect(settingsSource).toContain("data-codex-helper-endpoint-models");
   expect(source).toContain('"open-log-file": "/diagnostics/reveal-log"');
-  expect(source).not.toContain("codex-helper-native-settings-list-status");
-  expect(source).not.toContain('nativeSettingsSection("User Scripts"');
-  expect(source).not.toContain('nativeSettingsSection("Deleted Sessions"');
-  expect(source).not.toContain('nativeSettingsSection("Logs"');
+  expect(settingsSource).not.toContain("codex-helper-native-settings-list-status");
+  expect(settingsSource).not.toContain('nativeSettingsSection("User Scripts"');
+  expect(settingsSource).not.toContain('nativeSettingsSection("Deleted Sessions"');
+  expect(settingsSource).not.toContain('nativeSettingsSection("Logs"');
 });
 
 test("native settings switches stay visible when unchecked", () => {
   expect(source).toContain("codex-helper-switch-track");
   expect(source).toContain("codex-helper-switch-thumb");
   expect(source).toContain("transform: translateX(12px)");
-  expect(source).toContain("heading-lg font-normal");
-  expect(source).toContain("rounded-2xl");
-  expect(source).toContain("max-w-3xl");
-  expect(source).toContain("max-width: 48rem");
-  expect(source).toContain("text-xs leading-4 text-balance text-secondary");
+  expect(settingsSource).toContain("helper-settings-page-title");
   expect(source).toContain("inset-inline: 1rem");
 });
 
 test("native settings sidebar uses contextual helper icons", () => {
-  expect(source).toContain("nativeSettingsStandardIconSvg");
-  expect(source).toContain("setNativeSettingsEntryIcon");
-  expect(source).toContain("codex-helper-native-settings-sidebar-icon");
-  expect(source).toContain('data-lucide="${iconName}"');
-  expect(source).toContain('standardIconName: "sliders-horizontal"');
-  expect(source).toContain('standardIconName: "file-code-2"');
-  expect(source).toContain('standardIconName: "scroll-text"');
-  expect(source).toContain('standardIconName: "info"');
-  expect(source).toContain('case "external-link"');
+  expect(settingsSource).toContain("nativeSettingsStandardIconSvg");
+  expect(settingsSource).toContain("codex-helper-native-settings-sidebar-icon");
+  expect(settingsSource).toContain('data-lucide="${iconName}"');
+  expect(settingsSource).toContain('standardIconName: "sliders-horizontal"');
+  expect(settingsSource).toContain('standardIconName: "file-code-2"');
+  expect(settingsSource).toContain('standardIconName: "radio"');
+  expect(settingsSource).toContain('standardIconName: "scroll-text"');
+  expect(settingsSource).toContain('standardIconName: "info"');
+  expect(settingsSource).toContain('case "external-link"');
+  expect(settingsSource).toContain('case "chevron-right"');
+  expect(settingsSource).toContain('case "chevron-left"');
+  expect(settingsSource).not.toContain("setNativeSettingsEntryIcon");
 });
 
 test("native settings about page is independent from general", () => {
-  expect(source).toContain('pageId === "about"');
-  expect(source).toContain("Codex Helper");
-  expect(source).toContain("Last updated");
-  expect(source).toContain("A local runtime helper for Codex settings");
-  expect(source).toContain("Project repository");
-  expect(source).not.toContain('nativeSettingsExternalLinkRow(\n        "Project repository"');
+  expect(settingsSource).toContain('pageId === "about"');
+  expect(settingsSource).toContain("Codex Helper");
+  expect(settingsSource).toContain("Last updated");
+  expect(settingsSource).toContain("A local runtime helper for Codex settings");
+  expect(settingsSource).toContain("Project repository");
+  expect(settingsSource).not.toContain('nativeSettingsExternalLinkRow(\n        "Project repository"');
 });
 
 test("runtime bundle injects the helper build date at build time", () => {
@@ -367,144 +452,24 @@ test("native settings surface has independent ownership markers", () => {
   expect(source).toContain("helperNativeSettingsPageAttribute");
   expect(source).toContain("helperNativeSettingsGroupAttribute");
   expect(source).toContain("helperNativeSettingsContentHostAttribute");
-  expect(source).toContain("clearNativeHelperSettingsPage");
-  expect(source).toContain("stashNativeSettingsContent");
-  expect(source).toContain("restoreNativeSettingsContent");
-  expect(source).toContain("findNativeSettingsContentRoot");
-  expect(source).toContain("findNativeSettingsScrollContentRoot");
+  expect(settingsSource).toContain("function helperSettingsContentHost(");
+  expect(settingsSource).not.toContain("function stashNativeSettingsContent(");
+  expect(settingsSource).not.toContain("function findNativeSettingsContentRoot(");
+  expect(nativeSettingsSource).toContain("function openNativeHelperSettingsPage(");
 });
 
-test("native settings content root lookup does not require a minimum viewport size", () => {
-  expect(source).not.toContain("rect.width > 520");
-  expect(source).not.toContain("rect.height > 360");
-  expect(source).not.toContain("rect.width <= 520");
-  expect(source).not.toContain("rect.height <= 360");
-
-  class FakeElement {
-    constructor(rect, options = {}) {
-      this.rect = rect;
-      this.className = options.className || "";
-      this.style = options.style || {};
-      this.children = [];
-      this.parentElement = null;
-      this.queryResults = options.queryResults || [];
-    }
-
-    append(...children) {
-      for (const child of children) {
-        child.parentElement = this;
-        this.children.push(child);
-      }
-    }
-
-    contains(node) {
-      return node === this || this.children.some((child) => child.contains(node));
-    }
-
-    closest() {
-      return null;
-    }
-
-    querySelector() {
-      return null;
-    }
-
-    querySelectorAll() {
-      return this.queryResults;
-    }
-
-    getBoundingClientRect() {
-      return this.rect;
-    }
-  }
-
-  const sidebar = new FakeElement({
-    left: 0,
-    top: 0,
-    width: 240,
-    height: 240,
-    right: 240,
-  });
-  const compactContent = new FakeElement({
-    left: 248,
-    top: 0,
-    width: 320,
-    height: 240,
-    right: 568,
-  });
-  const compactScrollRoot = new FakeElement(
-    {
-      left: 260,
-      top: 12,
-      width: 300,
-      height: 180,
-      right: 560,
-    },
-    { className: "scrollbar-stable", style: { overflowY: "auto" } },
-  );
-  compactContent.queryResults = [compactScrollRoot];
-  const layout = new FakeElement({
-    left: 0,
-    top: 0,
-    width: 568,
-    height: 240,
-    right: 568,
-  });
-  const body = new FakeElement({
-    left: 0,
-    top: 0,
-    width: 568,
-    height: 240,
-    right: 568,
-  });
-  layout.append(sidebar, compactContent);
-  body.append(layout);
-
-  const factory = new Function(
-    "HTMLElement",
-    "document",
-    "getComputedStyle",
-    `
-      const helperNativeSettingsGroupAttribute = "data-codex-helper-native-settings-group";
-      const helperNativeSettingsEntryAttribute = "data-codex-helper-native-settings-entry";
-      function isVisibleElement(node) {
-        const rect = node.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
-      }
-      ${nativeSettingsSource}
-      return { findNativeSettingsContentRoot };
-    `,
-  );
-  const { findNativeSettingsContentRoot } = factory(
-    FakeElement,
-    { body },
-    (node) => node.style,
-  );
-
-  expect(findNativeSettingsContentRoot(sidebar)).toBe(compactScrollRoot);
+test("helper settings window reports a missing content host", () => {
+  expect(settingsSource).toContain('throw new Error("Helper Settings content host not found")');
+  expect(settingsSource).toContain('throw new Error("Helper Settings app host not found")');
+  expect(source).not.toContain('throw new Error("Native Settings sidebar not found")');
+  expect(source).not.toContain('logDiagnostic("settings_open_failed"');
 });
 
-test("native settings open failures surface explicit errors", () => {
-  expect(source).toContain('throw new Error("Native Settings sidebar not found")');
-  expect(source).toContain('throw new Error("Native Settings content root not found")');
-  expect(source).toContain('throw new Error("Helper settings group could not be installed")');
-  expect(source).toContain('logDiagnostic("settings_open_failed"');
-  expect(source).not.toContain('if (!openNativeHelperSettingsPage(pageId || "general"))');
-});
-
-test("native settings opener can use an existing Settings menu item or trigger candidates", () => {
-  expect(source).toContain("function nativeSettingsMenuTriggerCandidates(");
-  expect(source).toContain("function nativeSettingsMenuTriggerScore(");
-  expect(source).toContain("function isNativeSettingsAccountMenu(");
-  expect(source).toContain("function nativeSettingsAccountMenuCandidates(");
-  expect(source).toContain("const existingMenuItem = findNativeSettingsMenuItem()");
-  expect(source).toContain("for (const trigger of nativeSettingsMenuTriggerCandidates())");
-  expect(source).toContain('node.hasAttribute("aria-haspopup")');
-  expect(source).toContain('label.includes("account")');
-  expect(source).toContain('label.includes("profile")');
-  expect(source).toContain('text.includes("Usage")');
-  expect(source).toContain('text.includes("Log out")');
-  expect(source).toContain("closeNativeSettingsCandidateMenus()");
+test("chatgpt runtime does not open Codex Settings to host Helper pages", () => {
+  expect(source).not.toContain("function nativeSettingsMenuTriggerCandidates(");
+  expect(source).not.toContain("function ensureCodexNativeSettingsOpen(");
+  expect(source).not.toContain("closeNativeSettingsCandidateMenus()");
+  expect(source).toContain("function openHelperSettingsFromRuntime(");
 });
 
 test("standalone helper settings dialog is not bundled", () => {
@@ -523,8 +488,6 @@ test("standalone helper settings dialog is not bundled", () => {
   expect(source).not.toContain("pageAttribute: helperDialogPageAttribute");
   expect(source).not.toContain("helperDialogRoot = renderNativeHelperSettingsPage");
   expect(source).toContain("helperNativeSettingsPageAttribute");
-  expect(zedOpenSource).not.toContain("data-codex-helper-settings-page");
-  expect(zedOpenSource).toContain("data-codex-helper-native-settings-page");
 });
 
 test("startup does not eagerly mount inline General settings page", () => {
@@ -532,69 +495,25 @@ test("startup does not eagerly mount inline General settings page", () => {
   expect(source).not.toContain("showHelperSettingsPage({ refresh: false })");
 });
 
-test("session context menu hooks Codex native menu model", () => {
-  expect(source).toContain("installSessionContextMenuBridge");
-  expect(source).toContain("sessionContextMenuMapRestore");
-  expect(source).toContain("Array.prototype.map");
-  expect(source).toContain("appendHelperSessionMenuItems");
-  expect(source).toContain("buildHelperSessionMenuModelItems");
-  expect(source).toContain("prepareSessionContextMenu");
-  expect(source).toContain("replaySessionContextMenu");
-  expect(source).toContain("openProjectForkMenu");
-  expect(source).toContain("navigateAfterFork(result, target)");
-  expect(source).not.toContain("Regenerate chat title");
-  expect(source).toContain("markdown_friendly_filename_succeeded");
-  expect(source).toContain("markdown_friendly_filename_failed");
-  expect(source).toContain("finishTaskToast(result.warning || result.message || \"Forked\")");
-  expect(source).toContain("window.location.assign(path)");
-  expect(source).toContain("nativeProjectTargets");
-  expect(source).toContain("helperSessionMenuIcon");
-  expect(source).toContain("Fork into another project...");
-  expect(source).not.toContain("Move Session");
-  expect(source).toContain("open-thread-new-window");
-  expect(source).toContain("loadRemoteProjectMetadataOrEmpty");
-  expect(source).toContain('logDiagnostic("remote_project_metadata_unavailable"');
-  expect(source).toContain("codex-helper-session-");
-  expect(source).toContain("trackSessionContextMenu(row)");
-  expect(source).not.toContain("showExtendedSessionContextMenu");
-  expect(source).not.toContain("buildCodexSessionNativeMenuItems");
-  expect(source).not.toContain("forwardSessionMenuAction");
-  expect(source).toContain('id === "mark-thread-unread"');
-  expect(source).toContain('id === "fork-into-local"');
-  expect(source).toContain('id === "fork-into-worktree"');
-  expect(source).not.toContain("installSessionContextMenuItems");
-  expect(source).not.toContain("installElectronContextMenuHook");
-  expect(source).not.toContain("showContextMenuWithHelperItems");
-  expect(source).not.toContain("promptMoveTargetPath");
+test("chatgpt runtime no longer injects helper session actions", () => {
+  expect(source).not.toContain("installSessionContextMenuBridge");
+  expect(source).not.toContain("handleSessionAction");
+  expect(source).not.toContain("prepareSessionContextMenu");
+  expect(source).not.toContain("openProjectForkMenu");
+  expect(source).not.toContain('bridge("/export-markdown"');
+  expect(source).not.toContain('bridge("/fork-thread-project"');
+  expect(source).not.toContain('bridge("/projects/remote-list"');
+  expect(source).not.toContain("function showHelperTaskToast(");
+  expect(source).not.toContain("data-codex-helper-project-fork");
 });
 
-test("long session actions show a persistent task toast before bridge work", () => {
+test("helper toast remains available for port forwarding", () => {
   const toast = extractFunction("showHelperToast");
   expect(toast).toContain("codex-helper-toast-spinner");
   expect(toast).toContain("aria-live");
-
-  const toastTask = extractFunction("showHelperTaskToast");
-  expect(toastTask).toContain("return (finalMessage) => showHelperToast(finalMessage)");
-
-  const actionHandler = extractFunction("handleSessionAction");
-  expect(actionHandler).toContain('showHelperTaskToast("Exporting Markdown...")');
-  expect(actionHandler.indexOf('showHelperTaskToast("Exporting Markdown...")')).toBeLessThan(
-    actionHandler.indexOf('bridge("/export-markdown"'),
-  );
-  expect(actionHandler).toContain('showHelperTaskToast("Forking conversation...")');
-  expect(actionHandler.indexOf('showHelperTaskToast("Forking conversation...")')).toBeGreaterThan(
-    actionHandler.indexOf("if (!target) return;"),
-  );
-  expect(actionHandler.indexOf('showHelperTaskToast("Forking conversation...")')).toBeLessThan(
-    actionHandler.indexOf('bridge("/fork-thread-project"'),
-  );
-  expect(actionHandler).toContain('finishTaskToast(result.message || "Exported")');
-  expect(actionHandler).toContain('finishTaskToast(result.warning || result.message || "Forked")');
-  expect(
-    actionHandler.indexOf('finishTaskToast(result.warning || result.message || "Forked")'),
-  ).toBeLessThan(
-    actionHandler.indexOf("await refreshSidebarAfterFork(target, result)"),
-  );
+  expect(source).toContain('bridge("/zed-remote/fallback-request"');
+  expect(source).not.toContain('bridge("/zed-remote/open"');
+  expect(source).not.toContain('bridge("/zed-remote/status"');
 });
 
 test("helper no longer exposes its own session delete lifecycle", () => {
@@ -612,409 +531,11 @@ test("helper no longer exposes its own session delete lifecycle", () => {
   expect(source).not.toContain("data-codex-helper-backups-path");
 });
 
-test("fork project actions filter local session targets by side", () => {
-  const document = fakeProjectDocument(
-    [
-      {
-        "data-app-action-sidebar-project-id": "/repo/current",
-        "data-app-action-sidebar-project-label": "current",
-      },
-      {
-        "data-app-action-sidebar-project-id": "/repo/other",
-        "data-app-action-sidebar-project-label": "other",
-      },
-      {
-        "data-app-action-sidebar-project-id": "/srv/remote",
-        "data-app-action-sidebar-project-label": "remote",
-        "data-app-action-sidebar-project-host-id": "remote-ssh-codex-managed:box",
-      },
-      {
-        "data-app-action-sidebar-project-id": "019e5587-1ab5-7eb2-a3cd-b5f481ef9639",
-        "data-app-action-sidebar-project-label": "unknown remote",
-      },
-    ],
-    "/repo/current",
-  );
-  const helpers = loadForkProjectHelpers(document);
-  const row = new document.Element({
-    "data-app-action-sidebar-thread-id": "local:thread-1",
-    "data-app-action-sidebar-thread-cwd": "/repo/current",
-  });
-
-  expect(helpers.enabledForkSessionActions(row)).toEqual([
-    "forkRemoteProject",
-    "forkAnotherProject",
-  ]);
-  expect(helpers.forkTargetsForAction("forkRemoteProject", row).map((target) => target.path)).toEqual([
-    "/srv/remote",
-  ]);
-  expect(helpers.forkTargetsForAction("forkAnotherProject", row).map((target) => target.path)).toEqual([
-    "/repo/other",
-  ]);
-});
-
-test("fork project context uses the session row project ancestor", () => {
-  const document = fakeProjectDocument(
-    [
-      {
-        "data-app-action-sidebar-project-id": "/repo/codmate",
-        "data-app-action-sidebar-project-label": "CodMate",
-      },
-      {
-        "data-app-action-sidebar-project-id": "/repo/current",
-        "data-app-action-sidebar-project-label": "current",
-      },
-    ],
-    "/repo/codmate",
-  );
-  const helpers = loadForkProjectHelpers(document);
-  const row = new document.Element(
-    {
-      "data-app-action-sidebar-thread-id": "local:thread-1",
-    },
-    {
-      "data-app-action-sidebar-project-list-id": "/repo/current",
-    },
-  );
-
-  expect(helpers.forkTargetsForAction("forkAnotherProject", row).map((target) => target.path)).toEqual([
-    "/repo/codmate",
-  ]);
-});
-
-test("fork project actions resolve remote project ids from metadata", () => {
-  const document = fakeProjectDocument([
-    {
-      "data-app-action-sidebar-project-id": "/repo/local",
-      "data-app-action-sidebar-project-label": "local",
-    },
-    {
-      "data-app-action-sidebar-project-id": "remote-project-1",
-      "data-app-action-sidebar-project-label": "CodMate",
-    },
-    {
-      "data-app-action-sidebar-project-id": "remote-project-2",
-      "data-app-action-sidebar-project-label": "MCPMate",
-    },
-  ]);
-  const remoteProjects = [
-    {
-      id: "remote-project-1",
-      hostId: "remote-ssh-codex-managed:box",
-      remotePath: "/srv/codmate",
-      label: "CodMate",
-    },
-    {
-      id: "remote-project-2",
-      hostId: "remote-ssh-codex-managed:box",
-      remotePath: "/srv/mcpmate",
-      label: "MCPMate",
-    },
-  ];
-  const helpers = loadForkProjectHelpers(document);
-  const localRow = new document.Element({
-    "data-app-action-sidebar-thread-id": "local:thread-1",
-    "data-app-action-sidebar-thread-cwd": "/repo/local",
-  });
-  const remoteRow = new document.Element(
-    {
-      "data-app-action-sidebar-thread-id": "local:thread-2",
-      "data-app-action-sidebar-thread-host-id": "remote-ssh-codex-managed:box",
-    },
-    {
-      "data-app-action-sidebar-project-list-id": "remote-project-1",
-    },
-  );
-
-  expect(
-    helpers.forkTargetsForAction("forkRemoteProject", localRow, remoteProjects),
-  ).toEqual([
-    {
-      path: "/srv/codmate",
-      label: "CodMate (Remote)",
-      remote: true,
-      hostId: "remote-ssh-codex-managed:box",
-    },
-    {
-      path: "/srv/mcpmate",
-      label: "MCPMate (Remote)",
-      remote: true,
-      hostId: "remote-ssh-codex-managed:box",
-    },
-  ]);
-  expect(
-    helpers.forkTargetsForAction("forkAnotherProject", remoteRow, remoteProjects).map(
-      (target) => target.path,
-    ),
-  ).toEqual(["/srv/mcpmate"]);
-});
-
-test("fork project actions keep remote same-side targets on the same host", () => {
-  const document = fakeProjectDocument(
-    [
-      {
-        "data-app-action-sidebar-project-id": "/repo/local",
-        "data-app-action-sidebar-project-label": "local",
-      },
-      {
-        "data-app-action-sidebar-project-id": "/srv/current",
-        "data-app-action-sidebar-project-label": "current",
-        "data-app-action-sidebar-project-host-id": "remote-ssh-codex-managed:box",
-      },
-      {
-        "data-app-action-sidebar-project-id": "/srv/other",
-        "data-app-action-sidebar-project-label": "other",
-        "data-app-action-sidebar-project-host-id": "remote-ssh-codex-managed:box",
-      },
-      {
-        "data-app-action-sidebar-project-id": "/srv/other-host",
-        "data-app-action-sidebar-project-label": "other-host",
-        "data-app-action-sidebar-project-host-id": "remote-ssh-codex-managed:other",
-      },
-    ],
-    "/srv/current",
-  );
-  const helpers = loadForkProjectHelpers(document);
-  const row = new document.Element({
-    "data-app-action-sidebar-thread-id": "remote:thread-1",
-    "data-app-action-sidebar-thread-cwd": "/srv/current",
-    "data-app-action-sidebar-thread-host-id": "remote-ssh-codex-managed:box",
-  });
-
-  expect(helpers.enabledForkSessionActions(row)).toEqual([
-    "forkLocalProject",
-    "forkAnotherProject",
-  ]);
-  expect(helpers.forkTargetsForAction("forkLocalProject", row).map((target) => target.path)).toEqual([
-    "/repo/local",
-  ]);
-  expect(helpers.forkTargetsForAction("forkAnotherProject", row).map((target) => target.path)).toEqual([
-    "/srv/other",
-  ]);
-});
-
-test("fork success navigates only for local forked sessions", () => {
-  const helpers = loadForkProjectHelpers(fakeProjectDocument([]));
-
-  expect(
-    helpers.forkedSessionPath(
-      { new_session_id: "local:019e5f6d-9b04-78c1-8d4c-9c33774967a9" },
-      { path: "/repo/target", hostId: "" },
-    ),
-  ).toBe("/local/019e5f6d-9b04-78c1-8d4c-9c33774967a9");
-  expect(
-    helpers.forkedSessionPath(
-      { new_session_id: "019e5f6d-9b04-78c1-8d4c-9c33774967a9" },
-      { path: "/srv/target", hostId: "remote-ssh-codex-managed:box" },
-    ),
-  ).toBe("");
-});
-
-test("fork success refreshes sidebar through Codex recent conversations manager", () => {
-  expect(source).toContain("await refreshSidebarAfterFork(target, result)");
-  expect(source).toContain(
-    'await manager.refreshRecentConversations({ sortKey: "updated_at" })',
-  );
-  expect(source).toContain('"sidebar_refresh_manager_missing"');
-  expect(source).toContain('"sidebar_refresh_unverified"');
-});
-
-test("sidebar refresh retries until the expected conversation appears", async () => {
-  const helpers = loadSidebarRefreshHelpers();
-  let attempts = 0;
-  const conversations = new Map();
-  helpers.setManagers([
-    {
-      hostId: "local",
-      async refreshRecentConversations() {
-        attempts += 1;
-        if (attempts === 2) {
-          conversations.set("thread-1", { id: "thread-1", title: "Forked" });
-        }
-      },
-      getConversation(id) {
-        return conversations.get(id) || null;
-      },
-      getRecentConversations() {
-        return Array.from(conversations.values());
-      },
-    },
-  ]);
-
-  const result = await helpers.refreshSidebarStateForHost(
-    "",
-    { conversationId: "local:thread-1" },
-    { retryDelays: [0, 0, 0] },
-  );
-
-  expect(result.ok).toBe(true);
-  expect(result.verified).toBe(true);
-  expect(result.attempts).toBe(2);
-  expect(attempts).toBe(2);
-});
-
-test("sidebar refresh reports unverified when title never matches", async () => {
-  const helpers = loadSidebarRefreshHelpers();
-  helpers.setManagers([
-    {
-      hostId: "remote-ssh-codex-managed:box",
-      async refreshRecentConversations() {},
-      getConversation() {
-        return { id: "thread-1", title: "Old title" };
-      },
-      getRecentConversations() {
-        return [{ id: "thread-1", title: "Old title" }];
-      },
-    },
-  ]);
-
-  const result = await helpers.refreshSidebarStateForHost(
-    "remote-ssh-codex-managed:box",
-    { conversationId: "remote:thread-1", title: "New title" },
-    { retryDelays: [0, 0] },
-  );
-
-  expect(result.ok).toBe(false);
-  expect(result.verified).toBe(false);
-  expect(result.attempts).toBe(2);
-  expect(helpers.diagnostics.at(-1).name).toBe("sidebar_refresh_unverified");
-});
-
-test("sidebar refresh rejects an invalid expected conversation id", async () => {
-  const helpers = loadSidebarRefreshHelpers();
-  let attempts = 0;
-  helpers.setManagers([
-    {
-      hostId: "local",
-      async refreshRecentConversations() {
-        attempts += 1;
-      },
-      getConversation() {
-        return { id: "thread-1", title: "Forked" };
-      },
-      getRecentConversations() {
-        return [{ id: "thread-1", title: "Forked" }];
-      },
-    },
-  ]);
-
-  const result = await helpers.refreshSidebarStateForHost(
-    "",
-    { conversationId: "" },
-    { retryDelays: [0, 0] },
-  );
-
-  expect(result.ok).toBe(false);
-  expect(result.verified).toBe(false);
-  expect(result.attempts).toBe(0);
-  expect(attempts).toBe(0);
-  expect(helpers.diagnostics.at(-1).name).toBe(
-    "sidebar_refresh_expectation_missing",
-  );
-});
-
-test("sidebar refresh diagnostics include prior refresh errors", async () => {
-  const helpers = loadSidebarRefreshHelpers();
-  let attempts = 0;
-  helpers.setManagers([
-    {
-      hostId: "local",
-      async refreshRecentConversations() {
-        attempts += 1;
-        if (attempts === 1) throw new Error("temporary refresh failure");
-      },
-      getConversation() {
-        return null;
-      },
-      getRecentConversations() {
-        return [];
-      },
-    },
-  ]);
-
-  const result = await helpers.refreshSidebarStateForHost(
-    "",
-    { conversationId: "thread-1" },
-    { retryDelays: [0, 0] },
-  );
-
-  expect(result.ok).toBe(false);
-  expect(result.verified).toBe(false);
-  expect(result.attempts).toBe(2);
-  expect(helpers.diagnostics.at(-1)).toEqual({
-    name: "sidebar_refresh_unverified",
-    payload: {
-      host_id: "local",
-      session_id: "thread-1",
-      title: "",
-      refresh_error_count: 1,
-      last_error: "temporary refresh failure",
-    },
-  });
-});
-
-test("sidebar refresh without expectation reports refresh failures", async () => {
-  const helpers = loadSidebarRefreshHelpers();
-  helpers.setManagers([
-    {
-      hostId: "local",
-      async refreshRecentConversations() {
-        throw new Error("refresh unavailable");
-      },
-      getConversation() {
-        return null;
-      },
-      getRecentConversations() {
-        return [];
-      },
-    },
-  ]);
-
-  const result = await helpers.refreshSidebarStateForHost(
-    "",
-    undefined,
-    { retryDelays: [0] },
-  );
-
-  expect(result.ok).toBe(false);
-  expect(result.verified).toBe(false);
-  expect(result.attempts).toBe(1);
-  expect(helpers.diagnostics.at(-1)).toEqual({
-    name: "sidebar_refresh_failed",
-    payload: {
-      host_id: "local",
-      message: "refresh unavailable",
-    },
-  });
-});
-
-test("session export preserves remote host context", () => {
-  const document = fakeProjectDocument([], "/srv/current");
-  const helpers = loadForkProjectHelpers(document);
-  const row = new document.Element({
-    "data-app-action-sidebar-thread-id": "remote:thread-1",
-    "data-app-action-sidebar-thread-cwd": "/srv/current",
-    "data-app-action-sidebar-thread-host-id": "remote-ssh-codex-managed:box",
-  });
-
-  expect(helpers.sessionProjectContext(row)).toEqual({
-    hostId: "remote-ssh-codex-managed:box",
-    remote: true,
-    path: "/srv/current",
-  });
-  expect(helpers.codexAppServerHostId("remote-ssh-codex-managed:box")).toBe(
-    "remote-ssh-codex-managed:box",
-  );
-  expect(helpers.codexThreadId("remote:thread-1")).toBe("thread-1");
-  expect(source).toContain("host_id: context.hostId");
-});
-
-test("codex app-server helpers normalize host ids", () => {
-  const helpers = loadForkProjectHelpers(fakeProjectDocument([]));
-
-  expect(helpers.codexAppServerHostId("")).toBe("local");
-  expect(helpers.codexAppServerHostId("local")).toBe("local");
-  expect(helpers.codexAppServerHostId("remote-ssh-codex-managed:box")).toBe(
-    "remote-ssh-codex-managed:box",
-  );
+test("provider save omits models until fetch and requires a default model", () => {
+  expect(settingsSource).toContain("if (providerModelsFetchedThisSession)");
+  expect(settingsSource).toContain("payload.models = providerFetchedModels");
+  expect(settingsSource).not.toContain("catalogModels[0]?.model");
+  expect(settingsSource).toContain('setProviderDialogError("Default model is required")');
+  expect(settingsSource).toContain("modelsFetched: providerModelsFetchedThisSession");
+  expect(settingsSource).toContain("catch (_error)");
 });

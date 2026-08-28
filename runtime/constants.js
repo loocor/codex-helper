@@ -3,7 +3,6 @@ const helperCommandAttribute = "data-codex-helper-command";
 const helperToggleAttribute = "data-codex-helper-setting-toggle";
 const helperNumberAttribute = "data-codex-helper-setting-number";
 const helperToastAttribute = "data-codex-helper-toast";
-const helperSessionActionPrefix = "codex-helper-session-";
 const helperSettingsSectionAttribute = "data-codex-helper-settings-section";
 const helperNativeSettingsGroupAttribute =
   "data-codex-helper-native-settings-group";
@@ -26,14 +25,10 @@ const helperPanelClass =
   "codex-helper-panel flex flex-col overflow-hidden rounded-2xl border border-default";
 let observerInstalled = false;
 let helperRuntimeObserver = null;
-let sessionContextMenuMapRestore = null;
-let sessionContextMenuReplayInFlight = false;
-const SESSION_CONTEXT_MENU_MAX_AGE_MS = 2500;
 let helperNativeSettingsRoot = null;
 let helperNativeSettingsContentHost = null;
 let helperNativeSettingsContentStash = null;
 let helperNativeSettingsActivePage = "";
-let pendingSessionMenuContext = null;
 let pendingPortScan = 0;
 let maintainPortsPanelTimer = 0;
 let maintainUsageLimitBannerTimer = 0;
@@ -60,16 +55,10 @@ const detectedPorts = new Map();
 const portDiscoveryStates = new Map();
 const suppressedPortMappings = new Set();
 let featureSettings = {
-  markdownExportEnabled: false,
-  sessionMoveEnabled: false,
-  markdownFriendlyFilenameEnabled: true,
-  autoNamingMinChars: 4,
-  autoNamingMaxChars: 10,
   portForwardingEnabled: false,
   portAutoForwardWeb: true,
   portSameLocalPort: true,
   hideUsageLimitBannerEnabled: false,
+  launchAtLoginEnabled: false,
 };
 let featureSettingsLoaded = false;
-let cachedRemoteProjectMetadata = [];
-let cachedRemoteProjectMetadataLoaded = false;

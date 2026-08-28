@@ -22,6 +22,7 @@ use crate::logging::DiagnosticLogger;
 use crate::ports::PortForwardManager;
 use crate::routes::{BridgeContext, RuntimeActivity};
 use crate::runtime::build_runtime_bundle;
+use crate::settings_window::{open_settings_callback, OpenSettings};
 use crate::state_dir::StateDir;
 
 #[derive(Clone)]
@@ -42,6 +43,7 @@ pub struct CodexController {
     injection_sync_busy: Mutex<()>,
     runtime_activity: RuntimeActivity,
     busy: Mutex<()>,
+    app_handle: std::sync::Mutex<Option<tauri::AppHandle>>,
 }
 
 struct InjectedTarget {
@@ -83,7 +85,25 @@ impl CodexController {
             injection_sync_busy: Mutex::new(()),
             runtime_activity: RuntimeActivity::default(),
             busy: Mutex::new(()),
+            app_handle: std::sync::Mutex::new(None),
         })
+    }
+
+    pub fn bind_app(&self, app: tauri::AppHandle) {
+        *self.app_handle.lock().expect("app handle poisoned") = Some(app);
+    }
+
+    pub fn runtime_activity(&self) -> RuntimeActivity {
+        self.runtime_activity.clone()
+    }
+
+    pub async fn debug_port(&self) -> Option<u16> {
+        self.ctx.lock().await.as_ref().map(|ctx| ctx.debug_port)
+    }
+
+    fn open_settings(&self) -> Option<OpenSettings> {
+        let app = self.app_handle.lock().ok()?.clone()?;
+        Some(open_settings_callback(app))
     }
 
     pub async fn initial_launch(
@@ -181,11 +201,52 @@ impl CodexController {
         port_manager: PortForwardManager,
     ) -> anyhow::Result<()> {
         let _busy = self.busy.lock().await;
+        self.relaunch_codex(port_manager, "launcher.recovery_starting")
+            .await
+    }
+
+    pub async fn restart_chatgpt(
+        self: &Arc<Self>,
+        port_manager: PortForwardManager,
+    ) -> anyhow::Result<()> {
+        let _busy = self.busy.lock().await;
+        self.prepare_codex_relaunch("restart-chatgpt").await?;
+        self.relaunch_codex(port_manager, "launcher.restart_starting")
+            .await
+    }
+
+    async fn prepare_codex_relaunch(&self, reason: &str) -> anyhow::Result<()> {
+        self.abort_target_watcher().await;
+        let disconnected_targets = self.disconnect_injected_targets(None).await;
+        let ctx = {
+            let mut guard = self.ctx.lock().await;
+            guard.take()
+        };
+        *self.managed_codex_online.lock().await = false;
+        if let Some(ctx) = ctx {
+            ctx.port_manager.stop_all();
+            ctx.logger.append(
+                "codex.cleaned_up",
+                serde_json::json!({
+                    "reason": reason,
+                    "disconnectedTargets": disconnected_targets,
+                    "abortedWatcher": true,
+                }),
+            )?;
+        }
+        Ok(())
+    }
+
+    async fn relaunch_codex(
+        self: &Arc<Self>,
+        port_manager: PortForwardManager,
+        starting_event: &str,
+    ) -> anyhow::Result<()> {
         let state_dir = StateDir::init()?;
         let logger = Arc::new(DiagnosticLogger::new(state_dir.logs_dir.clone()));
         let app_path = resolve_codex_app_path(None)?;
         logger.append(
-            "launcher.recovery_starting",
+            starting_event,
             serde_json::json!({ "preferred": PREFERRED_DEBUG_PORT }),
         )?;
         self.close_existing_codex_debug_ports(&logger).await?;
@@ -246,6 +307,7 @@ impl CodexController {
                 debug_port: ctx.debug_port,
                 port_manager: ctx.port_manager.clone(),
                 runtime_activity: self.runtime_activity.clone(),
+                open_settings: self.open_settings(),
             };
             for target_id in &plan.inject {
                 let target = codex_targets

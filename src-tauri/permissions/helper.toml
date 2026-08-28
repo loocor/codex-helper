@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-helper-bridge"
+description = "Allows the Settings window to call helper_bridge."
+commands.allow = ["helper_bridge"]

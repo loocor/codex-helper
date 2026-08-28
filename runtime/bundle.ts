@@ -1,6 +1,7 @@
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import bundleModules from "./index.json";
+import settingsModules from "./settings-index.json";
 
 const runtimeSrcDir = import.meta.dir;
 const defaultOutputPath = join(runtimeSrcDir, "../dist/bundle.js");
@@ -14,7 +15,7 @@ const RUNTIME_FOOTER = `
 })();
 `;
 
-const NON_MODULE_FILES = new Set(["bundle.ts", "index.json"]);
+const NON_MODULE_FILES = new Set(["bundle.ts", "index.json", "settings-index.json"]);
 const BUILD_DATE_PLACEHOLDER = "__CODEX_HELPER_BUILD_DATE__";
 const BUILD_DATE_PLACEHOLDER_LITERAL = `"${BUILD_DATE_PLACEHOLDER}"`;
 
@@ -26,16 +27,39 @@ function isRuntimeModuleFile(fileName: string): boolean {
 	return fileName.endsWith(".js") && !isRuntimeTestFile(fileName);
 }
 
+function chatgptInjectedModuleNames(): Set<string> {
+	return new Set(bundleModules);
+}
+
+function settingsWindowModuleNames(): Set<string> {
+	return new Set(settingsModules);
+}
+
 function standaloneModulePaths(): string[] {
-	const bundledNames = new Set(bundleModules);
+	const injectedNames = chatgptInjectedModuleNames();
+	const settingsNames = settingsWindowModuleNames();
 	return readdirSync(runtimeSrcDir)
 		.filter(
 			(fileName) =>
 				isRuntimeModuleFile(fileName) &&
-				!bundledNames.has(fileName) &&
+				!injectedNames.has(fileName) &&
+				!settingsNames.has(fileName) &&
 				!NON_MODULE_FILES.has(fileName),
 		)
 		.sort();
+}
+
+function concatRuntimeModules(moduleNames: string[]): string {
+	return moduleNames
+		.map((fileName) => {
+			const absolutePath = join(runtimeSrcDir, fileName);
+			return readFileSync(absolutePath, "utf8").trimEnd();
+		})
+		.join("\n\n")
+		.replaceAll(
+			BUILD_DATE_PLACEHOLDER_LITERAL,
+			JSON.stringify(runtimeBuildDate()),
+		);
 }
 
 function runtimeBuildDate(): string {
@@ -50,17 +74,11 @@ function runtimeBuildDate(): string {
 }
 
 export function buildRuntimeBundle(): string {
-	const body = bundleModules
-		.map((fileName) => {
-			const absolutePath = join(runtimeSrcDir, fileName);
-			return readFileSync(absolutePath, "utf8").trimEnd();
-		})
-		.join("\n\n")
-		.replaceAll(
-			BUILD_DATE_PLACEHOLDER_LITERAL,
-			JSON.stringify(runtimeBuildDate()),
-		);
-	return `${RUNTIME_HEADER}${body}${RUNTIME_FOOTER}`;
+	return `${RUNTIME_HEADER}${concatRuntimeModules(bundleModules)}${RUNTIME_FOOTER}`;
+}
+
+export function buildSettingsBundle(): string {
+	return `${RUNTIME_HEADER}${concatRuntimeModules(settingsModules)}${RUNTIME_FOOTER}`;
 }
 
 export function standaloneRuntimeScripts(): string[] {

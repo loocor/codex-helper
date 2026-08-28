@@ -8,34 +8,36 @@ use serde_json::Value;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct HelperSettings {
-    pub markdown_export_enabled: bool,
-    pub session_move_enabled: bool,
-    pub markdown_friendly_filename_enabled: bool,
-    pub auto_naming_min_chars: u8,
-    pub auto_naming_max_chars: u8,
     pub port_forwarding_enabled: bool,
     pub port_auto_forward_web: bool,
     pub port_same_local_port: bool,
     pub hide_usage_limit_banner_enabled: bool,
+    pub launch_at_login_enabled: bool,
 }
 
 impl Default for HelperSettings {
     fn default() -> Self {
         Self {
-            markdown_export_enabled: false,
-            session_move_enabled: false,
-            markdown_friendly_filename_enabled: true,
-            auto_naming_min_chars: 4,
-            auto_naming_max_chars: 10,
             port_forwarding_enabled: false,
             port_auto_forward_web: true,
             port_same_local_port: true,
             hide_usage_limit_banner_enabled: false,
+            launch_at_login_enabled: false,
         }
     }
 }
 
-const LEGACY_SETTINGS_KEYS: &[&str] = &["sessionDeleteEnabled", "autoRenameMenuEnabled"];
+const LEGACY_SETTINGS_KEYS: &[&str] = &[
+    "sessionDeleteEnabled",
+    "autoRenameMenuEnabled",
+    "markdownExportEnabled",
+    "sessionMoveEnabled",
+    "markdownFriendlyFilenameEnabled",
+    "autoNamingMinChars",
+    "autoNamingMaxChars",
+    "autoNamingMinWords",
+    "autoNamingMaxWords",
+];
 
 pub fn ensure_settings_file(path: &Path) -> anyhow::Result<HelperSettings> {
     if path.exists() {
@@ -61,14 +63,13 @@ fn settings_from_value(value: &Value) -> anyhow::Result<HelperSettings> {
         .ok_or_else(|| anyhow::anyhow!("Settings file must contain a JSON object"))?;
     let mut settings = HelperSettings::default();
     for (key, value) in object {
-        if apply_setting_value(&mut settings, key, value, object)? {
+        if apply_setting_value(&mut settings, key, value)? {
             continue;
         }
         if !LEGACY_SETTINGS_KEYS.contains(&key.as_str()) {
             anyhow::bail!("Unknown settings key: {key}");
         }
     }
-    validate_auto_naming_range(&settings)?;
     Ok(settings)
 }
 
@@ -79,12 +80,10 @@ pub fn update_settings(path: &Path, payload: &Value) -> anyhow::Result<HelperSet
         .ok_or_else(|| anyhow::anyhow!("Settings payload must be an object"))?;
 
     for (key, value) in object {
-        if !apply_setting_value(&mut settings, key, value, object)? {
+        if !apply_setting_value(&mut settings, key, value)? {
             return Err(anyhow::anyhow!("Unknown settings key: {key}"));
         }
     }
-    validate_auto_naming_range(&settings)?;
-
     write_settings(path, &settings)?;
     Ok(settings)
 }
@@ -93,74 +92,24 @@ fn apply_setting_value(
     settings: &mut HelperSettings,
     key: &str,
     value: &Value,
-    object: &serde_json::Map<String, Value>,
 ) -> anyhow::Result<bool> {
     match key {
-        "markdownExportEnabled" => settings.markdown_export_enabled = bool_setting(key, value)?,
-        "sessionMoveEnabled" => settings.session_move_enabled = bool_setting(key, value)?,
-        "markdownFriendlyFilenameEnabled" => {
-            settings.markdown_friendly_filename_enabled = bool_setting(key, value)?
-        }
-        "autoNamingMinChars" => settings.auto_naming_min_chars = char_count_setting(key, value)?,
-        "autoNamingMaxChars" => settings.auto_naming_max_chars = char_count_setting(key, value)?,
-        "autoNamingMinWords" | "autoNamingMaxWords" => {
-            apply_auto_naming_alias(settings, key, value, object)?
-        }
         "portForwardingEnabled" => settings.port_forwarding_enabled = bool_setting(key, value)?,
         "portAutoForwardWeb" => settings.port_auto_forward_web = bool_setting(key, value)?,
         "portSameLocalPort" => settings.port_same_local_port = bool_setting(key, value)?,
         "hideUsageLimitBannerEnabled" => {
             settings.hide_usage_limit_banner_enabled = bool_setting(key, value)?
         }
+        "launchAtLoginEnabled" => settings.launch_at_login_enabled = bool_setting(key, value)?,
         _ => return Ok(false),
     }
     Ok(true)
-}
-
-fn apply_auto_naming_alias(
-    settings: &mut HelperSettings,
-    key: &str,
-    value: &Value,
-    object: &serde_json::Map<String, Value>,
-) -> anyhow::Result<()> {
-    let canonical_key = if key == "autoNamingMinWords" {
-        "autoNamingMinChars"
-    } else {
-        "autoNamingMaxChars"
-    };
-    if object.contains_key(canonical_key) {
-        return Ok(());
-    }
-    let count = char_count_setting(canonical_key, value)?;
-    if canonical_key == "autoNamingMinChars" {
-        settings.auto_naming_min_chars = count;
-    } else {
-        settings.auto_naming_max_chars = count;
-    }
-    Ok(())
 }
 
 fn bool_setting(key: &str, value: &Value) -> anyhow::Result<bool> {
     value
         .as_bool()
         .ok_or_else(|| anyhow::anyhow!("Settings value for {key} must be a boolean"))
-}
-
-fn char_count_setting(key: &str, value: &Value) -> anyhow::Result<u8> {
-    let count = value
-        .as_u64()
-        .ok_or_else(|| anyhow::anyhow!("Settings value for {key} must be an integer"))?;
-    if !(1..=20).contains(&count) {
-        anyhow::bail!("Settings value for {key} must be between 1 and 20");
-    }
-    Ok(count as u8)
-}
-
-fn validate_auto_naming_range(settings: &HelperSettings) -> anyhow::Result<()> {
-    if settings.auto_naming_min_chars > settings.auto_naming_max_chars {
-        anyhow::bail!("autoNamingMinChars must be less than or equal to autoNamingMaxChars");
-    }
-    Ok(())
 }
 
 pub fn write_settings(path: &Path, settings: &HelperSettings) -> anyhow::Result<()> {
@@ -177,18 +126,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_settings_keep_friendly_markdown_filenames() {
+    fn default_settings_keep_port_forwarding_disabled() {
         let settings = HelperSettings::default();
 
-        assert!(!settings.markdown_export_enabled);
-        assert!(!settings.session_move_enabled);
         assert!(!settings.port_forwarding_enabled);
         assert!(settings.port_auto_forward_web);
         assert!(settings.port_same_local_port);
         assert!(!settings.hide_usage_limit_banner_enabled);
-        assert!(settings.markdown_friendly_filename_enabled);
-        assert_eq!(settings.auto_naming_min_chars, 4);
-        assert_eq!(settings.auto_naming_max_chars, 10);
+        assert!(!settings.launch_at_login_enabled);
     }
 
     #[test]
@@ -207,8 +152,6 @@ mod tests {
 
         let settings = read_settings(&path).expect("legacy settings should load");
 
-        assert!(!settings.markdown_export_enabled);
-        assert!(settings.session_move_enabled);
         assert!(!settings.port_forwarding_enabled);
         assert!(settings.port_auto_forward_web);
         assert!(settings.port_same_local_port);
@@ -234,11 +177,8 @@ mod tests {
 
         let settings = read_settings(&path).expect("legacy settings should load");
 
-        assert!(settings.markdown_export_enabled);
-        assert!(!settings.session_move_enabled);
-        assert!(settings.markdown_friendly_filename_enabled);
-        assert_eq!(settings.auto_naming_min_chars, 8);
-        assert_eq!(settings.auto_naming_max_chars, 12);
+        assert!(!settings.port_forwarding_enabled);
+        assert!(!settings.hide_usage_limit_banner_enabled);
     }
 
     #[test]
@@ -253,32 +193,10 @@ mod tests {
     }
 
     #[test]
-    fn read_settings_prefers_canonical_auto_naming_keys() {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let path = temp_dir.path().join("config.json");
-        fs::write(
-            &path,
-            r#"{
-  "autoNamingMinWords": 12,
-  "autoNamingMinChars": 3,
-  "autoNamingMaxWords": 18,
-  "autoNamingMaxChars": 7
-}
-"#,
-        )
-        .expect("settings");
-
-        let settings = read_settings(&path).expect("settings should load");
-
-        assert_eq!(settings.auto_naming_min_chars, 3);
-        assert_eq!(settings.auto_naming_max_chars, 7);
-    }
-
-    #[test]
     fn read_settings_rejects_invalid_value_types() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let path = temp_dir.path().join("config.json");
-        fs::write(&path, r#"{ "markdownExportEnabled": "yes" }"#).expect("settings");
+        fs::write(&path, r#"{ "portForwardingEnabled": "yes" }"#).expect("settings");
 
         let error = read_settings(&path).expect_err("invalid setting should fail");
 
@@ -294,27 +212,19 @@ mod tests {
         let settings = update_settings(
             &path,
             &serde_json::json!({
-                "markdownExportEnabled": true,
                 "portForwardingEnabled": true,
                 "portAutoForwardWeb": false,
                 "portSameLocalPort": true,
-                "markdownFriendlyFilenameEnabled": false,
-                "autoNamingMinChars": 3,
-                "autoNamingMaxChars": 7,
             }),
         )
         .expect("updated settings");
         let persisted = read_settings(&path).expect("persisted settings");
 
-        assert!(settings.markdown_export_enabled);
-        assert!(!settings.session_move_enabled);
         assert!(settings.port_forwarding_enabled);
         assert!(!settings.port_auto_forward_web);
         assert!(settings.port_same_local_port);
         assert!(!settings.hide_usage_limit_banner_enabled);
-        assert!(!settings.markdown_friendly_filename_enabled);
-        assert_eq!(settings.auto_naming_min_chars, 3);
-        assert_eq!(settings.auto_naming_max_chars, 7);
+        assert!(!settings.launch_at_login_enabled);
         assert_eq!(settings, persisted);
     }
 
@@ -338,25 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn update_settings_rejects_invalid_auto_naming_range() {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let path = temp_dir.path().join("config.json");
-        ensure_settings_file(&path).expect("initial settings");
-
-        let error = update_settings(
-            &path,
-            &serde_json::json!({
-                "autoNamingMinChars": 9,
-                "autoNamingMaxChars": 4
-            }),
-        )
-        .expect_err("invalid range should fail");
-
-        assert!(error.to_string().contains("autoNamingMinChars"));
-    }
-
-    #[test]
-    fn update_settings_prefers_canonical_auto_naming_keys() {
+    fn update_settings_enables_launch_at_login() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let path = temp_dir.path().join("config.json");
         ensure_settings_file(&path).expect("initial settings");
@@ -364,16 +256,14 @@ mod tests {
         let settings = update_settings(
             &path,
             &serde_json::json!({
-                "autoNamingMinWords": 12,
-                "autoNamingMinChars": 3,
-                "autoNamingMaxWords": 18,
-                "autoNamingMaxChars": 7
+                "launchAtLoginEnabled": true
             }),
         )
         .expect("updated settings");
+        let persisted = read_settings(&path).expect("persisted settings");
 
-        assert_eq!(settings.auto_naming_min_chars, 3);
-        assert_eq!(settings.auto_naming_max_chars, 7);
+        assert!(settings.launch_at_login_enabled);
+        assert_eq!(settings, persisted);
     }
 
     #[test]
@@ -384,6 +274,18 @@ mod tests {
 
         let error = update_settings(&path, &serde_json::json!({ "providerSyncEnabled": true }))
             .expect_err("unknown setting should fail");
+
+        assert!(error.to_string().contains("Unknown settings key"));
+    }
+
+    #[test]
+    fn update_settings_rejects_removed_session_keys() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("config.json");
+        ensure_settings_file(&path).expect("initial settings");
+
+        let error = update_settings(&path, &serde_json::json!({ "markdownExportEnabled": true }))
+            .expect_err("removed setting should fail on update");
 
         assert!(error.to_string().contains("Unknown settings key"));
     }

@@ -22,13 +22,21 @@ fn helper_build_date_literal() -> String {
     serde_json::to_string(helper_build_date()).expect("serialize helper build date")
 }
 
-fn bundled_runtime() -> String {
-    let body = RUNTIME_MODULE_SOURCES.join("\n\n");
+fn bundle_module_sources(sources: &[&str], kind: &str) -> String {
+    let body = sources.join("\n\n");
     if !body.contains(BUILD_DATE_PLACEHOLDER_LITERAL) {
-        panic!("runtime bundle is missing the helper build date placeholder");
+        panic!("{kind} bundle is missing the helper build date placeholder");
     }
     let body = body.replace(BUILD_DATE_PLACEHOLDER_LITERAL, &helper_build_date_literal());
     format!("{RUNTIME_HEADER}{body}{RUNTIME_FOOTER}")
+}
+
+fn bundled_runtime() -> String {
+    bundle_module_sources(RUNTIME_MODULE_SOURCES, "runtime")
+}
+
+pub fn build_settings_runtime() -> String {
+    bundle_module_sources(SETTINGS_MODULE_SOURCES, "settings")
 }
 
 pub fn build_runtime_bundle(
@@ -91,11 +99,11 @@ mod tests {
 
         assert!(bundle[0].contains("Codex Helper") || bundle[0].contains("codex-helper"));
         assert!(
-            bundle[1].contains("zed_menu_item_injected")
-                || bundle[1].contains("data-codex-helper-zed-menu-item")
+            !bundle[0].contains("zed_menu_item_injected"),
+            "ChatGPT injected runtime still includes Open in Zed"
         );
-        assert_eq!(bundle[2], "window.a = true;");
-        assert_eq!(bundle[3], "window.b = true;");
+        assert_eq!(bundle[1], "window.a = true;");
+        assert_eq!(bundle[2], "window.b = true;");
     }
 
     #[test]
@@ -109,6 +117,41 @@ mod tests {
         assert!(
             bundled.contains(&expected),
             "packaged runtime did not inject the compile-time helper build date"
+        );
+    }
+
+    #[test]
+    fn chatgpt_runtime_does_not_include_helper_settings_window() {
+        let bundled = bundled_runtime();
+        assert!(
+            !bundled.contains("function startHelperSettingsApp("),
+            "ChatGPT injected runtime included the Helper Settings window host"
+        );
+        assert!(
+            !bundled.contains("installNativeHelperSettingsGroup"),
+            "ChatGPT injected runtime still installs Helper settings into Codex Settings"
+        );
+    }
+
+    #[test]
+    fn settings_runtime_hosts_the_helper_settings_window() {
+        let bundled = build_settings_runtime();
+        let expected = format!("const helperBuildDate = {};", helper_build_date_literal());
+        assert!(
+            !bundled.contains("__CODEX_HELPER_BUILD_DATE__"),
+            "settings runtime left the build date placeholder in place"
+        );
+        assert!(
+            bundled.contains(&expected),
+            "settings runtime did not inject the compile-time helper build date"
+        );
+        assert!(
+            bundled.contains("function startHelperSettingsApp("),
+            "settings runtime is missing the Helper Settings window host"
+        );
+        assert!(
+            bundled.contains("id: \"providers\""),
+            "settings runtime is missing the Providers page"
         );
     }
 }
