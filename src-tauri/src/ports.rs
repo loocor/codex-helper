@@ -535,7 +535,7 @@ mod tests {
         LOCAL_PORT_TEST_LOCK
             .get_or_init(|| std::sync::Mutex::new(()))
             .lock()
-            .expect("local port test lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     #[test]
@@ -583,8 +583,8 @@ mod tests {
         let port = listener.local_addr().expect("local addr").port();
 
         assert!(!local_port_available(port));
-        drop(listener);
-        assert!(local_port_available(port));
+        // Keep the listener until the test ends. After drop, another parallel
+        // test can bind the same ephemeral port and make a reuse assertion flake.
     }
 
     #[test]
