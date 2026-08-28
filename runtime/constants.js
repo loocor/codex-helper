@@ -36,6 +36,7 @@ let helperNativeSettingsActivePage = "";
 let pendingSessionMenuContext = null;
 let pendingPortScan = 0;
 let maintainPortsPanelTimer = 0;
+let maintainUsageLimitBannerTimer = 0;
 let refreshPortsPanelTimer = 0;
 let pinnedSummaryHideTimer = 0;
 let portScanIntervalId = 0;

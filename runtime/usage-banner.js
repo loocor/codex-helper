@@ -178,6 +178,14 @@ function restoreHiddenComposerHosts() {
 }
 
 function maintainUsageLimitBanner() {
+  if (maintainUsageLimitBannerTimer) return;
+  maintainUsageLimitBannerTimer = window.setTimeout(() => {
+    maintainUsageLimitBannerTimer = 0;
+    maintainUsageLimitBannerNow();
+  }, 150);
+}
+
+function maintainUsageLimitBannerNow() {
   if (!featureSettings.hideUsageLimitBannerEnabled) {
     restoreUsageLimitOverlays();
     return;

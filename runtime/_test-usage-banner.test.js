@@ -56,3 +56,10 @@ test("usage-limit hide skips nodes that contain the composer", () => {
   expect(hide).toContain("if (containsComposer(node)) return;");
   expect(looksLikeCard).toContain("if (containsComposer(node)) return false;");
 });
+
+test("usage-limit overlay scan is debounced like ports", () => {
+  expect(source).toContain("function maintainUsageLimitBannerNow(");
+  expect(source).toContain("let maintainUsageLimitBannerTimer = 0;");
+  expect(source).toContain("if (maintainUsageLimitBannerTimer) return;");
+  expect(source).toContain("if (maintainUsageLimitBannerTimer) clearTimeout(maintainUsageLimitBannerTimer);");
+});
