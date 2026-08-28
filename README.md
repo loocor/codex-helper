@@ -8,18 +8,17 @@ It focuses on a small set of local and remote workflow gaps while keeping the Co
 
 ## Features
 
-- **Project-level session Fork**: fork a conversation between local and remote projects, or into another project on the same side, without manually copying session files.
-- **Markdown export**: export a conversation to Markdown for sharing, review, or archiving outside Codex.
-- **Zed for remote projects**: open remote Codex project contexts in Zed through a native-feeling menu action.
 - **Remote port forwarding**: detect and forward web ports from Codex SSH sessions so remote dev servers can be opened locally.
-- **Native-feeling settings**: configure Helper features inside Codex Settings with a UI that fits the surrounding application.
+- **Helper Settings**: configure Helper from a standalone window opened from the menu bar, with a UI that stays close to Codex.
 - **Usage-limit overlay hide**: optionally hide the *You're out of Codex and Work usage* card. This is visual only and does not reset or bypass account limits.
+- **Provider management**: switch ChatGPT desktop between Official ChatGPT login, API keys (DeepSeek, Kimi, MiniMax, DashScope, or custom), GitHub Copilot, and xAI Grok. Helper writes `~/.codex/config.toml` and a native-style model catalog. Copilot and Grok OAuth use device-code flows and store tokens in `~/.codex-helper/oauth/`.
+- **Local provider proxy**: non-Official traffic goes through `127.0.0.1:3721` (`/v1/responses` and `/v1/chat/completions`). Helper injects the upstream key, sanitizes ChatGPT-desktop tool payloads, and can expose named local Endpoint keys for other agents.
 
 ## Characteristics
 
 - **Dynamic injection**: Codex Helper keeps Codex application files unchanged, so the enhancement layer is reversible.
 - **Focused scope**: it supplements uncovered workflows instead of duplicating Codex-native capabilities or adding ambiguous actions.
-- **Codex-like interaction**: controls are placed in existing Codex surfaces and follow the app's visual and interaction patterns.
+- **Codex-like interaction**: controls follow Codex visual patterns. Helper Settings lives in its own window so Codex Settings stays untouched.
 
 ## Local State
 
@@ -30,6 +29,9 @@ Codex Helper owns one state directory:
   logs/
   scripts/
   config.json
+  providers.json
+  endpoint.json
+  oauth/
   state.json
 ```
 

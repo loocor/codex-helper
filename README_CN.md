@@ -8,18 +8,17 @@ Codex Helper 是一个面向 Codex desktop 的轻量本地增强启动器。
 
 ## 功能
 
-- **项目级会话 Fork**：在本地和远端项目之间 Fork 会话，或 Fork 到同侧的另一个项目，不需要手动复制 session 文件。
-- **Markdown 导出**：将会话导出为 Markdown，便于在 Codex 之外分享、评审或归档。
-- **远端项目 Zed 打开**：通过接近原生的菜单动作，在 Zed 中打开远端 Codex 项目上下文。
 - **远程端口转发**：检测并转发 Codex SSH 会话中的 web 端口，让远端 dev server 可以在本地打开。
-- **近乎原生的设置界面**：在 Codex Settings 中配置 Helper 功能，界面和交互尽量贴合 Codex 原应用。
+- **Helper Settings**：从菜单栏打开独立设置窗口配置 Helper，界面尽量贴近 Codex。
 - **用量限制浮层隐藏**：可选隐藏 *You're out of Codex and Work usage* 卡片。这只影响界面显示，不会重置或绕过账号额度。
+- **Provider 管理**：在 Official ChatGPT 登录、API Key（DeepSeek、Kimi、MiniMax、DashScope 或自定义）、GitHub Copilot 和 xAI Grok 之间切换。Helper 会写入 `~/.codex/config.toml` 以及接近原生的模型 Catalog。Copilot 与 Grok 使用设备码 OAuth，令牌保存在 `~/.codex-helper/oauth/`。
+- **本机 Provider 代理**：非 Official 流量走 `127.0.0.1:3721`（`/v1/responses` 与 `/v1/chat/completions`）。Helper 负责注入上游密钥、清洗 ChatGPT 桌面端工具载荷，并可为其他 Agent 发放本地 Endpoint Key。
 
 ## 特点
 
 - **动态注入**：Codex Helper 保持 Codex 应用文件不变，增强层可回退。
 - **克制补足**：只补充 Codex 尚未覆盖的工作流，不重复原生能力，也不增加容易产生歧义的操作。
-- **贴近 Codex 交互**：控制入口放在 Codex 既有界面中，并尽量沿用原应用的视觉和交互形式。
+- **贴近 Codex 交互**：交互尽量沿用 Codex 视觉语言。Helper Settings 使用独立窗口，不改动 Codex Settings。
 
 ## 本地状态
 
@@ -30,6 +29,9 @@ Codex Helper 使用一个状态目录：
   logs/
   scripts/
   config.json
+  providers.json
+  endpoint.json
+  oauth/
   state.json
 ```
 
