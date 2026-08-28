@@ -350,7 +350,7 @@ pub fn devtools_url(debug_port: u16, target: &CdpTarget) -> anyhow::Result<Strin
         .as_deref()
         .map(str::trim)
         .filter(|url| !url.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("Selected Codex DevTools target has no websocket URL"))?;
+        .ok_or_else(|| anyhow::anyhow!("Selected Codex DevTools target has no inspector URL"))?;
     Ok(normalize_devtools_frontend_url(debug_port, frontend_url))
 }
 
@@ -459,6 +459,28 @@ mod tests {
         assert_eq!(
             devtools_url(9229, &target).expect("devtools url"),
             "http://127.0.0.1:9229/devtools/inspector.html?ws=localhost:9229/devtools/page/target-1"
+        );
+    }
+
+    #[test]
+    fn devtools_url_reports_missing_inspector_endpoint() {
+        let target = CdpTarget {
+            id: "target-1".to_string(),
+            target_type: "page".to_string(),
+            title: Some("Codex".to_string()),
+            url: Some("https://codex.test".to_string()),
+            devtools_frontend_url: None,
+            web_socket_debugger_url: None,
+        };
+
+        let error = devtools_url(9229, &target).expect_err("missing inspector");
+        assert!(
+            error.to_string().contains("inspector URL"),
+            "error should name the inspector URL, got {error}"
+        );
+        assert!(
+            !error.to_string().contains("websocket URL"),
+            "error should not blame a missing websocket when falling back to inspector URL"
         );
     }
 
