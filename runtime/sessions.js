@@ -1,8 +1,7 @@
 // Session context menu, actions, project forks, and toast UI
   function enabledSessionActions() {
-    const order = ["autoRename", "export", "fork"];
+    const order = ["export", "fork"];
     return order.filter((action) => {
-      if (action === "autoRename") return featureSettings.autoRenameMenuEnabled;
       if (action === "export") return featureSettings.markdownExportEnabled;
       if (action === "fork") return featureSettings.sessionMoveEnabled;
       return false;
@@ -564,7 +563,6 @@
 
   function sessionActionMenuLabels() {
     return {
-      autoRename: "Regenerate chat title",
       export: "Export Markdown",
       forkRemoteProject: "Fork into remote project...",
       forkLocalProject: "Fork into local project...",
@@ -576,8 +574,6 @@
     const svgs = {
       export:
         '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path fill="black" d="M8 2.25v6.5M5.1 6.35 8 9.25l2.9-2.9"/><path fill="black" d="M3.25 12.75h9.5v1H3.25z"/></svg>',
-      autoRename:
-        '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path fill="black" d="M8 1.5 9.15 5l3.35 1.15-3.35 1.2L8 10.5 6.85 7.35 3.5 6.15 6.85 5z"/><path fill="black" d="M3.75 10.25h8.5v1.25h-8.5zm0 2.5h6v1.25h-6z"/></svg>',
       forkRemoteProject:
         '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path fill="black" d="M3 4.5h10v1.25H3zm1.25 2.5h7.5v1.25H4.25zm1.25 2.5h5v1.25H5.5zm1.25 2.5h2.5v1.25H6.75z"/><path fill="black" d="M11.5 3.25 14.25 6l-2.75 2.75V6.5H9.25V5.5h3.75z"/></svg>',
       forkLocalProject:
@@ -837,119 +833,6 @@
     return result.ok;
   }
 
-  function sidebarThreadRowsBySessionId(row, sessionId) {
-    const threadId = codexThreadId(sessionId);
-    if (!threadId) return [];
-    const rows = [];
-    const seen = new Set();
-    const addRow = (candidate) => {
-      if (!(candidate instanceof HTMLElement) || seen.has(candidate)) return;
-      const candidateId = codexThreadId(
-        candidate.getAttribute("data-app-action-sidebar-thread-id") ||
-          candidate.getAttribute("data-session-id") ||
-          "",
-      );
-      if (candidateId !== threadId) return;
-      seen.add(candidate);
-      rows.push(candidate);
-    };
-    if (typeof document?.querySelectorAll === "function") {
-      for (const candidate of document.querySelectorAll(
-        "[data-app-action-sidebar-thread-id], [data-session-id]",
-      )) {
-        addRow(candidate);
-      }
-    }
-    addRow(row);
-    return rows;
-  }
-
-  function setSidebarConversationTitleInDom(row, sessionId, title) {
-    const threadId = codexThreadId(sessionId);
-    const name = String(title || "").trim();
-    if (!threadId || !name) return false;
-    let updatedCount = 0;
-    for (const candidate of sidebarThreadRowsBySessionId(row, threadId)) {
-      const titleNode = candidate.querySelector(
-        "[data-thread-title], .truncate.select-none, .truncate.text-base",
-      );
-      if (!(titleNode instanceof HTMLElement)) continue;
-      titleNode.textContent = name;
-      if (typeof titleNode.setAttribute === "function") {
-        titleNode.setAttribute("title", name);
-      }
-      updatedCount += 1;
-    }
-    logDiagnostic(
-      updatedCount > 0
-        ? "sidebar_title_dom_updated"
-        : "sidebar_title_dom_missing",
-      {
-        session_id: threadId,
-        title: name,
-        updated_count: updatedCount,
-      },
-    );
-    return updatedCount > 0;
-  }
-
-  async function setSidebarConversationTitleForHost(hostId, sessionId, title) {
-    const normalizedHostId = codexAppServerHostId(hostId);
-    const threadId = codexThreadId(sessionId);
-    const name = String(title || "").trim();
-    if (!threadId || !name) return false;
-    const manager = findSidebarConversationManager(normalizedHostId);
-    if (!manager) {
-      logDiagnostic("sidebar_title_manager_missing", {
-        host_id: normalizedHostId,
-        session_id: threadId,
-      });
-      return false;
-    }
-    try {
-      const conversation =
-        typeof manager.getConversation === "function"
-          ? manager.getConversation(threadId)
-          : null;
-      const recentConversation =
-        conversation || sidebarRecentConversationById(manager, threadId);
-      if (!recentConversation) {
-        logDiagnostic("sidebar_title_conversation_missing", {
-          host_id: normalizedHostId,
-          session_id: threadId,
-        });
-        return false;
-      }
-      if (
-        typeof manager.applyThreadTitleUpdateAndNotify === "function"
-      ) {
-        manager.applyThreadTitleUpdateAndNotify({
-          ...recentConversation,
-          title: name,
-        });
-        logDiagnostic("sidebar_title_update_applied", {
-          host_id: normalizedHostId,
-          session_id: threadId,
-          source: conversation ? "conversation" : "recent",
-          title: name,
-        });
-        return true;
-      }
-      logDiagnostic("sidebar_title_update_unavailable", {
-        host_id: normalizedHostId,
-        session_id: threadId,
-      });
-      return false;
-    } catch (error) {
-      logDiagnostic("sidebar_title_update_failed", {
-        host_id: normalizedHostId,
-        session_id: threadId,
-        message: error?.message || String(error),
-      });
-      return false;
-    }
-  }
-
   async function refreshSidebarAfterFork(target, result) {
     const sessionId = String(result?.new_session_id || result?.newSessionId || "");
     return await refreshSidebarStateForHost(target?.hostId || "", {
@@ -965,39 +848,6 @@
   }
 
   async function handleSessionAction(action, row, ref) {
-    if (action === "autoRename") {
-      const context = sessionProjectContext(row);
-      const payload = {
-        ...ref,
-        host_id: context.hostId,
-        ...autoNamingRangePayload(),
-      };
-      const finishTaskToast = showHelperTaskToast("Regenerating chat title...");
-      const result = await bridge("/auto-rename-chat", payload);
-      if (result?.status !== "renamed") {
-        logDiagnostic("auto_rename_chat_failed", {
-          session_id: ref.session_id,
-          message: result?.message || "Auto rename failed",
-        });
-        throw new Error(result?.message || "Auto rename failed");
-      }
-      logDiagnostic("auto_rename_chat_succeeded", {
-        session_id: ref.session_id,
-        name: result.name || "",
-        source: result.source || "",
-      });
-      finishTaskToast(result.message || "Regenerated chat title");
-      await refreshSidebarStateForHost(context.hostId, {
-        conversationId: ref.session_id,
-      });
-      await setSidebarConversationTitleForHost(
-        context.hostId,
-        ref.session_id,
-        result.name || "",
-      );
-      setSidebarConversationTitleInDom(row, ref.session_id, result.name || "");
-      return;
-    }
     if (action === "export") {
       const context = sessionProjectContext(row);
       const finishTaskToast = showHelperTaskToast("Exporting Markdown...");

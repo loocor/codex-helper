@@ -56,36 +56,6 @@ pub fn export_markdown_response(payload: &Value) -> Value {
     }
 }
 
-pub fn auto_rename_chat_response(payload: &Value) -> Value {
-    let result = (|| -> anyhow::Result<Value> {
-        let session = session_from_payload(payload)?;
-        let options = auto_naming_options_from_payload(payload)?;
-        let host_id = string_payload(payload, "host_id")
-            .or_else_nonempty(|| string_payload(payload, "hostId"));
-        let client = app_server_client_for_host(&host_id)?;
-        let name = client.generate_thread_name(
-            &session.session_id,
-            options.min_chars,
-            options.max_chars,
-        )?;
-        client.set_thread_name(&session.session_id, &name)?;
-        Ok(json!({
-            "status": "renamed",
-            "session_id": crate::codex_app_server::normalize_thread_id(&session.session_id),
-            "name": name,
-            "source": "generated",
-            "message": format!("Regenerated chat title: {name}"),
-        }))
-    })();
-    result.unwrap_or_else(|error| {
-        json!({
-            "status": "failed",
-            "session_id": payload.get("session_id").or_else(|| payload.get("sessionId")).and_then(Value::as_str).unwrap_or(""),
-            "message": error.to_string(),
-        })
-    })
-}
-
 pub fn fork_thread_project_response(payload: &Value) -> Value {
     let session = match session_from_payload(payload) {
         Ok(session) => session,

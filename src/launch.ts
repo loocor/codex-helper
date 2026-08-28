@@ -54,7 +54,7 @@ function parseArgs(args: string[]): LaunchOptions {
 
 function printHelp(): void {
 	console.log(
-		`Usage: bun src/launch.ts [--app-path /Applications/Codex.app] [--debug-port <port>]`,
+		`Usage: bun src/launch.ts [--app-path /Applications/ChatGPT.app] [--debug-port <port>]`,
 	);
 	console.log("");
 	console.log(

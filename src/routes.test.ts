@@ -179,7 +179,7 @@ test("dev bridge accepts settings with known removed keys", async () => {
 				portForwardingEnabled: false,
 				portAutoForwardWeb: true,
 				portSameLocalPort: true,
-				autoRenameMenuEnabled: true,
+				hideUsageLimitBannerEnabled: false,
 				markdownFriendlyFilenameEnabled: true,
 				autoNamingMinChars: 8,
 				autoNamingMaxChars: 12,
@@ -191,7 +191,29 @@ test("dev bridge accepts settings with known removed keys", async () => {
 	}
 });
 
-test("dev bridge creates default settings with chat title regeneration enabled", async () => {
+test("dev bridge accepts usage-limit overlay hide setting", async () => {
+	const previous = process.env.CODEX_HELPER_HOME;
+	const root = mkdtempSync(join(tmpdir(), "codex-helper-routes-"));
+	try {
+		process.env.CODEX_HELPER_HOME = root;
+
+		const result = await handleBridgeRequest("/settings/set", {
+			hideUsageLimitBannerEnabled: true,
+		});
+
+		expect(result).toMatchObject({
+			status: "ok",
+			settings: {
+				hideUsageLimitBannerEnabled: true,
+			},
+		});
+	} finally {
+		if (previous === undefined) delete process.env.CODEX_HELPER_HOME;
+		else process.env.CODEX_HELPER_HOME = previous;
+	}
+});
+
+test("dev bridge creates default settings without chat title regeneration", async () => {
 	const previous = process.env.CODEX_HELPER_HOME;
 	const root = mkdtempSync(join(tmpdir(), "codex-helper-routes-"));
 	try {
@@ -202,9 +224,11 @@ test("dev bridge creates default settings with chat title regeneration enabled",
 		expect(result).toMatchObject({
 			status: "ok",
 			settings: {
-				autoRenameMenuEnabled: true,
+				markdownFriendlyFilenameEnabled: true,
 			},
 		});
+		expect(result).not.toHaveProperty("settings.autoRenameMenuEnabled");
+		expect(JSON.stringify(result)).not.toContain("autoRenameMenuEnabled");
 	} finally {
 		if (previous === undefined) delete process.env.CODEX_HELPER_HOME;
 		else process.env.CODEX_HELPER_HOME = previous;
@@ -218,7 +242,6 @@ test("dev bridge accepts auto naming settings", async () => {
 		process.env.CODEX_HELPER_HOME = root;
 
 		const result = await handleBridgeRequest("/settings/set", {
-			autoRenameMenuEnabled: true,
 			markdownFriendlyFilenameEnabled: false,
 			autoNamingMinChars: 3,
 			autoNamingMaxChars: 7,
@@ -227,7 +250,6 @@ test("dev bridge accepts auto naming settings", async () => {
 		expect(result).toMatchObject({
 			status: "ok",
 			settings: {
-				autoRenameMenuEnabled: true,
 				markdownFriendlyFilenameEnabled: false,
 				autoNamingMinChars: 3,
 				autoNamingMaxChars: 7,
@@ -279,11 +301,7 @@ test("dev bridge prefers canonical auto naming settings over legacy keys", async
 
 test("dev bridge uses longer friendly timeouts for naming routes", () => {
 	expect(bridgeRequestTimeoutMs("/settings/get")).toBe(10000);
-	expect(bridgeRequestTimeoutMs("/auto-rename-chat")).toBe(120000);
 	expect(bridgeRequestTimeoutMs("/export-markdown")).toBe(120000);
-	expect(bridgeRequestTimeoutMessage("/auto-rename-chat")).toContain(
-		"Regenerate chat title is still running after 120s",
-	);
 	expect(bridgeRequestTimeoutMessage("/export-markdown")).toContain(
 		"Markdown export is still running after 120s",
 	);

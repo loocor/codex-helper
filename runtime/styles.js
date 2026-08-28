@@ -15,6 +15,9 @@ function installHelperStyles() {
         background: transparent !important;
         box-shadow: none !important;
       }
+      [${helperUsageHiddenAttribute}="true"] {
+        display: none !important;
+      }
       [${helperNativeSettingsContentHostAttribute}][data-codex-helper-active="true"] > :not([${helperNativeSettingsPageAttribute}]) {
         display: none !important;
       }
@@ -26,6 +29,7 @@ function installHelperStyles() {
         flex-direction: column;
         gap: 2px;
         margin-top: 18px;
+        padding-bottom: 10px;
       }
       [${helperNativeSettingsGroupAttribute}] .codex-helper-native-settings-group-label {
         padding: 4px 10px;
@@ -49,9 +53,11 @@ function installHelperStyles() {
         min-height: 0;
       }
       [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-page-inner {
-        max-width: 42rem;
+        max-width: 48rem;
+        width: 100%;
         margin: 0 auto;
         min-height: 100%;
+        min-width: calc(320px * var(--codex-window-zoom, 1));
       }
       [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-page-inner {
         height: 100%;
@@ -59,6 +65,7 @@ function installHelperStyles() {
       }
       [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-page-content {
         padding-top: var(--padding-panel, 20px);
+        gap: 2.5rem;
       }
       [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-page-content {
         flex: 1 1 auto;
@@ -68,7 +75,23 @@ function installHelperStyles() {
         line-height: 1.45;
       }
       [${helperNativeSettingsPageAttribute}] .codex-helper-panel {
-        background-color: var(--color-background-panel, var(--color-token-bg-fog));
+        background-color: var(--color-background-panel, var(--color-background-primary-soft-alpha));
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-panel > :not(:last-child) {
+        position: relative;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-panel > :not(:last-child)::after {
+        content: "";
+        pointer-events: none;
+        position: absolute;
+        inset-inline: 1rem;
+        bottom: 0;
+        height: 0.5px;
+        background: var(--color-border, var(--border, color-mix(in srgb, currentColor 10%, transparent)));
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-settings-row {
+        padding-inline-start: 1rem;
+        padding-inline-end: 1rem;
       }
       [${helperNativeSettingsPageAttribute}] .codex-helper-action {
         border-color: transparent;
@@ -78,6 +101,8 @@ function installHelperStyles() {
       }
       [${helperNativeSettingsPageAttribute}] .codex-helper-switch {
         position: relative;
+        cursor: pointer;
+        margin-inline-end: 0;
       }
       [${helperNativeSettingsPageAttribute}] .codex-helper-switch input {
         position: absolute;
@@ -86,23 +111,46 @@ function installHelperStyles() {
         opacity: 0;
         pointer-events: none;
       }
-      [${helperNativeSettingsPageAttribute}] .codex-helper-switch input:focus-visible + span {
+      [${helperNativeSettingsPageAttribute}] .codex-helper-switch-track {
+        box-sizing: border-box;
+        display: inline-flex;
+        width: 32px;
+        height: 20px;
+        padding: 2px;
+        align-items: center;
+        border-radius: 999px;
+        background-color: color-mix(in srgb, currentColor 10%, transparent);
+        transition: background-color 200ms ease-out;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-switch-thumb {
+        box-sizing: border-box;
+        width: 16px;
+        height: 16px;
+        border: 0;
+        border-radius: 999px;
+        background-color: #fff;
+        box-shadow: 0 0 0 0.5px rgb(0 0 0 / 8%), 0 1px 1px rgb(0 0 0 / 12%);
+        transform: translateX(0);
+        transition: transform 200ms ease-out;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-switch input:focus-visible + .codex-helper-switch-track {
         outline: 2px solid var(--color-token-focus-border, rgb(48, 145, 255));
         outline-offset: 2px;
       }
-      [${helperNativeSettingsPageAttribute}] .codex-helper-switch input:checked + span {
-        background-color: var(--color-token-charts-blue, rgb(48, 145, 255));
+      [${helperNativeSettingsPageAttribute}] .codex-helper-switch input:checked + .codex-helper-switch-track {
+        background-color: var(--color-chart-blue, rgb(48, 145, 255));
       }
-      [${helperNativeSettingsPageAttribute}] .codex-helper-switch input:checked + span > span {
-        transform: translateX(14px);
+      [${helperNativeSettingsPageAttribute}] .codex-helper-switch input:checked + .codex-helper-switch-track > .codex-helper-switch-thumb {
+        transform: translateX(12px);
       }
       [${helperNativeSettingsPageAttribute}] .codex-helper-number-input {
         width: 64px;
-        border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
-        border-radius: 6px;
+        height: 1.875rem;
+        border: 1px solid var(--color-border, color-mix(in srgb, currentColor 16%, transparent));
+        border-radius: 8px;
         background: transparent;
         color: inherit;
-        padding: 3px 6px;
+        padding: 0 8px;
         font: inherit;
         font-size: 13px;
       }

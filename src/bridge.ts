@@ -113,7 +113,6 @@ async function withBridgeRequestTimeout<T>(
 
 export function bridgeRequestTimeoutMs(path: string): number {
 	switch (path) {
-		case "/auto-rename-chat":
 		case "/export-markdown":
 			return LONG_BRIDGE_REQUEST_TIMEOUT_MS;
 		default:
@@ -127,8 +126,6 @@ export function bridgeRequestTimeoutMessage(
 ): string {
 	const seconds = Math.round(timeoutMs / 1000);
 	switch (path) {
-		case "/auto-rename-chat":
-			return `Regenerate chat title is still running after ${seconds}s. The chat may be large, the model request may be slow, or the remote host may be unreachable. Please retry when the connection is stable.`;
 		case "/export-markdown":
 			return `Markdown export is still running after ${seconds}s. The chat may be large, the model request may be slow, or the remote host may be unreachable. Please retry when the connection is stable.`;
 		default:

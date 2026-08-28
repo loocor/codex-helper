@@ -3,12 +3,62 @@ use std::fs;
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
     assert_app_icon();
     prepare_tray_icon();
     generate_runtime_modules();
+    emit_helper_build_date();
     tauri_build::build();
+}
+
+fn emit_helper_build_date() {
+    println!("cargo:rerun-if-env-changed=CODEX_HELPER_BUILD_DATE");
+    let date = match env::var("CODEX_HELPER_BUILD_DATE") {
+        Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
+        _ => utc_en_us_date(),
+    };
+    println!("cargo:rustc-env=CODEX_HELPER_BUILD_DATE={date}");
+}
+
+fn utc_en_us_date() -> String {
+    const MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let unix_days = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before Unix epoch")
+        .as_secs()
+        / 86_400;
+    let (year, month, day) = unix_days_to_ymd(unix_days);
+    format!("{} {}, {}", MONTHS[(month - 1) as usize], day, year)
+}
+
+/// Civil date from days since Unix epoch, using Howard Hinnant's algorithm.
+fn unix_days_to_ymd(unix_days: u64) -> (i32, u32, u32) {
+    let z = unix_days as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    (year as i32, month as u32, day as u32)
 }
 
 fn runtime_src_dir(manifest_dir: &Path) -> PathBuf {

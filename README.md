@@ -13,6 +13,7 @@ It focuses on a small set of local and remote workflow gaps while keeping the Co
 - **Zed for remote projects**: open remote Codex project contexts in Zed through a native-feeling menu action.
 - **Remote port forwarding**: detect and forward web ports from Codex SSH sessions so remote dev servers can be opened locally.
 - **Native-feeling settings**: configure Helper features inside Codex Settings with a UI that fits the surrounding application.
+- **Usage-limit overlay hide**: optionally hide the *You're out of Codex and Work usage* card. This is visual only and does not reset or bypass account limits.
 
 ## Characteristics
 
@@ -44,7 +45,7 @@ env RUSTC_WRAPPER= cargo test --manifest-path src-tauri/Cargo.toml
 bun run build:app
 ```
 
-The Tauri backend currently targets macOS `/Applications/Codex.app` by default.
+The Tauri backend currently targets macOS `/Applications/ChatGPT.app` by default.
 
 `Bun` is used for development scripts in this repository. A built `CodexHelper.app` runs as a Rust/Tauri application and does not require Bun at runtime; injected scripts execute inside the Codex renderer.
 

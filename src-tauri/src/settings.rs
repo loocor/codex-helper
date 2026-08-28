@@ -10,13 +10,13 @@ use serde_json::Value;
 pub struct HelperSettings {
     pub markdown_export_enabled: bool,
     pub session_move_enabled: bool,
-    pub auto_rename_menu_enabled: bool,
     pub markdown_friendly_filename_enabled: bool,
     pub auto_naming_min_chars: u8,
     pub auto_naming_max_chars: u8,
     pub port_forwarding_enabled: bool,
     pub port_auto_forward_web: bool,
     pub port_same_local_port: bool,
+    pub hide_usage_limit_banner_enabled: bool,
 }
 
 impl Default for HelperSettings {
@@ -24,18 +24,18 @@ impl Default for HelperSettings {
         Self {
             markdown_export_enabled: false,
             session_move_enabled: false,
-            auto_rename_menu_enabled: true,
             markdown_friendly_filename_enabled: true,
             auto_naming_min_chars: 4,
             auto_naming_max_chars: 10,
             port_forwarding_enabled: false,
             port_auto_forward_web: true,
             port_same_local_port: true,
+            hide_usage_limit_banner_enabled: false,
         }
     }
 }
 
-const LEGACY_SETTINGS_KEYS: &[&str] = &["sessionDeleteEnabled"];
+const LEGACY_SETTINGS_KEYS: &[&str] = &["sessionDeleteEnabled", "autoRenameMenuEnabled"];
 
 pub fn ensure_settings_file(path: &Path) -> anyhow::Result<HelperSettings> {
     if path.exists() {
@@ -98,7 +98,6 @@ fn apply_setting_value(
     match key {
         "markdownExportEnabled" => settings.markdown_export_enabled = bool_setting(key, value)?,
         "sessionMoveEnabled" => settings.session_move_enabled = bool_setting(key, value)?,
-        "autoRenameMenuEnabled" => settings.auto_rename_menu_enabled = bool_setting(key, value)?,
         "markdownFriendlyFilenameEnabled" => {
             settings.markdown_friendly_filename_enabled = bool_setting(key, value)?
         }
@@ -110,6 +109,9 @@ fn apply_setting_value(
         "portForwardingEnabled" => settings.port_forwarding_enabled = bool_setting(key, value)?,
         "portAutoForwardWeb" => settings.port_auto_forward_web = bool_setting(key, value)?,
         "portSameLocalPort" => settings.port_same_local_port = bool_setting(key, value)?,
+        "hideUsageLimitBannerEnabled" => {
+            settings.hide_usage_limit_banner_enabled = bool_setting(key, value)?
+        }
         _ => return Ok(false),
     }
     Ok(true)
@@ -175,7 +177,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_settings_enable_chat_title_regeneration() {
+    fn default_settings_keep_friendly_markdown_filenames() {
         let settings = HelperSettings::default();
 
         assert!(!settings.markdown_export_enabled);
@@ -183,7 +185,7 @@ mod tests {
         assert!(!settings.port_forwarding_enabled);
         assert!(settings.port_auto_forward_web);
         assert!(settings.port_same_local_port);
-        assert!(settings.auto_rename_menu_enabled);
+        assert!(!settings.hide_usage_limit_banner_enabled);
         assert!(settings.markdown_friendly_filename_enabled);
         assert_eq!(settings.auto_naming_min_chars, 4);
         assert_eq!(settings.auto_naming_max_chars, 10);
@@ -234,7 +236,6 @@ mod tests {
 
         assert!(settings.markdown_export_enabled);
         assert!(!settings.session_move_enabled);
-        assert!(settings.auto_rename_menu_enabled);
         assert!(settings.markdown_friendly_filename_enabled);
         assert_eq!(settings.auto_naming_min_chars, 8);
         assert_eq!(settings.auto_naming_max_chars, 12);
@@ -297,7 +298,6 @@ mod tests {
                 "portForwardingEnabled": true,
                 "portAutoForwardWeb": false,
                 "portSameLocalPort": true,
-                "autoRenameMenuEnabled": true,
                 "markdownFriendlyFilenameEnabled": false,
                 "autoNamingMinChars": 3,
                 "autoNamingMaxChars": 7,
@@ -311,10 +311,29 @@ mod tests {
         assert!(settings.port_forwarding_enabled);
         assert!(!settings.port_auto_forward_web);
         assert!(settings.port_same_local_port);
-        assert!(settings.auto_rename_menu_enabled);
+        assert!(!settings.hide_usage_limit_banner_enabled);
         assert!(!settings.markdown_friendly_filename_enabled);
         assert_eq!(settings.auto_naming_min_chars, 3);
         assert_eq!(settings.auto_naming_max_chars, 7);
+        assert_eq!(settings, persisted);
+    }
+
+    #[test]
+    fn update_settings_enables_usage_limit_banner_hide() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("config.json");
+        ensure_settings_file(&path).expect("initial settings");
+
+        let settings = update_settings(
+            &path,
+            &serde_json::json!({
+                "hideUsageLimitBannerEnabled": true
+            }),
+        )
+        .expect("updated settings");
+        let persisted = read_settings(&path).expect("persisted settings");
+
+        assert!(settings.hide_usage_limit_banner_enabled);
         assert_eq!(settings, persisted);
     }
 

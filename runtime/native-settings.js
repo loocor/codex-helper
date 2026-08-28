@@ -349,14 +349,14 @@ function nativeSettingsPageHeader(pageId) {
     return nativeSettingsAboutHeader();
   }
   return `
-    <div class="flex h-toolbar items-center justify-between gap-2 px-0 py-0">
-      <div class="flex min-w-0 flex-1 flex-col gap-1">
-        <div class="heading-base text-token-text-primary">${nativeSettingsPageTitle(pageId)}</div>
+    <header class="flex flex-col gap-4 px-0">
+      <div class="flex min-w-0 flex-1 flex-col gap-1.5">
+        <h1 class="heading-lg font-normal min-w-0 break-words text-default">${nativeSettingsPageTitle(pageId)}</h1>
         ${nativeSettingsPageDescription(pageId)
-          ? `<div class="codex-helper-native-settings-page-description text-token-text-secondary text-sm">${nativeSettingsPageDescription(pageId)}</div>`
+          ? `<div class="codex-helper-native-settings-page-description text-base text-secondary">${nativeSettingsPageDescription(pageId)}</div>`
           : ""}
       </div>
-    </div>
+    </header>
   `;
 }
 
@@ -374,9 +374,9 @@ function renderNativeHelperSettingsPage(host, pageId) {
   page.setAttribute(helperNativeSettingsPageAttribute, pageId);
   page.className = "codex-helper-native-settings-page";
   page.innerHTML = `
-    <div class="codex-helper-native-settings-page-inner flex w-full flex-col">
+    <div class="codex-helper-native-settings-page-inner mx-auto flex w-full max-w-3xl flex-col">
       ${nativeSettingsPageHeader(pageId)}
-      <div class="codex-helper-native-settings-page-content flex flex-col gap-4">
+      <div class="codex-helper-native-settings-page-content flex flex-col gap-10">
         ${nativeSettingsPageContent(pageId)}
       </div>
     </div>
@@ -393,11 +393,11 @@ function nativeSettingsPanel(rows, extraClass = "") {
   const classes = extraClass
     ? `${helperPanelClass} ${extraClass}`
     : helperPanelClass;
-  return `<div class="${classes}" style="background-color: var(--color-background-panel, var(--color-token-bg-fog));">${rows}</div>`;
+  return `<div class="${classes}">${rows}</div>`;
 }
 
 function nativeSettingsGroupTitle(title) {
-  return `<div class="codex-helper-settings-section-title text-sm font-medium text-token-text-primary">${title}</div>`;
+  return `<div class="codex-helper-settings-section-title text-sm font-medium text-default">${title}</div>`;
 }
 
 function nativeSettingsGroupSection(title, rows, sectionId = "") {
@@ -450,24 +450,24 @@ function nativeSettingsListSection(header, panel, extraClass = "") {
 
 function nativeSettingsSwitchRow(title, description, descKey, toggleKey, ariaLabel) {
   return `
-    <div class="flex items-center justify-between gap-4 p-3">
-      <div class="flex min-w-0 flex-col gap-1">
-        <div class="min-w-0 text-sm text-token-text-primary">${title}</div>
-        <div class="text-token-text-secondary min-w-0 text-sm" data-codex-helper-setting-desc="${descKey}">${description}</div>
+    <div class="codex-helper-settings-row flex w-full items-center justify-between gap-6 py-3 ps-4 pe-4">
+      <div class="flex min-w-0 flex-1 flex-col gap-0.5">
+        <div class="min-w-0 text-sm font-medium text-default">${title}</div>
+        <div class="min-w-0 text-xs leading-4 text-balance text-secondary" data-codex-helper-setting-desc="${descKey}">${description}</div>
       </div>
-      <label class="codex-helper-switch inline-flex shrink-0 items-center" aria-label="${ariaLabel}">
+      <label class="codex-helper-switch inline-flex shrink-0 cursor-interaction items-center" aria-label="${ariaLabel}">
         <input type="checkbox" ${helperToggleAttribute}="${toggleKey}">
-        <span class="relative inline-flex h-5 w-8 shrink-0 items-center rounded-full bg-token-foreground/20 transition-colors duration-200 ease-out"><span class="h-4 w-4 translate-x-[2px] rounded-full border border-[color:var(--gray-0)] bg-[color:var(--gray-0)] shadow-sm transition-transform duration-200 ease-out"></span></span>
+        <span class="codex-helper-switch-track" aria-hidden="true"><span class="codex-helper-switch-thumb"></span></span>
       </label>
     </div>`;
 }
 
 function nativeSettingsNumberRow(title, description, numberKey, ariaLabel) {
   return `
-    <div class="flex items-center justify-between gap-4 p-3">
-      <div class="flex min-w-0 flex-col gap-1">
-        <div class="min-w-0 text-sm text-token-text-primary">${title}</div>
-        <div class="text-token-text-secondary min-w-0 text-sm" data-codex-helper-setting-desc="${numberKey}">${description}</div>
+    <div class="codex-helper-settings-row flex w-full items-center justify-between gap-6 py-3 ps-4 pe-4">
+      <div class="flex min-w-0 flex-1 flex-col gap-0.5">
+        <div class="min-w-0 text-sm font-medium text-default">${title}</div>
+        <div class="min-w-0 text-xs leading-4 text-balance text-secondary" data-codex-helper-setting-desc="${numberKey}">${description}</div>
       </div>
       <input type="number" min="1" max="20" step="1" class="codex-helper-number-input" ${helperNumberAttribute}="${numberKey}" aria-label="${ariaLabel}">
     </div>`;
@@ -475,10 +475,10 @@ function nativeSettingsNumberRow(title, description, numberKey, ariaLabel) {
 
 function nativeSettingsActionRow(title, detail, command, buttonLabel, detailAttr = "") {
   return `
-    <div class="flex items-center justify-between gap-4 p-3">
-      <div class="flex min-w-0 flex-col gap-1">
-        <div class="min-w-0 text-sm text-token-text-primary">${title}</div>
-        <div class="text-token-text-secondary min-w-0 text-sm"${detailAttr ? ` ${detailAttr}` : ""}>${detail}</div>
+    <div class="codex-helper-settings-row flex w-full items-center justify-between gap-6 py-3 ps-4 pe-4">
+      <div class="flex min-w-0 flex-1 flex-col gap-0.5">
+        <div class="min-w-0 text-sm font-medium text-default">${title}</div>
+        <div class="min-w-0 text-xs leading-4 text-balance text-secondary"${detailAttr ? ` ${detailAttr}` : ""}>${detail}</div>
       </div>
       <button type="button" class="${helperActionClass}" ${helperCommandAttribute}="${command}">${buttonLabel}</button>
     </div>`;
@@ -553,13 +553,13 @@ function nativeSettingsPageContent(pageId) {
     `)}
     ${nativeSettingsGroupSection("Session actions", `
       ${nativeSettingsSwitchRow("Markdown export", "Export conversations as Markdown from the session menu.", "markdownExportEnabled", "markdownExportEnabled", "Markdown export")}
-      ${nativeSettingsSwitchRow("Fork sessions", "Fork sessions into local, remote, or another project from the sidebar context menu.", "sessionMoveEnabled", "sessionMoveEnabled", "Fork sessions")}
-    `)}
-    ${nativeSettingsGroupSection("Chat titles", `
-      ${nativeSettingsSwitchRow("Regenerate chat title", "Show Regenerate chat title in the session context menu.", "autoRenameMenuEnabled", "autoRenameMenuEnabled", "Regenerate chat title")}
       ${nativeSettingsSwitchRow("Friendly Markdown filenames", "Use Codex auto naming for exported Markdown filenames.", "markdownFriendlyFilenameEnabled", "markdownFriendlyFilenameEnabled", "Friendly Markdown filenames")}
       ${nativeSettingsNumberRow("Minimum characters", "Smallest expected auto name length.", "autoNamingMinChars", "Minimum auto naming characters")}
       ${nativeSettingsNumberRow("Maximum characters", "Largest expected auto name length; 10 works well for Chinese names.", "autoNamingMaxChars", "Maximum auto naming characters")}
+      ${nativeSettingsSwitchRow("Fork sessions", "Fork sessions into local, remote, or another project from the sidebar context menu.", "sessionMoveEnabled", "sessionMoveEnabled", "Fork sessions")}
+    `)}
+    ${nativeSettingsGroupSection("Interface", `
+      ${nativeSettingsSwitchRow("Hide usage-limit overlay", "Hide the You're out of Codex and Work usage card above the composer. This does not reset or bypass account limits.", "hideUsageLimitBannerEnabled", "hideUsageLimitBannerEnabled", "Hide usage-limit overlay")}
     `)}
     ${nativeSettingsGroupSection("Port forwarding", `
       ${nativeSettingsSwitchRow("Enable port forwarding", "Detect and forward ports from agent sessions.", "portForwardingEnabled", "portForwardingEnabled", "Enable port forwarding")}

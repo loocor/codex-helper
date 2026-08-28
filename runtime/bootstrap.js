@@ -12,6 +12,7 @@ function installObserver() {
   observerInstalled = true;
   const observer = new MutationObserver(() => {
     maintainPortsPanel();
+    maintainUsageLimitBanner();
     installNativeHelperSettingsGroup();
     if (helperNativeSettingsRoot && !helperNativeSettingsRoot.isConnected) {
       clearNativeHelperSettingsPage();
@@ -257,6 +258,7 @@ function installHelperRuntimeEventListeners() {
 window.__codexHelperRuntimeCleanup = () => {
   if (pendingPortScan) clearTimeout(pendingPortScan);
   if (maintainPortsPanelTimer) clearTimeout(maintainPortsPanelTimer);
+  if (maintainUsageLimitBannerTimer) clearTimeout(maintainUsageLimitBannerTimer);
   if (refreshPortsPanelTimer) clearTimeout(refreshPortsPanelTimer);
   if (pinnedSummaryHideTimer) clearTimeout(pinnedSummaryHideTimer);
   stopPortScanLoop();
@@ -268,6 +270,7 @@ window.__codexHelperRuntimeCleanup = () => {
   removeHelperRuntimeEventListeners();
   pendingPortScan = 0;
   maintainPortsPanelTimer = 0;
+  maintainUsageLimitBannerTimer = 0;
   refreshPortsPanelTimer = 0;
   pinnedSummaryHideTimer = 0;
   lastRuntimeActivityKey = "";
@@ -284,6 +287,7 @@ installHelperRuntimeEventListeners();
 installHelperStyles();
 removeLegacyPortsBottomPanelUi();
 maintainPortsPanel();
+maintainUsageLimitBanner();
 installNativeHelperSettingsGroup();
 logDiagnostic("runtime.ready", helperRuntimeActivityDetail());
 reportHelperRuntimeActivity();

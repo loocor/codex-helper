@@ -204,6 +204,27 @@ test("dev bridge keeps platform open commands behind an adapter", () => {
 	);
 });
 
+
+test("devtools open requires Google Chrome on macOS", () => {
+	const routesSource = readFileSync(
+		join(import.meta.dir, "..", "src-tauri", "src", "routes.rs"),
+		"utf8",
+	);
+	const openSource = readFileSync(
+		join(import.meta.dir, "system-open.ts"),
+		"utf8",
+	);
+	expect(routesSource).toContain(
+		'Err("Google Chrome is required to open DevTools".to_string())',
+	);
+	expect(openSource).toContain(
+		'throw new Error("Google Chrome is required to open DevTools")',
+	);
+	expect(openSource).not.toContain(
+		"if (options.preferChrome && existsSync(GOOGLE_CHROME_APP))",
+	);
+});
+
 test("tauri routes use opener APIs instead of spawning macOS open", () => {
 	const source = readFileSync(
 		join(import.meta.dir, "..", "src-tauri", "src", "routes.rs"),

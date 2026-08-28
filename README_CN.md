@@ -13,6 +13,7 @@ Codex Helper 是一个面向 Codex desktop 的轻量本地增强启动器。
 - **远端项目 Zed 打开**：通过接近原生的菜单动作，在 Zed 中打开远端 Codex 项目上下文。
 - **远程端口转发**：检测并转发 Codex SSH 会话中的 web 端口，让远端 dev server 可以在本地打开。
 - **近乎原生的设置界面**：在 Codex Settings 中配置 Helper 功能，界面和交互尽量贴合 Codex 原应用。
+- **用量限制浮层隐藏**：可选隐藏 *You're out of Codex and Work usage* 卡片。这只影响界面显示，不会重置或绕过账号额度。
 
 ## 特点
 
@@ -44,7 +45,7 @@ env RUSTC_WRAPPER= cargo test --manifest-path src-tauri/Cargo.toml
 bun run build:app
 ```
 
-Tauri 后端当前默认目标是 macOS 的 `/Applications/Codex.app`。
+Tauri 后端当前默认目标是 macOS 的 `/Applications/ChatGPT.app`。
 
 本仓库使用 `Bun` 运行开发脚本。构建后的 `CodexHelper.app` 是 Rust/Tauri 应用，运行时不需要 Bun；注入脚本会在 Codex renderer 中执行。
 
