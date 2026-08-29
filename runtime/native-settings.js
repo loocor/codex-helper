@@ -35,7 +35,7 @@ function nativeHelperSettingsPageDefinitions() {
       label: "Logs",
       standardIconName: "scroll-text",
       description:
-        "Inspect recent Helper runtime and bridge diagnostics.",
+        "Browse Helper diagnostics by date, search log contents, and open a record to inspect its stored detail.",
     },
     { id: "about", label: "About", standardIconName: "info" },
   ];
@@ -329,14 +329,41 @@ function nativeSettingsPageContent(pageId) {
   }
   if (pageId === "logs") {
     return nativeSettingsListSection(
-      nativeSettingsPathHeader(
-        "data-codex-helper-log-path",
-        "open-log-file",
-        "refresh",
-      ),
+      `
+      <div class="codex-helper-native-settings-log-toolbar">
+        <select class="codex-helper-text-input" data-codex-helper-log-date aria-label="Log date">
+          <option value="">All dates</option>
+        </select>
+        <select class="codex-helper-text-input" data-codex-helper-log-event-filter aria-label="Log event">
+          <option value="">All events</option>
+        </select>
+        <input type="search" class="codex-helper-text-input" data-codex-helper-log-search placeholder="Search logs" aria-label="Search logs">
+        <label class="codex-helper-native-settings-log-regex">
+          <input type="checkbox" data-codex-helper-log-regex>
+          <span>Regex</span>
+        </label>
+        ${nativeSettingsIconButton("refresh", "Refresh", "refresh")}
+      </div>
+      `,
       nativeSettingsPanel(`
         <div class="codex-helper-settings-scroll" data-codex-helper-log-list></div>
-        ${nativeSettingsListFooter("data-codex-helper-log-status")}
+        <div class="codex-helper-native-settings-log-detail" data-codex-helper-log-detail>
+          <div class="codex-helper-native-settings-log-detail-toolbar">
+            <button type="button" class="codex-helper-native-settings-log-back" ${helperCommandAttribute}="logs-back" aria-label="Back to logs">
+              ${nativeSettingsStandardIconSvg("chevron-left")}
+              <span>Logs</span>
+            </button>
+            <span class="codex-helper-native-settings-log-event" data-codex-helper-log-event></span>
+          </div>
+          <div class="codex-helper-settings-scroll" data-codex-helper-log-detail-body></div>
+        </div>
+        <div class="codex-helper-native-settings-list-footer codex-helper-native-settings-log-footer">
+          <span data-codex-helper-log-status>Loading</span>
+          <div class="codex-helper-native-settings-log-pager">
+            <button type="button" class="codex-helper-native-settings-icon-button" ${helperCommandAttribute}="logs-prev" data-codex-helper-log-prev aria-label="Newer logs" disabled>${nativeSettingsStandardIconSvg("chevron-left")}</button>
+            <button type="button" class="codex-helper-native-settings-icon-button" ${helperCommandAttribute}="logs-next" data-codex-helper-log-next aria-label="Older logs" disabled>${nativeSettingsStandardIconSvg("chevron-right")}</button>
+          </div>
+        </div>
       `, "codex-helper-native-settings-log-panel"),
       "codex-helper-native-settings-log-section",
     );
@@ -360,6 +387,9 @@ function nativeSettingsPageContent(pageId) {
     `)}
     ${nativeSettingsGroupSection("Interface", `
       ${nativeSettingsSwitchRow("Hide usage-limit overlay", "Hide the You're out of Codex and Work usage card above the composer. This does not reset or bypass account limits.", "hideUsageLimitBannerEnabled", "hideUsageLimitBannerEnabled", "Hide usage-limit overlay")}
+    `)}
+    ${nativeSettingsGroupSection("Diagnostics", `
+      ${nativeSettingsSwitchRow("Log API provider LLM traffic", "Record request metadata and a short user-message preview for API-provider calls that go through the local Helper proxy. Official ChatGPT login traffic is not visible. Request and response bodies are not stored.", "logLlmTrafficEnabled", "logLlmTrafficEnabled", "Log API provider LLM traffic")}
     `)}
     ${nativeSettingsGroupSection("Port forwarding", `
       ${nativeSettingsSwitchRow("Enable port forwarding", "Detect and forward ports from agent sessions.", "portForwardingEnabled", "portForwardingEnabled", "Enable port forwarding")}
