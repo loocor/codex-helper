@@ -15,9 +15,18 @@ function helperSettingsShellCss() {
       height: 100%;
     }
     .helper-settings-shell {
+      position: relative;
       display: flex;
       height: 100%;
       min-height: 0;
+    }
+    .helper-settings-titlebar {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 52px;
+      z-index: 2;
     }
     .helper-settings-nav {
       box-sizing: border-box;
@@ -89,7 +98,7 @@ function helperSettingsShellCss() {
     .helper-settings-page {
       box-sizing: border-box;
       min-height: 100%;
-      padding: 36px 32px 32px;
+      padding: 52px 32px 32px;
     }
     [data-codex-helper-provider-dialog] {
       padding: 0;
@@ -272,8 +281,9 @@ function helperSettingsNavButton(page) {
 function renderHelperSettingsShell(root) {
   root.innerHTML = `
     <div class="helper-settings-shell">
+      <div class="helper-settings-titlebar" data-tauri-drag-region></div>
       <nav class="helper-settings-nav" aria-label="Settings">
-        <div class="helper-settings-nav-drag" data-tauri-drag-region></div>
+        <div class="helper-settings-nav-drag"></div>
         <div class="helper-settings-nav-title">Settings</div>
         ${nativeHelperSettingsPages().map(helperSettingsNavButton).join("")}
       </nav>
