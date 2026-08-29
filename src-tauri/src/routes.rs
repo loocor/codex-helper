@@ -278,7 +278,9 @@ pub async fn handle_bridge_request(ctx: BridgeContext, request: BridgeRequest) -
             }
         }
         "/diagnostics/read-latest" => read_latest_log_response(&ctx.logger),
-        "/diagnostics/reveal-log" => reveal_path_response(ctx.logger.log_path()),
+        "/diagnostics/list" => list_logs_response(&ctx.logger, &payload),
+        "/diagnostics/search" => search_logs_response(&ctx.logger, &payload),
+        "/diagnostics/reveal-log" => reveal_path_response(&ctx.logger.log_path()),
         "/logs/reveal" => reveal_path_response(&ctx.state_dir.logs_dir),
         "/scripts/reveal" => reveal_path_response(&ctx.state_dir.scripts_dir),
         "/state/reveal" => reveal_path_response(&ctx.state_dir.root),
@@ -360,14 +362,22 @@ fn compact_diagnostic_detail(detail: Value) -> Value {
 }
 
 fn bridge_request_diagnostic(path: &str, caller: &BridgeCaller, response: &Value) -> Value {
-    json!({
-        "path": path,
-        "status": response
+    let mut diagnostic = serde_json::Map::new();
+    diagnostic.insert("path".to_string(), json!(path));
+    diagnostic.insert(
+        "status".to_string(),
+        json!(response
             .get("status")
             .and_then(Value::as_str)
-            .unwrap_or("unknown"),
-        "caller": caller,
-    })
+            .unwrap_or("unknown")),
+    );
+    diagnostic.insert("caller".to_string(), json!(caller));
+    if let Some(message) = response.get("message").and_then(Value::as_str) {
+        if !message.is_empty() {
+            diagnostic.insert("message".to_string(), json!(message));
+        }
+    }
+    Value::Object(diagnostic)
 }
 
 fn user_script_inventory(state_dir: &StateDir) -> anyhow::Result<Vec<String>> {
@@ -387,21 +397,133 @@ fn user_script_inventory(state_dir: &StateDir) -> anyhow::Result<Vec<String>> {
 
 fn read_latest_log_response(logger: &DiagnosticLogger) -> Value {
     match logger.read_latest() {
-        Ok(latest) => json!({
+        Ok(page) => log_page_response(page),
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
+}
+
+fn list_logs_response(logger: &DiagnosticLogger, payload: &Value) -> Value {
+    match log_page_args(payload).and_then(|(date, cursor, limit)| {
+        log_event_filter(payload).and_then(|event| {
+            logger.list_records(date.as_deref(), cursor.as_deref(), limit, event.as_deref())
+        })
+    }) {
+        Ok(page) => log_page_response(page),
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
+}
+
+fn search_logs_response(logger: &DiagnosticLogger, payload: &Value) -> Value {
+    let pattern = payload.get("pattern").and_then(Value::as_str).unwrap_or("");
+    let regex = payload
+        .get("regex")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    match log_page_args(payload).and_then(|(date, cursor, limit)| {
+        log_event_filter(payload).and_then(|event| {
+            logger.search_records(
+                pattern,
+                regex,
+                date.as_deref(),
+                cursor.as_deref(),
+                limit,
+                event.as_deref(),
+            )
+        })
+    }) {
+        Ok(page) => json!({
             "status": "ok",
-            "path": latest.path.to_string_lossy(),
-            "records": latest
-                .records
+            "path": page.path.to_string_lossy(),
+            "dates": page.dates,
+            "matches": page
+                .matches
                 .iter()
                 .map(|record| json!({
+                    "date": record.date,
+                    "path": record.path.to_string_lossy(),
                     "timestamp": record.timestamp,
                     "event": record.event,
                     "summary": record.summary,
+                    "preview": record.preview,
+                    "detail": record.detail,
                 }))
                 .collect::<Vec<_>>(),
+            "cursor": page.cursor,
+            "hasMore": page.has_more,
         }),
         Err(error) => json!({ "status": "failed", "message": error.to_string() }),
     }
+}
+
+fn log_event_filter(payload: &Value) -> anyhow::Result<Option<String>> {
+    let Some(value) = payload.get("event").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > 128 {
+        anyhow::bail!("Log event filter is too long");
+    }
+    if value.contains('\n') || value.contains('\r') {
+        anyhow::bail!("Log event filter is invalid");
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn log_page_args(payload: &Value) -> anyhow::Result<(Option<String>, Option<String>, usize)> {
+    let date = payload
+        .get("date")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let cursor = payload
+        .get("cursor")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let limit = match payload.get("limit") {
+        None => 50,
+        Some(Value::Number(value)) => {
+            let limit = value
+                .as_u64()
+                .ok_or_else(|| anyhow::anyhow!("Log page limit must be a number"))?
+                as usize;
+            if limit == 0 {
+                anyhow::bail!("Log page limit must be greater than 0");
+            }
+            if limit > 200 {
+                anyhow::bail!("Log page limit must be at most 200");
+            }
+            limit
+        }
+        Some(_) => anyhow::bail!("Log page limit must be a number"),
+    };
+    Ok((date, cursor, limit))
+}
+
+fn log_page_response(page: crate::logging::LogPage) -> Value {
+    json!({
+        "status": "ok",
+        "path": page.path.to_string_lossy(),
+        "date": page.date,
+        "dates": page.dates,
+        "records": page
+            .records
+            .iter()
+            .map(|record| json!({
+                "timestamp": record.timestamp,
+                "event": record.event,
+                "summary": record.summary,
+                "detail": record.detail,
+            }))
+            .collect::<Vec<_>>(),
+        "cursor": page.cursor,
+        "hasMore": page.has_more,
+    })
 }
 
 fn endpoint_get_response(state_root: &std::path::Path) -> Value {
@@ -1088,6 +1210,15 @@ mod tests {
         assert_eq!(diagnostic["caller"]["href"], "app://-/index.html");
         assert_eq!(diagnostic["caller"]["hasFocus"], true);
         assert_eq!(diagnostic["caller"]["visibilityState"], "visible");
+        assert!(diagnostic.get("message").is_none());
+
+        let failed = bridge_request_diagnostic(
+            "/providers/save",
+            &caller,
+            &json!({ "status": "failed", "message": "Provider base URL is required" }),
+        );
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["message"], "Provider base URL is required");
     }
 
     #[test]
