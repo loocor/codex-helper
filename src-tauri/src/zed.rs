@@ -2,18 +2,15 @@ use std::env;
 use std::fs;
 use std::net::Ipv6Addr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use tauri_plugin_opener::open_url;
 
 #[derive(Debug)]
 pub enum ZedRemoteError {
     Validation(&'static str),
     StateRead(std::io::Error),
     StateParse(serde_json::Error),
-    Launch(String),
 }
 
 impl std::fmt::Display for ZedRemoteError {
@@ -22,7 +19,6 @@ impl std::fmt::Display for ZedRemoteError {
             Self::Validation(message) => f.write_str(message),
             Self::StateRead(_) => f.write_str("Cannot read Codex remote connection state"),
             Self::StateParse(_) => f.write_str("Cannot parse Codex remote connection state"),
-            Self::Launch(message) => write!(f, "Failed to launch Zed: {message}"),
         }
     }
 }
@@ -32,7 +28,6 @@ impl std::error::Error for ZedRemoteError {
         match self {
             Self::StateRead(error) => Some(error),
             Self::StateParse(error) => Some(error),
-            Self::Launch(_) => None,
             Self::Validation(_) => None,
         }
     }
@@ -45,69 +40,10 @@ pub struct SshTarget {
     pub port: Option<u16>,
 }
 
-pub fn zed_remote_status() -> Value {
-    let app_path = find_zed_app_path();
-    let cli_path = find_zed_cli_path();
-    let platform_supported =
-        cfg!(target_os = "macos") || cfg!(target_os = "windows") || cfg!(target_os = "linux");
-    json!({
-        "status": if platform_supported { "ok" } else { "failed" },
-        "platformSupported": platform_supported,
-        "zedAppFound": app_path.is_some(),
-        "zedCliFound": !cli_path.is_empty(),
-        "zedAppPath": app_path.map(|path| path.to_string_lossy().into_owned()).unwrap_or_default(),
-        "zedCliPath": cli_path,
-    })
-}
-
-fn candidate_zed_app_paths() -> Vec<PathBuf> {
-    let mut paths = vec![
-        PathBuf::from("/Applications/Zed.app"),
-        PathBuf::from("/Applications/Zed Preview.app"),
-        PathBuf::from("/Applications/Zed Nightly.app"),
-    ];
-    if let Some(home) = home_dir() {
-        paths.push(home.join("Applications/Zed.app"));
-        paths.push(home.join("Applications/Zed Preview.app"));
-        paths.push(home.join("Applications/Zed Nightly.app"));
-    }
-    paths
-}
-
-fn find_zed_app_path() -> Option<PathBuf> {
-    candidate_zed_app_paths()
-        .into_iter()
-        .find(|path| path.exists())
-}
-
-fn find_zed_cli_path() -> String {
-    find_executable_on_path("zed")
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
 fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
         .map(PathBuf::from)
-}
-
-fn find_executable_on_path(name: &str) -> Option<PathBuf> {
-    let path_var = env::var_os("PATH")?;
-    for dir in env::split_paths(&path_var) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        #[cfg(windows)]
-        {
-            let candidate = dir.join(format!("{name}.exe"));
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
 }
 
 fn string_value(value: Option<&Value>) -> String {
@@ -244,80 +180,6 @@ pub fn target_from_payload(payload: &Value) -> Result<SshTarget, ZedRemoteError>
     Ok(SshTarget { user, host, port })
 }
 
-pub fn build_zed_remote_url(target: &SshTarget, path: &str) -> Result<String, ZedRemoteError> {
-    let host = validate_ssh_host(&target.host)?;
-    let port = target
-        .port
-        .map(|port| {
-            if port == 0 {
-                Err(ZedRemoteError::Validation("Invalid SSH port"))
-            } else {
-                Ok(port)
-            }
-        })
-        .transpose()?;
-    let user_prefix = if target.user.trim().is_empty() {
-        String::new()
-    } else {
-        format!("{}@", percent_encode_segment(target.user.trim()))
-    };
-    let port_suffix = port.map(|port| format!(":{port}")).unwrap_or_default();
-    let encoded_path = encode_remote_path(path)?;
-    Ok(format!(
-        "ssh://{user_prefix}{host}{port_suffix}{encoded_path}"
-    ))
-}
-
-fn encode_remote_path(path: &str) -> Result<String, ZedRemoteError> {
-    if path.is_empty() {
-        return Err(ZedRemoteError::Validation("Remote path is required"));
-    }
-    if !path.starts_with('/') {
-        return Err(ZedRemoteError::Validation("Remote path must be absolute"));
-    }
-    Ok(path
-        .split('/')
-        .map(percent_encode_segment)
-        .collect::<Vec<_>>()
-        .join("/"))
-}
-
-fn percent_encode_segment(segment: &str) -> String {
-    let mut encoded = String::new();
-    for byte in segment.as_bytes() {
-        let ch = *byte as char;
-        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '.' | '_' | '~') {
-            encoded.push(ch);
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    encoded
-}
-
-fn launch_zed_url(url: &str) -> Result<(), ZedRemoteError> {
-    let cli_path = find_zed_cli_path();
-    if !cli_path.is_empty() {
-        Command::new(cli_path)
-            .arg(url)
-            .spawn()
-            .map_err(|error| ZedRemoteError::Launch(error.to_string()))?;
-        return Ok(());
-    }
-    let app_path = find_zed_app_path();
-    if cfg!(target_os = "macos") {
-        if let Some(app_path) = app_path {
-            let app = app_path.to_string_lossy().into_owned();
-            open_url(url, Some(app.as_str()))
-                .map_err(|error| ZedRemoteError::Launch(error.to_string()))?;
-            return Ok(());
-        }
-    }
-    Err(ZedRemoteError::Validation(
-        "Zed is not installed or not available on PATH",
-    ))
-}
-
 pub fn codex_global_state_path() -> PathBuf {
     env::var_os("CODEX_HOME")
         .map(PathBuf::from)
@@ -439,7 +301,7 @@ pub fn fallback_open_request_from_global_state(state: &Value) -> Result<Value, Z
                 && remote_path.starts_with('/')
         })
         .ok_or(ZedRemoteError::Validation(
-            "Cannot determine remote workspace or file for Zed",
+            "Cannot determine remote workspace",
         ))?;
     let host_id =
         selected_host_id.or_else_nonempty(|| string_value(selected_project.get("hostId")));
@@ -480,43 +342,6 @@ pub fn resolve_ssh_target_response(payload: &Value) -> Value {
     }
 }
 
-pub fn remote_projects_response(_payload: &Value) -> Value {
-    let path = codex_global_state_path();
-    let result = fs::read_to_string(path)
-        .map_err(ZedRemoteError::StateRead)
-        .and_then(|data| serde_json::from_str::<Value>(&data).map_err(ZedRemoteError::StateParse))
-        .map(|state| {
-            ordered_remote_projects_from_global_state(&state)
-                .into_iter()
-                .map(|project| {
-                    json!({
-                        "id": string_value(project.get("id")),
-                        "hostId": string_value(project.get("hostId")),
-                        "remotePath": string_value(project.get("remotePath")),
-                        "label": string_value(project.get("label")),
-                    })
-                })
-                .collect::<Vec<_>>()
-        });
-    match result {
-        Ok(projects) => json!({ "status": "ok", "projects": projects }),
-        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
-    }
-}
-
-pub fn open_zed_remote(payload: &Value) -> Value {
-    let result = target_from_payload(payload).and_then(|target| {
-        let path = string_value(payload.get("path"));
-        let url = build_zed_remote_url(&target, &path)?;
-        launch_zed_url(&url)?;
-        Ok(url)
-    });
-    match result {
-        Ok(url) => json!({ "status": "ok", "url": url }),
-        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
-    }
-}
-
 trait NonEmptyStringExt {
     fn or_else_nonempty<F>(self, fallback: F) -> String
     where
@@ -540,54 +365,6 @@ impl NonEmptyStringExt for String {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn build_zed_remote_url_with_user_host_port_and_encoded_path() {
-        let url = build_zed_remote_url(
-            &SshTarget {
-                user: "alice".to_string(),
-                host: "example.com".to_string(),
-                port: Some(2222),
-            },
-            "/home/alice/My Project/你好.py",
-        )
-        .unwrap();
-
-        assert_eq!(
-            url,
-            "ssh://alice@example.com:2222/home/alice/My%20Project/%E4%BD%A0%E5%A5%BD.py"
-        );
-    }
-
-    #[test]
-    fn build_zed_remote_url_allows_host_without_user() {
-        let url = build_zed_remote_url(
-            &SshTarget {
-                user: String::new(),
-                host: "box.internal".to_string(),
-                port: None,
-            },
-            "/srv/app/main.py",
-        )
-        .unwrap();
-
-        assert_eq!(url, "ssh://box.internal/srv/app/main.py");
-    }
-
-    #[test]
-    fn build_zed_remote_url_rejects_invalid_inputs() {
-        let error = build_zed_remote_url(
-            &SshTarget {
-                user: "alice".to_string(),
-                host: "bad host".to_string(),
-                port: None,
-            },
-            "/a.py",
-        )
-        .unwrap_err();
-
-        assert_eq!(error.to_string(), "Invalid SSH host");
-    }
 
     #[test]
     fn target_from_payload_splits_codex_managed_authority() {
@@ -689,16 +466,6 @@ mod tests {
         assert_eq!(
             result,
             json!({"status": "failed", "message": "Remote host id is required"})
-        );
-    }
-
-    #[test]
-    fn open_zed_remote_returns_failed_response_for_validation_error() {
-        let result = open_zed_remote(&json!({"ssh": {"host": ""}, "path": "/a.py"}));
-
-        assert_eq!(
-            result,
-            json!({"status": "failed", "message": "Cannot determine remote SSH host for this file"})
         );
     }
 }

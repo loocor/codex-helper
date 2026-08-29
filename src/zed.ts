@@ -1,5 +1,4 @@
-import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -24,19 +23,6 @@ class ZedRemoteError extends Error {
 	}
 }
 
-type LaunchCommand = {
-	program: string;
-	args: string[];
-};
-
-function spawnDetached(command: LaunchCommand): void {
-	const child = spawn(command.program, command.args, {
-		detached: true,
-		stdio: "ignore",
-	});
-	child.unref();
-}
-
 function stringValue(value: unknown): string {
 	if (typeof value === "string") return value.trim();
 	if (typeof value === "number") return String(value);
@@ -45,47 +31,6 @@ function stringValue(value: unknown): string {
 
 function orElseNonEmpty(primary: string, fallback: () => string): string {
 	return primary || fallback();
-}
-
-function candidateZedAppPaths(): string[] {
-	return [
-		"/Applications/Zed.app",
-		"/Applications/Zed Preview.app",
-		"/Applications/Zed Nightly.app",
-		join(homedir(), "Applications/Zed.app"),
-		join(homedir(), "Applications/Zed Preview.app"),
-		join(homedir(), "Applications/Zed Nightly.app"),
-	];
-}
-
-function findZedAppPath(): string | null {
-	return candidateZedAppPaths().find((path) => existsSync(path)) ?? null;
-}
-
-function findZedCliPath(): string {
-	const pathVar = process.env.PATH ?? "";
-	for (const dir of pathVar.split(":")) {
-		const candidate = join(dir, "zed");
-		if (existsSync(candidate)) return candidate;
-	}
-	return "";
-}
-
-export function zedRemoteStatus(): JsonValue {
-	const appPath = findZedAppPath();
-	const cliPath = findZedCliPath();
-	const platformSupported =
-		process.platform === "darwin" ||
-		process.platform === "win32" ||
-		process.platform === "linux";
-	return {
-		status: platformSupported ? "ok" : "failed",
-		platformSupported,
-		zedAppFound: appPath !== null,
-		zedCliFound: cliPath.length > 0,
-		zedAppPath: appPath ?? "",
-		zedCliPath: cliPath,
-	};
 }
 
 function parsePortStr(value: string): number | null {
@@ -171,34 +116,6 @@ function validateSshHost(host: string): string {
 		throw new ZedRemoteError("Invalid SSH host");
 	}
 	return trimmed;
-}
-
-function percentEncodeSegment(segment: string): string {
-	let encoded = "";
-	for (const byte of Buffer.from(segment, "utf8")) {
-		const ch = String.fromCharCode(byte);
-		if (/[A-Za-z0-9\-._~]/.test(ch)) encoded += ch;
-		else encoded += `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
-	}
-	return encoded;
-}
-
-function encodeRemotePath(path: string): string {
-	if (!path) throw new ZedRemoteError("Remote path is required");
-	if (!path.startsWith("/")) {
-		throw new ZedRemoteError("Remote path must be absolute");
-	}
-	return path.split("/").map(percentEncodeSegment).join("/");
-}
-
-export function buildZedRemoteUrl(target: SshTarget, path: string): string {
-	const host = validateSshHost(target.host);
-	const userPrefix = target.user.trim()
-		? `${percentEncodeSegment(target.user.trim())}@`
-		: "";
-	const portSuffix = target.port && target.port > 0 ? `:${target.port}` : "";
-	const encodedPath = encodeRemotePath(path);
-	return `ssh://${userPrefix}${host}${portSuffix}${encodedPath}`;
 }
 
 function targetFromPayload(payload: Record<string, JsonValue>): SshTarget {
@@ -335,7 +252,7 @@ function fallbackOpenRequestFromGlobalState(
 	);
 	if (!selectedProject) {
 		throw new ZedRemoteError(
-			"Cannot determine remote workspace or file for Zed",
+			"Cannot determine remote workspace",
 		);
 	}
 	const hostId = orElseNonEmpty(selectedHostId, () =>
@@ -348,20 +265,6 @@ function fallbackOpenRequestFromGlobalState(
 		ssh: { user: target.user, host: target.host, port: target.port },
 		path: stringValue(selectedProject.remotePath),
 	};
-}
-
-function launchZedUrl(url: string): void {
-	const cliPath = findZedCliPath();
-	if (cliPath) {
-		spawnDetached({ program: cliPath, args: [url] });
-		return;
-	}
-	const appPath = findZedAppPath();
-	if (process.platform === "darwin" && appPath) {
-		spawnDetached({ program: "open", args: ["-a", appPath, url] });
-		return;
-	}
-	throw new ZedRemoteError("Zed is not installed or not available on PATH");
 }
 
 export function resolveSshTargetForHostId(hostId: string): SshTarget {
@@ -390,21 +293,6 @@ export function fallbackOpenRequestResponse(): JsonValue {
 	try {
 		const request = fallbackOpenRequestFromGlobalState(readGlobalState());
 		return { status: "ok", request };
-	} catch (error) {
-		return {
-			status: "failed",
-			message: error instanceof Error ? error.message : String(error),
-		};
-	}
-}
-
-export function openZedRemote(payload: Record<string, JsonValue>): JsonValue {
-	try {
-		const target = targetFromPayload(payload);
-		const path = stringValue(payload.path);
-		const url = buildZedRemoteUrl(target, path);
-		launchZedUrl(url);
-		return { status: "ok", url };
 	} catch (error) {
 		return {
 			status: "failed",

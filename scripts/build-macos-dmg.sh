@@ -26,10 +26,19 @@ case "$TARGET" in
   *) echo "unsupported target: $TARGET" >&2; exit 1 ;;
 esac
 
+PROFILE="${CARGO_PROFILE:-release}"
+case "$PROFILE" in
+  debug | release) ;;
+  *) echo "unsupported CARGO_PROFILE: ${PROFILE}" >&2; exit 1 ;;
+esac
 DIST="${ROOT}/dist/macos/${TARGET}"
 STAGE="${DIST}/stage"
 APP="${STAGE}/${APP_NAME}.app"
-DMG="${OUTPUT_DIR}/${APP_NAME}-${VERSION}-macos-${ARCH_SUFFIX}.dmg"
+if [[ "$PROFILE" == "debug" ]]; then
+  DMG="${OUTPUT_DIR}/${APP_NAME}-${VERSION}-macos-${ARCH_SUFFIX}-debug.dmg"
+else
+  DMG="${OUTPUT_DIR}/${APP_NAME}-${VERSION}-macos-${ARCH_SUFFIX}.dmg"
+fi
 ENTITLEMENTS="${TAURI}/assets/entitlements.plist"
 ICON="${TAURI}/icons/icon.png"
 
@@ -97,12 +106,16 @@ mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 DMG="${OUTPUT_DIR}/$(basename "$DMG")"
 
-echo "build ${TARGET} v${VERSION}"
-RUSTC_WRAPPER="${RUSTC_WRAPPER:-}" cargo build --manifest-path "${TAURI}/Cargo.toml" --release --target "$TARGET"
+echo "build ${TARGET} v${VERSION} (${PROFILE})"
+CARGO_ARGS=(--manifest-path "${TAURI}/Cargo.toml" --target "$TARGET" --bin codex-helper)
+if [[ "$PROFILE" != "debug" ]]; then
+  CARGO_ARGS+=(--release)
+fi
+RUSTC_WRAPPER="${RUSTC_WRAPPER:-}" cargo build "${CARGO_ARGS[@]}"
 
 rm -rf "$DIST"
 mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
-cp "${TAURI}/target/${TARGET}/release/codex-helper" "${APP}/Contents/MacOS/codex-helper"
+cp "${TAURI}/target/${TARGET}/${PROFILE}/codex-helper" "${APP}/Contents/MacOS/codex-helper"
 chmod +x "${APP}/Contents/MacOS/codex-helper"
 "${ROOT}/scripts/png-to-icns.sh" "$ICON" "${APP}/Contents/Resources/app.icns"
 
@@ -117,6 +130,7 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>ai.codexhelper.launcher</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>CodexHelper</string>
+  <key>CFBundleDisplayName</key><string>CodexHelper</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>

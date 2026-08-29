@@ -1,4 +1,4 @@
-// Native Codex Settings Helper group and pages
+// Helper Settings pages hosted in the standalone Helper window
 function nativeHelperSettingsPageDefinitions() {
   return [
     {
@@ -6,7 +6,21 @@ function nativeHelperSettingsPageDefinitions() {
       label: "General",
       standardIconName: "sliders-horizontal",
       description:
-        "Configure Helper integrations, session actions, and port forwarding.",
+        "Configure Helper integrations, interface options, and port forwarding.",
+    },
+    {
+      id: "providers",
+      label: "Providers",
+      standardIconName: "plug",
+      description:
+        "Switch ChatGPT desktop between the official login, API keys, GitHub Copilot, and xAI Grok. Helper writes ~/.codex/config.toml and keeps serving without a Helper restart.",
+    },
+    {
+      id: "endpoint",
+      label: "Endpoint",
+      standardIconName: "radio",
+      description:
+        "Local OpenAI-compatible URL for other agents. Uses the active provider. Add named keys if you want inbound checks.",
     },
     {
       id: "user-scripts",
@@ -31,66 +45,6 @@ function nativeHelperSettingsPages() {
   return nativeHelperSettingsPageDefinitions().filter((page) => !page.hidden);
 }
 
-function isCodexSettingsSidebarCandidate(sidebar) {
-  if (!(sidebar instanceof HTMLElement) || !isVisibleElement(sidebar))
-    return false;
-  const text = textOf(sidebar);
-  return (
-    text.includes("Back to app") &&
-    text.includes("General") &&
-    text.includes("Appearance") &&
-    text.includes("Configuration") &&
-    text.includes("Personalization")
-  );
-}
-
-function findCodexSettingsSidebar() {
-  const selector = "aside, nav, [role='navigation'], [role='tablist']";
-  return (
-    Array.from(document.querySelectorAll(selector)).find((node) =>
-      isCodexSettingsSidebarCandidate(node),
-    ) || null
-  );
-}
-
-function nativeSettingsClickableSelector() {
-  return "button, a, [role='button'], [role='tab'], [role='menuitem']";
-}
-
-function findClickableSettingsItem(sidebar, label) {
-  if (!(sidebar instanceof HTMLElement)) return null;
-  return (
-    Array.from(sidebar.querySelectorAll(nativeSettingsClickableSelector())).find(
-      (node) => {
-        if (!(node instanceof HTMLElement)) return false;
-        if (node.closest(`[${helperNativeSettingsGroupAttribute}]`)) return false;
-        if (!exactText(node, label)) return false;
-        const rect = node.getBoundingClientRect();
-        return rect.width > 40 && rect.height > 12;
-      },
-    ) || null
-  );
-}
-
-function cloneNativeSettingsEntry(sidebar, label, pageId) {
-  const template =
-    findClickableSettingsItem(sidebar, "Configuration") ||
-    findClickableSettingsItem(sidebar, "General");
-  const entry = template?.cloneNode(true);
-  if (!(entry instanceof HTMLElement)) return null;
-  entry.setAttribute(helperNativeSettingsEntryAttribute, pageId);
-  entry.removeAttribute("id");
-  entry.removeAttribute("aria-current");
-  entry.removeAttribute("aria-selected");
-  entry.removeAttribute("data-state");
-  entry.removeAttribute("data-active");
-  entry.removeAttribute("data-highlighted");
-  entry.setAttribute("tabindex", "0");
-  setSessionMenuItemLabel(entry, label);
-  setNativeSettingsEntryIcon(entry, pageId);
-  return entry;
-}
-
 function nativeSettingsStandardIconSvg(iconName, className = "") {
   const classes = className ? ` class="${className}"` : "";
   const base = `<svg${classes} data-lucide="${iconName}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">`;
@@ -101,85 +55,41 @@ function nativeSettingsStandardIconSvg(iconName, className = "") {
       return `${base}<path d="M4 22h14a2 2 0 0 0 2-2V7.5L14.5 2H6a2 2 0 0 0-2 2v4"></path><path d="M14 2v6h6"></path><path d="m5 12-3 3 3 3"></path><path d="m9 18 3-3-3-3"></path></svg>`;
     case "scroll-text":
       return `${base}<path d="M15 12h-5"></path><path d="M15 8h-5"></path><path d="M19 17V5a2 2 0 0 0-2-2H4"></path><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"></path></svg>`;
+    case "plug":
+      return `${base}<path d="M12 22v-5"></path><path d="M9 8V2"></path><path d="M15 8V2"></path><path d="M18 8v5a6 6 0 0 1-6 6 6 6 0 0 1-6-6V8Z"></path></svg>`;
+    case "radio":
+      return `${base}<path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"></path><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"></path><circle cx="12" cy="12" r="2"></circle><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"></path><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"></path></svg>`;
+    case "dices":
+      return `${base}<rect width="12" height="12" x="2" y="10" rx="2" ry="2"></rect><path d="m17.92 14 3.5-3.5a2.24 2.24 0 0 0 0-3l-5-4.92a2.24 2.24 0 0 0-3 0L10 6"></path><path d="M6 18h.01"></path><path d="M10 14h.01"></path><path d="M15 6h.01"></path><path d="M18 9h.01"></path></svg>`;
+    case "copy":
+      return `${base}<rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>`;
+    case "trash-2":
+      return `${base}<path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path><line x1="10" x2="10" y1="11" y2="17"></line><line x1="14" x2="14" y1="11" y2="17"></line></svg>`;
+    case "plus":
+      return `${base}<path d="M5 12h14"></path><path d="M12 5v14"></path></svg>`;
+    case "x":
+      return `${base}<path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>`;
+    case "ellipsis":
+      return `${base}<circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg>`;
+    case "chevron-right":
+      return `${base}<path d="m9 18 6-6-6-6"></path></svg>`;
+    case "chevron-left":
+      return `${base}<path d="m15 18-6-6 6-6"></path></svg>`;
+    case "eye":
+      return `${base}<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"></path><circle cx="12" cy="12" r="3" fill="currentColor"></circle></svg>`;
+    case "eye-off":
+      return `${base}<path d="M2 12s3.5-7 10-7c2 0 3.8.6 5.3 1.4"></path><path d="M20.6 8.5C21.5 9.6 22 10.8 22 12c0 0-3.5 7-10 7-1.8 0-3.4-.5-4.8-1.2"></path><circle cx="12" cy="12" r="3"></circle><path d="M4 4l16 16" stroke-width="2.4"></path></svg>`;
     case "info":
       return `${base}<circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg>`;
     case "refresh-cw":
       return `${base}<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"></path><path d="M8 16H3v5"></path></svg>`;
     case "external-link":
       return `${base}<path d="M15 3h6v6"></path><path d="M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path></svg>`;
+    case "grip-vertical":
+      return `${base}<circle cx="9" cy="5" r="1" fill="currentColor"></circle><circle cx="9" cy="12" r="1" fill="currentColor"></circle><circle cx="9" cy="19" r="1" fill="currentColor"></circle><circle cx="15" cy="5" r="1" fill="currentColor"></circle><circle cx="15" cy="12" r="1" fill="currentColor"></circle><circle cx="15" cy="19" r="1" fill="currentColor"></circle></svg>`;
     default:
       return `${base}<circle cx="12" cy="12" r="10"></circle></svg>`;
   }
-}
-
-function setNativeSettingsEntryIcon(entry, pageId) {
-  if (!(entry instanceof HTMLElement)) return;
-  const page = nativeHelperSettingsPageDefinitions().find(
-    (item) => item.id === pageId,
-  );
-  const iconName = page?.standardIconName || "info";
-  const wrapper = document.createElement("span");
-  wrapper.innerHTML = nativeSettingsStandardIconSvg(
-    iconName,
-    "codex-helper-native-settings-sidebar-icon",
-  );
-  const icon = wrapper.firstElementChild;
-  if (!(icon instanceof SVGElement)) return;
-  const current = entry.querySelector("svg");
-  if (current instanceof SVGElement) current.replaceWith(icon);
-  else entry.insertBefore(icon, entry.firstChild);
-}
-
-function cloneNativeSettingsGroupLabel(sidebar) {
-  const hostText = Array.from(sidebar.querySelectorAll("*")).find(
-    (node) =>
-      node instanceof HTMLElement &&
-      exactText(node, "Host") &&
-      isVisibleElement(node),
-  );
-  const label = hostText?.cloneNode(true);
-  if (label instanceof HTMLElement) {
-    label.textContent = "Helper";
-    label.removeAttribute("id");
-    label.removeAttribute("aria-current");
-    label.removeAttribute("aria-selected");
-    label.removeAttribute("data-state");
-    return label;
-  }
-  const fallback = document.createElement("div");
-  fallback.textContent = "Helper";
-  fallback.className = "codex-helper-native-settings-group-label";
-  return fallback;
-}
-
-function createNativeSettingsGroup(sidebar) {
-  const group = document.createElement("div");
-  group.setAttribute(helperNativeSettingsGroupAttribute, "true");
-  group.className = "codex-helper-native-settings-group";
-  group.appendChild(cloneNativeSettingsGroupLabel(sidebar));
-  for (const page of nativeHelperSettingsPages()) {
-    const entry = cloneNativeSettingsEntry(sidebar, page.label, page.id);
-    if (!(entry instanceof HTMLElement)) {
-      logDiagnostic("settings_insertion_failed", {
-        reason: "entry_template_not_found",
-        page: page.id,
-      });
-      return null;
-    }
-    group.appendChild(entry);
-  }
-  return group;
-}
-
-function installNativeHelperSettingsGroup() {
-  const sidebar = findCodexSettingsSidebar();
-  if (!(sidebar instanceof HTMLElement)) return false;
-  if (sidebar.querySelector(`[${helperNativeSettingsGroupAttribute}]`))
-    return true;
-  const group = createNativeSettingsGroup(sidebar);
-  if (!(group instanceof HTMLElement)) return false;
-  sidebar.appendChild(group);
-  return true;
 }
 
 function updateNativeSettingsActiveEntry(pageId) {
@@ -194,140 +104,6 @@ function updateNativeSettingsActiveEntry(pageId) {
     if (active) entry.setAttribute("aria-current", "page");
     else entry.removeAttribute("aria-current");
   }
-}
-
-function findNativeSettingsContentRoot(sidebar) {
-  if (!(sidebar instanceof HTMLElement)) return null;
-  const sidebarRect = sidebar.getBoundingClientRect();
-  for (
-    let ancestor = sidebar.parentElement;
-    ancestor instanceof HTMLElement;
-    ancestor = ancestor === document.body ? null : ancestor.parentElement
-  ) {
-    const candidates = Array.from(ancestor.children)
-      .filter((child) => child instanceof HTMLElement && !child.contains(sidebar))
-      .map((child) => child);
-    const root = candidates
-      .filter((candidate) =>
-        isValidNativeSettingsContentRoot(candidate, sidebar, sidebarRect),
-      )
-      .sort(
-        (a, b) =>
-          nativeSettingsContentRootScore(b, sidebarRect) -
-          nativeSettingsContentRootScore(a, sidebarRect),
-      )[0];
-    if (root instanceof HTMLElement) {
-      return findNativeSettingsScrollContentRoot(root, sidebar, sidebarRect) || root;
-    }
-  }
-  return null;
-}
-
-function findNativeSettingsScrollContentRoot(root, sidebar, sidebarRect) {
-  const candidates = Array.from(root.querySelectorAll("div, main, section"));
-  return (
-    candidates
-      .filter((candidate) =>
-        isValidNativeSettingsScrollContentRoot(candidate, sidebar, sidebarRect),
-      )
-      .sort(
-        (a, b) =>
-          nativeSettingsContentRootScore(b, sidebarRect) -
-          nativeSettingsContentRootScore(a, sidebarRect),
-      )[0] || null
-  );
-}
-
-function nativeSettingsContentRootScore(root, sidebarRect) {
-  const rect = root.getBoundingClientRect();
-  const style = getComputedStyle(root);
-  const className = String(root.className || "");
-  let score = rect.width * rect.height;
-  if (rect.left >= sidebarRect.right - 8) score += 1_000_000_000;
-  if (className.includes("p-panel")) score += 20_000;
-  if (className.includes("scrollbar-stable")) score += 10_000;
-  if (style.overflowY === "auto" || style.overflowY === "scroll") score += 5_000;
-  return score;
-}
-
-function isValidNativeSettingsScrollContentRoot(root, sidebar, sidebarRect) {
-  if (!(root instanceof HTMLElement) || !isVisibleElement(root)) return false;
-  if (root.contains(sidebar) || sidebar.contains(root)) return false;
-  if (root.closest(`[${helperNativeSettingsGroupAttribute}]`)) return false;
-  if (root.querySelector(`[${helperNativeSettingsEntryAttribute}]`))
-    return false;
-  const rect = root.getBoundingClientRect();
-  if (rect.left < sidebarRect.right - 8) return false;
-  const style = getComputedStyle(root);
-  const className = String(root.className || "");
-  return (
-    className.includes("p-panel") ||
-    className.includes("scrollbar-stable") ||
-    style.overflowY === "auto" ||
-    style.overflowY === "scroll"
-  );
-}
-
-function isValidNativeSettingsContentRoot(root, sidebar, sidebarRect) {
-  if (!(root instanceof HTMLElement) || !isVisibleElement(root)) return false;
-  if (root.contains(sidebar) || sidebar.contains(root)) return false;
-  if (root.closest(`[${helperNativeSettingsGroupAttribute}]`)) return false;
-  if (root.querySelector(`[${helperNativeSettingsEntryAttribute}]`))
-    return false;
-  const rect = root.getBoundingClientRect();
-  return rect.left >= sidebarRect.right - 8;
-}
-
-function stashNativeSettingsContent(host) {
-  if (!(host instanceof HTMLElement)) return;
-  if (helperNativeSettingsContentStash?.host === host) return;
-  restoreNativeSettingsContent();
-  const marker = document.createComment("codex-helper-native-settings-stash");
-  const fragment = document.createDocumentFragment();
-  host.insertBefore(marker, host.firstChild);
-  for (const node of Array.from(host.childNodes)) {
-    if (node === marker) continue;
-    if (
-      node instanceof HTMLElement &&
-      node.hasAttribute(helperNativeSettingsPageAttribute)
-    )
-      continue;
-    fragment.appendChild(node);
-  }
-  helperNativeSettingsContentStash = { host, marker, fragment };
-}
-
-function restoreNativeSettingsContent() {
-  if (!helperNativeSettingsContentStash) return;
-  const { host, marker, fragment } = helperNativeSettingsContentStash;
-  if (
-    host instanceof HTMLElement &&
-    marker instanceof Comment &&
-    marker.parentNode === host
-  ) {
-    host.insertBefore(fragment, marker.nextSibling);
-    marker.remove();
-  }
-  helperNativeSettingsContentStash = null;
-}
-
-function clearNativeHelperSettingsPage() {
-  for (const node of document.querySelectorAll(
-    `[${helperNativeSettingsPageAttribute}]`,
-  )) {
-    node.remove();
-  }
-  restoreNativeSettingsContent();
-  for (const host of document.querySelectorAll(
-    `[${helperNativeSettingsContentHostAttribute}]`,
-  )) {
-    host.removeAttribute(helperNativeSettingsContentHostAttribute);
-    host.removeAttribute("data-codex-helper-active");
-  }
-  helperNativeSettingsRoot = null;
-  helperNativeSettingsContentHost = null;
-  helperNativeSettingsActivePage = "";
-  updateNativeSettingsActiveEntry("");
 }
 
 function nativeSettingsPageTitle(pageId) {
@@ -348,35 +124,26 @@ function nativeSettingsPageHeader(pageId) {
   if (pageId === "about") {
     return nativeSettingsAboutHeader();
   }
+  const description = nativeSettingsPageDescription(pageId);
   return `
-    <header class="flex flex-col gap-4 px-0">
-      <div class="flex min-w-0 flex-1 flex-col gap-1.5">
-        <h1 class="heading-lg font-normal min-w-0 break-words text-default">${nativeSettingsPageTitle(pageId)}</h1>
-        ${nativeSettingsPageDescription(pageId)
-          ? `<div class="codex-helper-native-settings-page-description text-base text-secondary">${nativeSettingsPageDescription(pageId)}</div>`
-          : ""}
-      </div>
+    <header class="helper-settings-page-header">
+      <h1 class="helper-settings-page-title">${nativeSettingsPageTitle(pageId)}</h1>
+      ${description ? `<p class="helper-settings-page-description">${description}</p>` : ""}
     </header>
   `;
 }
 
 function renderNativeHelperSettingsPage(host, pageId) {
   if (!(host instanceof HTMLElement)) return null;
-  host.querySelectorAll(`[${helperNativeSettingsPageAttribute}]`).forEach(
-    (node) => {
-      node.remove();
-    },
-  );
-  stashNativeSettingsContent(host);
-  host.setAttribute(helperNativeSettingsContentHostAttribute, "true");
-  host.setAttribute("data-codex-helper-active", "true");
+  closeProviderDialog();
+  host.replaceChildren();
   const page = document.createElement("section");
   page.setAttribute(helperNativeSettingsPageAttribute, pageId);
-  page.className = "codex-helper-native-settings-page";
+  page.className = "codex-helper-native-settings-page helper-settings-page";
   page.innerHTML = `
-    <div class="codex-helper-native-settings-page-inner mx-auto flex w-full max-w-3xl flex-col">
+    <div class="helper-settings-page-inner">
       ${nativeSettingsPageHeader(pageId)}
-      <div class="codex-helper-native-settings-page-content flex flex-col gap-10">
+      <div class="helper-settings-page-body">
         ${nativeSettingsPageContent(pageId)}
       </div>
     </div>
@@ -397,7 +164,7 @@ function nativeSettingsPanel(rows, extraClass = "") {
 }
 
 function nativeSettingsGroupTitle(title) {
-  return `<div class="codex-helper-settings-section-title text-sm font-medium text-default">${title}</div>`;
+  return `<div class="codex-helper-settings-section-title">${title}</div>`;
 }
 
 function nativeSettingsGroupSection(title, rows, sectionId = "") {
@@ -405,7 +172,7 @@ function nativeSettingsGroupSection(title, rows, sectionId = "") {
     ? ` ${helperSettingsSectionAttribute}="${sectionId}"`
     : "";
   return `
-    <section class="codex-helper-settings-section flex flex-col gap-1.5"${sectionAttr}>
+    <section class="codex-helper-settings-section"${sectionAttr}>
       ${nativeSettingsGroupTitle(title)}
       ${nativeSettingsPanel(rows)}
     </section>`;
@@ -414,6 +181,9 @@ function nativeSettingsGroupSection(title, rows, sectionId = "") {
 function nativeSettingsIconSvg(name) {
   if (name === "refresh") {
     return nativeSettingsStandardIconSvg("refresh-cw");
+  }
+  if (name === "copy" || name === "trash-2" || name === "radio") {
+    return nativeSettingsStandardIconSvg(name);
   }
   return nativeSettingsStandardIconSvg("external-link");
 }
@@ -430,7 +200,7 @@ function nativeSettingsPathHeader(pathAttr, openCommand, refreshCommand = "") {
   return `
     <div class="codex-helper-native-settings-list-header">
       <div class="codex-helper-native-settings-path-line">
-        <span class="codex-helper-native-settings-path text-token-text-primary" ${pathAttr}>Loading</span>
+        <span class="codex-helper-native-settings-path" ${pathAttr}>Loading</span>
         ${nativeSettingsIconButton(openCommand, "Open path", "open")}
       </div>
       ${refreshCommand ? nativeSettingsIconButton(refreshCommand, "Refresh", "refresh") : ""}
@@ -438,7 +208,7 @@ function nativeSettingsPathHeader(pathAttr, openCommand, refreshCommand = "") {
 }
 
 function nativeSettingsListFooter(statusAttr) {
-  return `<div class="codex-helper-native-settings-list-footer text-token-text-secondary text-xs" ${statusAttr}>Loading</div>`;
+  return `<div class="codex-helper-native-settings-list-footer" ${statusAttr}>Loading</div>`;
 }
 
 function nativeSettingsListSection(header, panel, extraClass = "") {
@@ -450,35 +220,64 @@ function nativeSettingsListSection(header, panel, extraClass = "") {
 
 function nativeSettingsSwitchRow(title, description, descKey, toggleKey, ariaLabel) {
   return `
-    <div class="codex-helper-settings-row flex w-full items-center justify-between gap-6 py-3 ps-4 pe-4">
-      <div class="flex min-w-0 flex-1 flex-col gap-0.5">
-        <div class="min-w-0 text-sm font-medium text-default">${title}</div>
-        <div class="min-w-0 text-xs leading-4 text-balance text-secondary" data-codex-helper-setting-desc="${descKey}">${description}</div>
+    <div class="codex-helper-settings-row">
+      <div class="codex-helper-settings-row-copy">
+        <div class="codex-helper-settings-row-title">${title}</div>
+        <div class="codex-helper-settings-row-description" data-codex-helper-setting-desc="${descKey}">${description}</div>
       </div>
-      <label class="codex-helper-switch inline-flex shrink-0 cursor-interaction items-center" aria-label="${ariaLabel}">
+      <label class="codex-helper-switch" aria-label="${ariaLabel}">
         <input type="checkbox" ${helperToggleAttribute}="${toggleKey}">
         <span class="codex-helper-switch-track" aria-hidden="true"><span class="codex-helper-switch-thumb"></span></span>
       </label>
     </div>`;
 }
 
-function nativeSettingsNumberRow(title, description, numberKey, ariaLabel) {
+function nativeSettingsTextRow(title, description, field, inputType, ariaLabel, extra = "") {
   return `
-    <div class="codex-helper-settings-row flex w-full items-center justify-between gap-6 py-3 ps-4 pe-4">
-      <div class="flex min-w-0 flex-1 flex-col gap-0.5">
-        <div class="min-w-0 text-sm font-medium text-default">${title}</div>
-        <div class="min-w-0 text-xs leading-4 text-balance text-secondary" data-codex-helper-setting-desc="${numberKey}">${description}</div>
+    <div class="codex-helper-settings-row">
+      <div class="codex-helper-settings-row-copy">
+        <div class="codex-helper-settings-row-title">${title}</div>
+        <div class="codex-helper-settings-row-description">${description}</div>
       </div>
-      <input type="number" min="1" max="20" step="1" class="codex-helper-number-input" ${helperNumberAttribute}="${numberKey}" aria-label="${ariaLabel}">
+      <input type="${inputType}" class="codex-helper-text-input" data-codex-helper-provider-field="${field}" aria-label="${ariaLabel}" ${extra}>
     </div>`;
+}
+
+function nativeSettingsSelectRow(title, description, field, options, ariaLabel) {
+  const optionHtml = options
+    .map(([value, label]) => `<option value="${value}">${label}</option>`)
+    .join("");
+  return `
+    <div class="codex-helper-settings-row">
+      <div class="codex-helper-settings-row-copy">
+        <div class="codex-helper-settings-row-title">${title}</div>
+        <div class="codex-helper-settings-row-description">${description}</div>
+      </div>
+      <select class="codex-helper-text-input" data-codex-helper-provider-field="${field}" aria-label="${ariaLabel}">${optionHtml}</select>
+    </div>`;
+}
+
+function nativeSettingsProvidersPageContent() {
+  return `
+    <section class="codex-helper-settings-section">
+      <div class="codex-helper-provider-list-header">
+        <div class="codex-helper-settings-section-title">Providers</div>
+        <button type="button" class="codex-helper-provider-add-button" ${helperCommandAttribute}="new-provider" aria-label="Add provider">${nativeSettingsStandardIconSvg("plus")}</button>
+      </div>
+      ${nativeSettingsPanel(`
+        <div class="codex-helper-settings-scroll" data-codex-helper-providers-list></div>
+        ${nativeSettingsListFooter("data-codex-helper-providers-status")}
+      `)}
+    </section>
+  `;
 }
 
 function nativeSettingsActionRow(title, detail, command, buttonLabel, detailAttr = "") {
   return `
-    <div class="codex-helper-settings-row flex w-full items-center justify-between gap-6 py-3 ps-4 pe-4">
-      <div class="flex min-w-0 flex-1 flex-col gap-0.5">
-        <div class="min-w-0 text-sm font-medium text-default">${title}</div>
-        <div class="min-w-0 text-xs leading-4 text-balance text-secondary"${detailAttr ? ` ${detailAttr}` : ""}>${detail}</div>
+    <div class="codex-helper-settings-row">
+      <div class="codex-helper-settings-row-copy">
+        <div class="codex-helper-settings-row-title">${title}</div>
+        <div class="codex-helper-settings-row-description"${detailAttr ? ` ${detailAttr}` : ""}>${detail}</div>
       </div>
       <button type="button" class="${helperActionClass}" ${helperCommandAttribute}="${command}">${buttonLabel}</button>
     </div>`;
@@ -490,9 +289,9 @@ function nativeSettingsAboutHeader() {
       <div class="codex-helper-native-settings-about-icon" aria-hidden="true">
         ${nativeSettingsCodexHelperLogoSvg()}
       </div>
-      <div class="flex min-w-0 flex-col gap-1">
-        <div class="codex-helper-native-settings-about-name text-token-text-primary">Codex Helper</div>
-        <div class="text-token-text-secondary text-sm">A local runtime helper for Codex settings, session tools, scripts, logs, and developer workflows.</div>
+      <div class="helper-settings-about-copy">
+        <div class="codex-helper-native-settings-about-name">Codex Helper</div>
+        <div class="helper-settings-page-description">A local runtime helper for Codex settings, providers, scripts, logs, and developer workflows.</div>
       </div>
     </div>
   `;
@@ -501,15 +300,15 @@ function nativeSettingsAboutHeader() {
 function nativeSettingsAboutPageContent() {
   return nativeSettingsPanel(`
     <div class="codex-helper-native-settings-about-row">
-      <div class="flex min-w-0 flex-col gap-1">
-        <div class="min-w-0 text-sm text-token-text-primary">Last updated</div>
-        <div class="text-token-text-secondary min-w-0 text-sm">${helperBuildDate}</div>
+      <div class="helper-settings-about-copy">
+        <div class="codex-helper-settings-row-title">Last updated</div>
+        <div class="codex-helper-settings-row-description">${helperBuildDate}</div>
       </div>
     </div>
     <div class="codex-helper-native-settings-about-row">
-      <div class="flex min-w-0 flex-col gap-1">
-        <div class="min-w-0 text-sm text-token-text-primary">Project repository</div>
-        <div class="text-token-text-secondary min-w-0 truncate text-sm">${helperRepoUrl}</div>
+      <div class="helper-settings-about-copy">
+        <div class="codex-helper-settings-row-title">Project repository</div>
+        <div class="codex-helper-settings-row-description helper-settings-truncate">${helperRepoUrl}</div>
       </div>
       <a href="${helperRepoUrl}" target="_blank" rel="noopener noreferrer" class="codex-helper-native-settings-icon-button codex-helper-external-link" aria-label="Open project repository">${nativeSettingsIconSvg("open")}</a>
     </div>
@@ -536,27 +335,28 @@ function nativeSettingsPageContent(pageId) {
         "refresh",
       ),
       nativeSettingsPanel(`
-        <pre class="codex-helper-settings-scroll text-token-text-secondary min-w-0 text-xs" data-codex-helper-log>Loading</pre>
+        <div class="codex-helper-settings-scroll" data-codex-helper-log-list></div>
         ${nativeSettingsListFooter("data-codex-helper-log-status")}
       `, "codex-helper-native-settings-log-panel"),
       "codex-helper-native-settings-log-section",
     );
   }
+  if (pageId === "endpoint") {
+    return nativeSettingsEndpointPageContent();
+  }
   if (pageId === "about") {
     return nativeSettingsAboutPageContent();
   }
+  if (pageId === "providers") {
+    return nativeSettingsProvidersPageContent();
+  }
   return `
     ${nativeSettingsGroupSection("Integrations", `
-      ${nativeSettingsActionRow("Backend", "Loading", "refresh", "Refresh", "data-codex-helper-backend")}
-      ${nativeSettingsActionRow("Open in Zed", "Loading", "refresh", "Refresh", "data-codex-helper-zed-status")}
-      ${nativeSettingsActionRow("DevTools", "Open Chrome DevTools for this Codex window.", "open-devtools", "Open")}
+      ${nativeSettingsActionRow("Backend", "Loading", "refresh", "Refresh", 'data-codex-helper-backend data-status="loading"')}
+      ${nativeSettingsActionRow("DevTools", "Open Chrome DevTools for the active Codex window.", "open-devtools", "Open")}
     `)}
-    ${nativeSettingsGroupSection("Session actions", `
-      ${nativeSettingsSwitchRow("Markdown export", "Export conversations as Markdown from the session menu.", "markdownExportEnabled", "markdownExportEnabled", "Markdown export")}
-      ${nativeSettingsSwitchRow("Friendly Markdown filenames", "Use Codex auto naming for exported Markdown filenames.", "markdownFriendlyFilenameEnabled", "markdownFriendlyFilenameEnabled", "Friendly Markdown filenames")}
-      ${nativeSettingsNumberRow("Minimum characters", "Smallest expected auto name length.", "autoNamingMinChars", "Minimum auto naming characters")}
-      ${nativeSettingsNumberRow("Maximum characters", "Largest expected auto name length; 10 works well for Chinese names.", "autoNamingMaxChars", "Maximum auto naming characters")}
-      ${nativeSettingsSwitchRow("Fork sessions", "Fork sessions into local, remote, or another project from the sidebar context menu.", "sessionMoveEnabled", "sessionMoveEnabled", "Fork sessions")}
+    ${nativeSettingsGroupSection("Startup", `
+      ${nativeSettingsSwitchRow("Start at login", "Open Codex Helper when you log in to this Mac.", "launchAtLoginEnabled", "launchAtLoginEnabled", "Start at login")}
     `)}
     ${nativeSettingsGroupSection("Interface", `
       ${nativeSettingsSwitchRow("Hide usage-limit overlay", "Hide the You're out of Codex and Work usage card above the composer. This does not reset or bypass account limits.", "hideUsageLimitBannerEnabled", "hideUsageLimitBannerEnabled", "Hide usage-limit overlay")}
@@ -569,209 +369,29 @@ function nativeSettingsPageContent(pageId) {
   `;
 }
 
+function helperSettingsContentHost() {
+  const host = document.getElementById("helper-settings-content");
+  return host instanceof HTMLElement ? host : null;
+}
+
 function openNativeHelperSettingsPage(pageId) {
-  const sidebar = findCodexSettingsSidebar();
-  if (!(sidebar instanceof HTMLElement)) {
-    logDiagnostic("settings_insertion_failed", { reason: "sidebar_not_found" });
-    throw new Error("Native Settings sidebar not found");
+  const resolved = nativeHelperSettingsPages().some((page) => page.id === pageId)
+    ? pageId
+    : "general";
+  const host = helperSettingsContentHost();
+  if (!(host instanceof HTMLElement)) {
+    throw new Error("Helper Settings content host not found");
   }
-  const contentRoot = findNativeSettingsContentRoot(sidebar);
-  if (!(contentRoot instanceof HTMLElement)) {
-    logDiagnostic("settings_content_root_failed", {
-      reason: "content_root_not_found",
-    });
-    throw new Error("Native Settings content root not found");
-  }
-  renderNativeHelperSettingsPage(contentRoot, pageId || "general");
+  renderNativeHelperSettingsPage(host, resolved);
   refreshHelperPage().catch((error) => {
     setHelperText(
       "[data-codex-helper-backend]",
       error?.message || String(error),
     );
     logDiagnostic("settings_refresh_failed", {
-      surface: "native",
+      surface: "helper-window",
       error: error?.message || String(error),
     });
   });
   return true;
-}
-
-function activateNativeSettingsElement(element) {
-  if (!(element instanceof HTMLElement)) return;
-  element.focus?.();
-  for (const type of [
-    "pointerdown",
-    "mousedown",
-    "pointerup",
-    "mouseup",
-    "click",
-  ]) {
-    element.dispatchEvent(
-      new MouseEvent(type, {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-      }),
-    );
-  }
-}
-
-function nativeSettingsMenuTriggerScore(node) {
-  if (!(node instanceof HTMLElement) || !isVisibleElement(node)) return -1;
-  if (node.closest("[data-codex-helper-port-menu]")) return -1;
-  if (node.closest(`[${helperNativeSettingsGroupAttribute}]`)) return -1;
-  const text = textOf(node).toLowerCase();
-  const label = [
-    node.getAttribute("aria-label") || "",
-    node.getAttribute("title") || "",
-  ]
-    .join(" ")
-    .toLowerCase();
-  const rect = node.getBoundingClientRect();
-  let score = 0;
-  if (exactText(node, "Settings")) score += 100;
-  if (text.includes("settings") || label.includes("settings")) score += 60;
-  if (label.includes("account") || label.includes("profile")) score += 40;
-  if (label.includes("user") || label.includes("menu")) score += 30;
-  if (node.hasAttribute("aria-haspopup")) score += 28;
-  if (node.hasAttribute("aria-expanded")) score += 20;
-  if (rect.left < 420) score += 8;
-  if (rect.top > window.innerHeight * 0.5) score += 8;
-  return score > 0 ? score : -1;
-}
-
-function isNativeSettingsAccountMenu(menu) {
-  if (!(menu instanceof HTMLElement) || !isVisibleElement(menu)) return false;
-  const text = textOf(menu);
-  return (
-    text.includes("Settings") &&
-    (text.includes("Sign out") ||
-      text.includes("Log out") ||
-      text.includes("Usage") ||
-      text.includes("Account") ||
-      text.includes("Plan"))
-  );
-}
-
-function nativeSettingsAccountMenuCandidates() {
-  const menus = Array.from(
-    document.querySelectorAll(
-      '[role="menu"], [data-radix-menu-content], [data-radix-popper-content-wrapper]',
-    ),
-  ).filter((node) => isNativeSettingsAccountMenu(node));
-  for (const item of document.querySelectorAll('[role="menuitem"]')) {
-    if (!(item instanceof HTMLElement) || !exactText(item, "Settings"))
-      continue;
-    for (
-      let node = item.parentElement, depth = 0;
-      node instanceof HTMLElement && depth < 5;
-      node = node.parentElement, depth += 1
-    ) {
-      if (isNativeSettingsAccountMenu(node)) menus.push(node);
-    }
-  }
-  return Array.from(new Set(menus));
-}
-
-function nativeSettingsMenuTriggerCandidates() {
-  return Array.from(document.querySelectorAll("button"))
-    .filter((node) => nativeSettingsMenuTriggerScore(node) >= 0)
-    .sort(
-      (left, right) =>
-        nativeSettingsMenuTriggerScore(right) -
-        nativeSettingsMenuTriggerScore(left),
-    );
-}
-
-function findNativeSettingsMenuItem() {
-  for (const menu of nativeSettingsAccountMenuCandidates()) {
-    const item = Array.from(menu.querySelectorAll('[role="menuitem"]')).find(
-      (node) =>
-        node instanceof HTMLElement &&
-        isVisibleElement(node) &&
-        exactText(node, "Settings"),
-    );
-    if (item instanceof HTMLElement) return item;
-  }
-  return null;
-}
-
-function closeNativeSettingsCandidateMenus() {
-  const eventInit = {
-    key: "Escape",
-    code: "Escape",
-    keyCode: 27,
-    which: 27,
-    bubbles: true,
-    cancelable: true,
-  };
-  document.dispatchEvent(new KeyboardEvent("keydown", eventInit));
-  window.dispatchEvent(new KeyboardEvent("keydown", eventInit));
-}
-
-function waitForNativeSettingsCondition(check, timeoutMs) {
-  return new Promise((resolve) => {
-    const startedAt = Date.now();
-    const tick = () => {
-      const value = check();
-      if (value || Date.now() - startedAt >= timeoutMs) {
-        resolve(value || null);
-        return;
-      }
-      window.setTimeout(tick, 50);
-    };
-    tick();
-  });
-}
-
-async function ensureCodexNativeSettingsOpen() {
-  if (findCodexSettingsSidebar() instanceof HTMLElement) return true;
-  const existingMenuItem = findNativeSettingsMenuItem();
-  if (existingMenuItem instanceof HTMLElement) {
-    activateNativeSettingsElement(existingMenuItem);
-  } else {
-    let opened = false;
-    for (const trigger of nativeSettingsMenuTriggerCandidates()) {
-      activateNativeSettingsElement(trigger);
-      const menuItem = await waitForNativeSettingsCondition(
-        () => findNativeSettingsMenuItem(),
-        500,
-      );
-      if (menuItem instanceof HTMLElement) {
-        activateNativeSettingsElement(menuItem);
-        opened = true;
-        break;
-      }
-      closeNativeSettingsCandidateMenus();
-    }
-    if (!opened) {
-      throw new Error("Native Settings menu item not found");
-    }
-  }
-  const sidebar = await waitForNativeSettingsCondition(
-    () => findCodexSettingsSidebar(),
-    1800,
-  );
-  if (!(sidebar instanceof HTMLElement)) {
-    throw new Error("Native Settings sidebar not found");
-  }
-  return true;
-}
-
-async function openNativeHelperSettingsFromApp(pageId = "general") {
-  await ensureCodexNativeSettingsOpen();
-  if (!installNativeHelperSettingsGroup()) {
-    throw new Error("Helper settings group could not be installed");
-  }
-  openNativeHelperSettingsPage(pageId || "general");
-  return true;
-}
-
-function isNativeSettingsNavigationClick(target) {
-  if (!(target instanceof Element)) return false;
-  if (target.closest(`[${helperNativeSettingsGroupAttribute}]`)) return false;
-  const clickable = target.closest(nativeSettingsClickableSelector());
-  if (!(clickable instanceof HTMLElement)) return false;
-  const sidebar = findCodexSettingsSidebar();
-  return sidebar instanceof HTMLElement && sidebar.contains(clickable);
 }

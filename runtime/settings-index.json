@@ -1,0 +1,10 @@
+[
+  "constants.js",
+  "core.js",
+  "styles.js",
+  "settings.js",
+  "providers-page.js",
+  "endpoint-page.js",
+  "native-settings.js",
+  "settings-app.js"
+]

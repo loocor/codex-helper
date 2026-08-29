@@ -7,7 +7,6 @@ import { handleBridgeRequest } from "./routes";
 const BRIDGE_BINDING_NAME = "codexHelperBridgeV1";
 const CDP_COMMAND_TIMEOUT_MS = 5000;
 const DEFAULT_BRIDGE_REQUEST_TIMEOUT_MS = 10000;
-const LONG_BRIDGE_REQUEST_TIMEOUT_MS = 120000;
 
 type JsonValue =
 	| null
@@ -111,26 +110,15 @@ async function withBridgeRequestTimeout<T>(
 	}
 }
 
-export function bridgeRequestTimeoutMs(path: string): number {
-	switch (path) {
-		case "/export-markdown":
-			return LONG_BRIDGE_REQUEST_TIMEOUT_MS;
-		default:
-			return DEFAULT_BRIDGE_REQUEST_TIMEOUT_MS;
-	}
+export function bridgeRequestTimeoutMs(_path: string): number {
+	return DEFAULT_BRIDGE_REQUEST_TIMEOUT_MS;
 }
 
 export function bridgeRequestTimeoutMessage(
 	path: string,
 	timeoutMs = bridgeRequestTimeoutMs(path),
 ): string {
-	const seconds = Math.round(timeoutMs / 1000);
-	switch (path) {
-		case "/export-markdown":
-			return `Markdown export is still running after ${seconds}s. The chat may be large, the model request may be slow, or the remote host may be unreachable. Please retry when the connection is stable.`;
-		default:
-			return `Bridge request ${path || "(unknown)"} timed out after ${timeoutMs}ms`;
-	}
+	return `Bridge request ${path || "(unknown)"} timed out after ${timeoutMs}ms`;
 }
 
 class BindingCdpSession {

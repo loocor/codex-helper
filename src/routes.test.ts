@@ -134,7 +134,7 @@ test("dev bridge rejects malformed settings files explicitly", async () => {
 		mkdirSync(root, { recursive: true });
 		writeFileSync(
 			join(root, "config.json"),
-			'{ "markdownExportEnabled": "yes" }',
+			'{ "portForwardingEnabled": "yes" }',
 			"utf8",
 		);
 
@@ -142,7 +142,7 @@ test("dev bridge rejects malformed settings files explicitly", async () => {
 
 		expect(result).toEqual({
 			status: "failed",
-			message: "Settings value for markdownExportEnabled must be a boolean",
+			message: "Settings value for portForwardingEnabled must be a boolean",
 		});
 	} finally {
 		if (previous === undefined) delete process.env.CODEX_HELPER_HOME;
@@ -174,15 +174,11 @@ test("dev bridge accepts settings with known removed keys", async () => {
 		expect(result).toEqual({
 			status: "ok",
 			settings: {
-				markdownExportEnabled: true,
-				sessionMoveEnabled: false,
 				portForwardingEnabled: false,
 				portAutoForwardWeb: true,
 				portSameLocalPort: true,
 				hideUsageLimitBannerEnabled: false,
-				markdownFriendlyFilenameEnabled: true,
-				autoNamingMinChars: 8,
-				autoNamingMaxChars: 12,
+				launchAtLoginEnabled: false,
 			},
 		});
 	} finally {
@@ -213,6 +209,29 @@ test("dev bridge accepts usage-limit overlay hide setting", async () => {
 	}
 });
 
+test("dev bridge accepts launch at login setting", async () => {
+	const previous = process.env.CODEX_HELPER_HOME;
+	const root = mkdtempSync(join(tmpdir(), "codex-helper-routes-"));
+	try {
+		process.env.CODEX_HELPER_HOME = root;
+
+		const result = await handleBridgeRequest("/settings/set", {
+			launchAtLoginEnabled: true,
+		});
+
+		expect(result).toMatchObject({
+			status: "ok",
+			settings: {
+				launchAtLoginEnabled: true,
+			},
+		});
+	} finally {
+		if (previous === undefined) delete process.env.CODEX_HELPER_HOME;
+		else process.env.CODEX_HELPER_HOME = previous;
+	}
+});
+
+
 test("dev bridge creates default settings without chat title regeneration", async () => {
 	const previous = process.env.CODEX_HELPER_HOME;
 	const root = mkdtempSync(join(tmpdir(), "codex-helper-routes-"));
@@ -224,36 +243,33 @@ test("dev bridge creates default settings without chat title regeneration", asyn
 		expect(result).toMatchObject({
 			status: "ok",
 			settings: {
-				markdownFriendlyFilenameEnabled: true,
+				portForwardingEnabled: false,
+				hideUsageLimitBannerEnabled: false,
 			},
 		});
 		expect(result).not.toHaveProperty("settings.autoRenameMenuEnabled");
 		expect(JSON.stringify(result)).not.toContain("autoRenameMenuEnabled");
+		expect(JSON.stringify(result)).not.toContain("markdownExportEnabled");
+		expect(JSON.stringify(result)).not.toContain("sessionMoveEnabled");
 	} finally {
 		if (previous === undefined) delete process.env.CODEX_HELPER_HOME;
 		else process.env.CODEX_HELPER_HOME = previous;
 	}
 });
 
-test("dev bridge accepts auto naming settings", async () => {
+test("dev bridge rejects updates to removed session settings", async () => {
 	const previous = process.env.CODEX_HELPER_HOME;
 	const root = mkdtempSync(join(tmpdir(), "codex-helper-routes-"));
 	try {
 		process.env.CODEX_HELPER_HOME = root;
 
 		const result = await handleBridgeRequest("/settings/set", {
-			markdownFriendlyFilenameEnabled: false,
-			autoNamingMinChars: 3,
-			autoNamingMaxChars: 7,
+			markdownExportEnabled: true,
 		});
 
-		expect(result).toMatchObject({
-			status: "ok",
-			settings: {
-				markdownFriendlyFilenameEnabled: false,
-				autoNamingMinChars: 3,
-				autoNamingMaxChars: 7,
-			},
+		expect(result).toEqual({
+			status: "failed",
+			message: "Unknown settings key: markdownExportEnabled",
 		});
 	} finally {
 		if (previous === undefined) delete process.env.CODEX_HELPER_HOME;
@@ -261,49 +277,11 @@ test("dev bridge accepts auto naming settings", async () => {
 	}
 });
 
-test("dev bridge prefers canonical auto naming settings over legacy keys", async () => {
-	const previous = process.env.CODEX_HELPER_HOME;
-	const root = mkdtempSync(join(tmpdir(), "codex-helper-routes-"));
-	try {
-		process.env.CODEX_HELPER_HOME = root;
-		mkdirSync(root, { recursive: true });
-		writeFileSync(
-			join(root, "config.json"),
-			'{ "autoNamingMinWords": 12, "autoNamingMinChars": 3, "autoNamingMaxWords": 18, "autoNamingMaxChars": 7 }',
-			"utf8",
-		);
-
-		const readResult = await handleBridgeRequest("/settings/get", {});
-		const updateResult = await handleBridgeRequest("/settings/set", {
-			autoNamingMinWords: 14,
-			autoNamingMinChars: 4,
-		});
-
-		expect(readResult).toMatchObject({
-			status: "ok",
-			settings: {
-				autoNamingMinChars: 3,
-				autoNamingMaxChars: 7,
-			},
-		});
-		expect(updateResult).toMatchObject({
-			status: "ok",
-			settings: {
-				autoNamingMinChars: 4,
-				autoNamingMaxChars: 7,
-			},
-		});
-	} finally {
-		if (previous === undefined) delete process.env.CODEX_HELPER_HOME;
-		else process.env.CODEX_HELPER_HOME = previous;
-	}
-});
-
-test("dev bridge uses longer friendly timeouts for naming routes", () => {
+test("dev bridge uses the default timeout for remaining routes", () => {
 	expect(bridgeRequestTimeoutMs("/settings/get")).toBe(10000);
-	expect(bridgeRequestTimeoutMs("/export-markdown")).toBe(120000);
+	expect(bridgeRequestTimeoutMs("/export-markdown")).toBe(10000);
 	expect(bridgeRequestTimeoutMessage("/export-markdown")).toContain(
-		"Markdown export is still running after 120s",
+		"timed out after 10000ms",
 	);
 });
 
@@ -314,6 +292,11 @@ test("dev bridge no longer exposes helper session delete lifecycle routes", asyn
 		"/backups/list",
 		"/backups/restore",
 		"/backups/reveal",
+		"/export-markdown",
+		"/fork-thread-project",
+		"/projects/remote-list",
+		"/zed-remote/open",
+		"/zed-remote/status",
 	]) {
 		const result = await handleBridgeRequest(path, {});
 

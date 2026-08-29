@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
 
@@ -9,7 +10,34 @@ import {
 
 const root = "/tmp/codex-helper-root";
 
+test("rust bridge exposes provider management routes", () => {
+	expect(isRustBridgePath("/providers/list")).toBe(true);
+	expect(isRustBridgePath("/providers/save")).toBe(true);
+	expect(isRustBridgePath("/providers/delete")).toBe(true);
+	expect(isRustBridgePath("/providers/activate")).toBe(true);
+	expect(isRustBridgePath("/providers/test")).toBe(true);
+	expect(isRustBridgePath("/providers/models")).toBe(true);
+	expect(isRustBridgePath("/providers/oauth/start")).toBe(true);
+	expect(isRustBridgePath("/providers/oauth/poll")).toBe(true);
+	expect(isRustBridgePath("/providers/oauth/status")).toBe(true);
+});
+
+test("rust bridge starts a dedicated provider proxy process", () => {
+	const source = readFileSync(join(import.meta.dir, "rust-bridge.ts"), "utf8");
+	const cli = readFileSync(
+		join(import.meta.dir, "..", "src-tauri", "src", "bridge_cli.rs"),
+		"utf8",
+	);
+	expect(source).toContain("ensureProviderProxy");
+	expect(source).toContain("--provider-proxy");
+	expect(cli).toContain("--provider-proxy");
+	expect(cli).toContain("run_provider_proxy");
+});
+
 test("rust bridge does not allow helper session delete lifecycle routes", () => {
+	expect(isRustBridgePath("/export-markdown")).toBe(false);
+	expect(isRustBridgePath("/fork-thread-project")).toBe(false);
+	expect(isRustBridgePath("/projects/remote-list")).toBe(false);
 	expect(isRustBridgePath("/delete")).toBe(false);
 	expect(isRustBridgePath("/undo")).toBe(false);
 	expect(isRustBridgePath("/backups/list")).toBe(false);

@@ -16,6 +16,7 @@ name = "codex-helper-bridge"
 path = "src/bridge_cli.rs"
 
 [build-dependencies]
+cc = "1"
 png = "0.17"
 serde_json = "1"
 tauri-build = { version = "2.0.0", features = [] }
@@ -23,18 +24,24 @@ tauri-build = { version = "2.0.0", features = [] }
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
+bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 futures-util = "0.3"
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-rusqlite = { version = "0.32", features = ["bundled"] }
+getrandom = "0.3"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tauri = { version = "2.0.0", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "io-util", "net", "process", "rt-multi-thread", "time"] }
+toml_edit = "0.22"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 
 [dev-dependencies]

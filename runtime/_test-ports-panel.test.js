@@ -133,7 +133,8 @@ test("pinned port forward settings button opens native Helper settings", () => {
   expect(source).toContain("portSameLocalPort");
   expect(source).toContain("portAutoForwardWeb");
   expect(source).toContain('createPortMenuItem("open-settings", "Helper Settings"');
-  expect(source).toContain('await openNativeHelperSettingsFromApp("general")');
+  expect(source).toContain('await openHelperSettingsFromRuntime("general")');
+  expect(source).not.toContain("openNativeHelperSettingsFromApp");
   expect(source).not.toContain("showHelperSettingsDialog");
   expect(source).toContain("data-codex-helper-port-settings-button");
 });

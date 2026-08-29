@@ -76,3 +76,27 @@
       helperPanel.remove();
     }
   }
+
+  function showHelperToast(message, options) {
+    const toastOptions = options || {};
+    document.querySelectorAll(`[${helperToastAttribute}]`).forEach((node) => {
+      node.remove();
+    });
+    const toast = document.createElement("div");
+    toast.setAttribute(helperToastAttribute, "true");
+    toast.setAttribute("role", "status");
+    toast.setAttribute("aria-live", "polite");
+    if (toastOptions.loading) {
+      toast.setAttribute("data-codex-helper-toast-state", "loading");
+      const spinner = document.createElement("span");
+      spinner.className = "codex-helper-toast-spinner";
+      spinner.setAttribute("aria-hidden", "true");
+      const label = document.createElement("span");
+      label.textContent = message;
+      toast.replaceChildren(spinner, label);
+    } else {
+      toast.textContent = message;
+    }
+    document.body.appendChild(toast);
+    if (!toastOptions.persist) setTimeout(() => toast.remove(), 8000);
+  }

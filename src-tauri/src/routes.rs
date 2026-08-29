@@ -5,17 +5,30 @@ use tauri_plugin_opener::{open_path, open_url, reveal_item_in_dir};
 
 use crate::bridge::{BridgeCaller, BridgeRequest};
 use crate::cdp::{list_targets, CdpTarget};
+use crate::codex_live::default_codex_home;
+use crate::endpoint;
 use crate::logging::DiagnosticLogger;
 use crate::ports::{
     discover_remote_listening_ports, discovery_request_from_payload, request_from_payload,
     PortForwardManager,
 };
-use crate::session_actions::{export_markdown_response, fork_thread_project_response};
+use crate::provider_oauth::{oauth_status, poll_oauth, start_oauth, OAuthKind};
+use crate::provider_proxy::{
+    fetch_provider_models, global_provider_proxy, test_provider_connection,
+};
+use crate::provider_usage::{
+    attach_usage_page_urls, query_provider_usage, usage_page_url_for_store,
+    validated_usage_page_url,
+};
+use crate::providers::{
+    activate_provider, delete_provider, list_response, provider_api_key, read_store,
+    reorder_providers, upsert_provider, LiveRefresh,
+};
 use crate::settings::{read_settings, update_settings};
+use crate::settings_window::{settings_page_id, OpenSettings, SETTINGS_WINDOW_TARGET_ID};
 use crate::state_dir::StateDir;
 use crate::zed::{
-    fallback_open_request_response, open_zed_remote, remote_projects_response,
-    resolve_ssh_target_for_host_id, resolve_ssh_target_response, zed_remote_status,
+    fallback_open_request_response, resolve_ssh_target_for_host_id, resolve_ssh_target_response,
 };
 
 #[derive(Clone)]
@@ -25,6 +38,7 @@ pub struct BridgeContext {
     pub debug_port: u16,
     pub port_manager: PortForwardManager,
     pub runtime_activity: RuntimeActivity,
+    pub open_settings: Option<OpenSettings>,
 }
 
 #[derive(Clone, Default)]
@@ -55,12 +69,33 @@ impl RuntimeActivity {
         });
     }
 
-    #[cfg(test)]
     pub fn last(&self) -> Option<RuntimeActivitySnapshot> {
         self.inner
             .lock()
             .expect("runtime activity poisoned")
             .clone()
+    }
+}
+
+fn devtools_target_id(ctx: &BridgeContext, caller: &BridgeCaller) -> String {
+    if caller.target_id == SETTINGS_WINDOW_TARGET_ID {
+        return ctx
+            .runtime_activity
+            .last()
+            .map(|snapshot| snapshot.target_id)
+            .unwrap_or_default();
+    }
+    caller.target_id.clone()
+}
+
+fn settings_only_action(caller: &BridgeCaller) -> Option<Value> {
+    if caller.target_id == SETTINGS_WINDOW_TARGET_ID {
+        None
+    } else {
+        Some(json!({
+            "status": "failed",
+            "message": "This action is only available in Helper Settings",
+        }))
     }
 }
 
@@ -81,7 +116,10 @@ pub async fn handle_bridge_request(ctx: BridgeContext, request: BridgeRequest) -
                 .get("event")
                 .and_then(Value::as_str)
                 .unwrap_or("renderer.event");
-            match ctx.logger.append(event, payload.clone()) {
+            let detail = compact_diagnostic_detail(
+                payload.get("detail").cloned().unwrap_or_else(|| json!({})),
+            );
+            match ctx.logger.append(event, detail) {
                 Ok(()) => json!({ "status": "ok" }),
                 Err(error) => json!({ "status": "failed", "message": error.to_string() }),
             }
@@ -98,6 +136,21 @@ pub async fn handle_bridge_request(ctx: BridgeContext, request: BridgeRequest) -
             }),
             Err(error) => json!({ "status": "failed", "message": error.to_string() }),
         },
+        "/settings/open" => match &ctx.open_settings {
+            Some(open) => match open(settings_page_id(
+                payload
+                    .get("page")
+                    .and_then(Value::as_str)
+                    .unwrap_or("general"),
+            )) {
+                Ok(()) => json!({ "status": "ok" }),
+                Err(message) => json!({ "status": "failed", "message": message }),
+            },
+            None => json!({
+                "status": "failed",
+                "message": "Helper Settings window is unavailable",
+            }),
+        },
         "/settings/get" => match read_settings(&ctx.state_dir.config_path) {
             Ok(settings) => json!({ "status": "ok", "settings": settings }),
             Err(error) => json!({ "status": "failed", "message": error.to_string() }),
@@ -106,15 +159,133 @@ pub async fn handle_bridge_request(ctx: BridgeContext, request: BridgeRequest) -
             Ok(settings) => json!({ "status": "ok", "settings": settings }),
             Err(error) => json!({ "status": "failed", "message": error.to_string() }),
         },
+        "/providers/list" => providers_list_response(&ctx.state_dir.root),
+        "/providers/save" => {
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                let response = providers_save_response(&ctx.state_dir.root, &payload);
+                log_provider_event(&ctx.logger, "providers.saved", &response);
+                response
+            }
+        }
+        "/providers/delete" => {
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                let response = providers_delete_response(&ctx.state_dir.root, &payload);
+                log_provider_event(&ctx.logger, "providers.deleted", &response);
+                response
+            }
+        }
+        "/providers/activate" => {
+            let response = providers_activate_response(&ctx.state_dir.root, &payload);
+            log_provider_event(&ctx.logger, "providers.activated", &response);
+            response
+        }
+        "/providers/reorder" => {
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                let response = providers_reorder_response(&ctx.state_dir.root, &payload);
+                log_provider_event(&ctx.logger, "providers.reordered", &response);
+                response
+            }
+        }
+        "/providers/test" => {
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                let response = providers_test_response(&ctx.state_dir.root, &payload).await;
+                log_provider_event(&ctx.logger, "providers.tested", &response);
+                response
+            }
+        }
+        "/providers/models" => {
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                let response = providers_models_response(&ctx.state_dir.root, &payload).await;
+                log_provider_event(&ctx.logger, "providers.models_fetched", &response);
+                response
+            }
+        }
+        "/providers/oauth/start" => {
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                let response = providers_oauth_start_response(&ctx.state_dir.root, &payload).await;
+                log_provider_event(&ctx.logger, "providers.oauth_started", &response);
+                response
+            }
+        }
+        "/providers/oauth/poll" => {
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                let response = providers_oauth_poll_response(&ctx.state_dir.root, &payload).await;
+                log_provider_event(&ctx.logger, "providers.oauth_polled", &response);
+                response
+            }
+        }
+        "/providers/oauth/status" => {
+            let response = providers_oauth_status_response(&ctx.state_dir.root, &payload);
+            log_provider_event(&ctx.logger, "providers.oauth_status", &response);
+            response
+        }
+        "/providers/usage" => {
+            let response = providers_usage_response(&ctx.state_dir.root, &payload).await;
+            log_provider_event(&ctx.logger, "providers.usage", &response);
+            response
+        }
+        "/providers/usage/open" => {
+            let response = providers_usage_open_response(&ctx.state_dir.root, &payload);
+            log_provider_event(&ctx.logger, "providers.usage_open", &response);
+            response
+        }
+        "/providers/secret" => {
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                let response = providers_secret_response(&ctx.state_dir.root, &payload);
+                log_provider_event(&ctx.logger, "providers.secret", &response);
+                response
+            }
+        }
+        "/endpoint/get" => {
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                endpoint_get_response(&ctx.state_dir.root)
+            }
+        }
+        "/endpoint/keys" => {
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                let response = endpoint_create_key_response(&ctx.state_dir.root, &payload);
+                log_provider_event(&ctx.logger, "endpoint.key_created", &response);
+                response
+            }
+        }
+        "/endpoint/keys/delete" => {
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                let response = endpoint_delete_key_response(&ctx.state_dir.root, &payload);
+                log_provider_event(&ctx.logger, "endpoint.key_deleted", &response);
+                response
+            }
+        }
         "/diagnostics/read-latest" => read_latest_log_response(&ctx.logger),
         "/diagnostics/reveal-log" => reveal_path_response(ctx.logger.log_path()),
         "/logs/reveal" => reveal_path_response(&ctx.state_dir.logs_dir),
         "/scripts/reveal" => reveal_path_response(&ctx.state_dir.scripts_dir),
         "/state/reveal" => reveal_path_response(&ctx.state_dir.root),
-        "/devtools/open" => open_devtools_response(ctx.debug_port, &caller.target_id).await,
+        "/devtools/open" => {
+            open_devtools_response(ctx.debug_port, &devtools_target_id(&ctx, &caller)).await
+        }
         "/url/open-external" => open_external_local_url_response(&payload),
-        "/export-markdown" => export_markdown_response(&payload),
-        "/fork-thread-project" => fork_thread_project_response(&payload),
         "/ports/list" => ctx.port_manager.list().await,
         "/ports/discover" => match discovery_request_from_payload(&payload) {
             Ok(request) => match resolve_ssh_target_for_host_id(&request.host_id, None) {
@@ -143,11 +314,8 @@ pub async fn handle_bridge_request(ctx: BridgeContext, request: BridgeRequest) -
             let id = payload.get("id").and_then(Value::as_str).unwrap_or("");
             ctx.port_manager.stop(id).await
         }
-        "/zed-remote/status" => zed_remote_status(),
-        "/projects/remote-list" => remote_projects_response(&payload),
         "/zed-remote/resolve-host" => resolve_ssh_target_response(&payload),
         "/zed-remote/fallback-request" => fallback_open_request_response(&payload),
-        "/zed-remote/open" => open_zed_remote(&payload),
         _ => json!({
             "status": "failed",
             "message": format!("Unknown Codex Helper bridge path: {path}")
@@ -176,11 +344,19 @@ fn log_bridge_request(
     );
 }
 
-fn should_log_bridge_request(path: &str, status: &str) -> bool {
-    if status != "ok" {
-        return true;
+fn should_log_bridge_request(_path: &str, status: &str) -> bool {
+    status != "ok"
+}
+
+fn compact_diagnostic_detail(detail: Value) -> Value {
+    let serialized = detail.to_string();
+    if serialized.len() <= 2048 {
+        return detail;
     }
-    !matches!(path, "/ports/list" | "/runtime/activity")
+    json!({
+        "truncated": true,
+        "preview": serialized.chars().take(2048).collect::<String>(),
+    })
 }
 
 fn bridge_request_diagnostic(path: &str, caller: &BridgeCaller, response: &Value) -> Value {
@@ -210,20 +386,347 @@ fn user_script_inventory(state_dir: &StateDir) -> anyhow::Result<Vec<String>> {
 }
 
 fn read_latest_log_response(logger: &DiagnosticLogger) -> Value {
-    match std::fs::read_to_string(logger.log_path()) {
-        Ok(contents) => {
-            let lines = contents.lines().rev().take(80).collect::<Vec<_>>();
-            let latest = lines.into_iter().rev().collect::<Vec<_>>().join("\n");
-            json!({
-                "status": "ok",
-                "path": logger.log_path().to_string_lossy(),
-                "contents": latest,
-            })
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({
+    match logger.read_latest() {
+        Ok(latest) => json!({
             "status": "ok",
-            "path": logger.log_path().to_string_lossy(),
-            "contents": "",
+            "path": latest.path.to_string_lossy(),
+            "records": latest
+                .records
+                .iter()
+                .map(|record| json!({
+                    "timestamp": record.timestamp,
+                    "event": record.event,
+                    "summary": record.summary,
+                }))
+                .collect::<Vec<_>>(),
+        }),
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
+}
+
+fn endpoint_get_response(state_root: &std::path::Path) -> Value {
+    match endpoint::read_store(state_root) {
+        Ok(store) => endpoint_store_response(state_root, store),
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
+}
+
+fn endpoint_create_key_response(state_root: &std::path::Path, payload: &Value) -> Value {
+    match endpoint::create_key(state_root, payload) {
+        Ok(store) => endpoint_store_response(state_root, store),
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
+}
+
+fn endpoint_delete_key_response(state_root: &std::path::Path, payload: &Value) -> Value {
+    match endpoint::delete_key(state_root, payload) {
+        Ok(store) => endpoint_store_response(state_root, store),
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
+}
+
+fn endpoint_store_response(state_root: &std::path::Path, store: endpoint::EndpointStore) -> Value {
+    let provider = global_provider_proxy()
+        .active_provider()
+        .ok()
+        .flatten()
+        .or_else(|| {
+            crate::providers::read_store(state_root)
+                .ok()
+                .and_then(|store| {
+                    let active_id = store.active_id.clone();
+                    store
+                        .providers
+                        .into_iter()
+                        .find(|item| item.id == active_id)
+                })
+        });
+    match global_provider_proxy().base_url() {
+        Ok(url) => endpoint::list_response(&store, &url, provider.as_ref()),
+        Err(error) => {
+            let mut response = endpoint::list_response(&store, "", provider.as_ref());
+            response["proxyError"] = json!(error.to_string());
+            response
+        }
+    }
+}
+
+fn providers_list_response(state_root: &std::path::Path) -> Value {
+    match read_store(state_root) {
+        Ok(store) => provider_store_response(store),
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
+}
+
+fn provider_store_response(store: crate::providers::ProviderStore) -> Value {
+    let proxy = global_provider_proxy();
+    proxy.set_store(store.clone());
+    let mut response = match proxy.base_url() {
+        Ok(url) => list_response(&store, &url),
+        Err(error) => {
+            let mut response = list_response(&store, "");
+            response["proxyError"] = json!(error.to_string());
+            response
+        }
+    };
+    attach_usage_page_urls(&mut response, &store);
+    response
+}
+
+fn providers_save_response(state_root: &std::path::Path, payload: &Value) -> Value {
+    match upsert_provider(state_root, payload) {
+        Ok((store, saved_id)) => {
+            if store.active_id == saved_id {
+                return project_named_provider(state_root, &saved_id.clone(), Some(saved_id));
+            }
+            let mut response = provider_store_response(store);
+            response["savedId"] = json!(saved_id);
+            response
+        }
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
+}
+
+fn providers_delete_response(state_root: &std::path::Path, payload: &Value) -> Value {
+    let id = payload
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    match delete_provider(state_root, id, &default_codex_home()) {
+        Ok(store) => provider_store_response(store),
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
+}
+
+fn providers_activate_response(state_root: &std::path::Path, payload: &Value) -> Value {
+    let id = payload
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    activate_provider_response(state_root, id)
+}
+
+fn providers_reorder_response(state_root: &std::path::Path, payload: &Value) -> Value {
+    match reorder_providers(state_root, payload) {
+        Ok(store) => provider_store_response(store),
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
+}
+
+pub(crate) fn activate_provider_response(state_root: &std::path::Path, id: &str) -> Value {
+    project_named_provider(state_root, id, None)
+}
+
+fn project_named_provider(
+    state_root: &std::path::Path,
+    id: &str,
+    saved_id: Option<String>,
+) -> Value {
+    let proxy_url = global_provider_proxy()
+        .base_url()
+        .map_err(|error| error.to_string())
+        .unwrap_or_default();
+    match activate_provider(state_root, id, &proxy_url, &default_codex_home()) {
+        Ok((store, refresh)) => {
+            let mut response = provider_store_response(store);
+            if let Some(saved_id) = saved_id {
+                response["savedId"] = json!(saved_id);
+            }
+            attach_refresh(response, refresh)
+        }
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
+}
+
+fn attach_refresh(mut response: Value, refresh: LiveRefresh) -> Value {
+    response["refresh"] = json!(refresh.as_str());
+    response
+}
+
+fn parse_oauth_kind(payload: &Value) -> Result<OAuthKind, String> {
+    OAuthKind::parse(
+        payload
+            .get("kind")
+            .or_else(|| payload.get("authMode"))
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    )
+    .map_err(|error| error.to_string())
+}
+
+async fn providers_oauth_start_response(state_root: &std::path::Path, payload: &Value) -> Value {
+    let kind = match parse_oauth_kind(payload) {
+        Ok(kind) => kind,
+        Err(message) => return json!({ "status": "failed", "message": message }),
+    };
+    match start_oauth(state_root, kind).await {
+        Ok(mut value) => {
+            if let Some(uri) = value
+                .get("verificationUri")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            {
+                match open_url(&uri, None::<&str>) {
+                    Ok(_) => {
+                        value["browserOpened"] = json!(true);
+                    }
+                    Err(error) => {
+                        value["browserOpened"] = json!(false);
+                        value["browserError"] = json!(error.to_string());
+                    }
+                }
+            }
+            value
+        }
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
+}
+
+async fn providers_oauth_poll_response(state_root: &std::path::Path, payload: &Value) -> Value {
+    let kind = match parse_oauth_kind(payload) {
+        Ok(kind) => kind,
+        Err(message) => return json!({ "status": "failed", "message": message }),
+    };
+    let device_code = payload
+        .get("deviceCode")
+        .or_else(|| payload.get("device_code"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if device_code.is_empty() {
+        return json!({ "status": "failed", "message": "OAuth device code is required" });
+    }
+    match poll_oauth(state_root, kind, device_code).await {
+        Ok(value) => value,
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
+}
+
+fn providers_oauth_status_response(state_root: &std::path::Path, payload: &Value) -> Value {
+    match parse_oauth_kind(payload) {
+        Ok(kind) => oauth_status(state_root, kind),
+        Err(message) => json!({ "status": "failed", "message": message }),
+    }
+}
+
+async fn providers_usage_response(state_root: &std::path::Path, payload: &Value) -> Value {
+    let id = payload
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    query_provider_usage(state_root, id).await
+}
+
+fn providers_usage_open_response(state_root: &std::path::Path, payload: &Value) -> Value {
+    let explicit_url = payload
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let url = if !explicit_url.is_empty() {
+        match validated_usage_page_url(explicit_url) {
+            Ok(url) => url,
+            Err(message) => return json!({ "status": "failed", "message": message }),
+        }
+    } else {
+        let id = payload
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if id.is_empty() {
+            return json!({ "status": "failed", "message": "Provider id is required" });
+        }
+        let store = match read_store(state_root) {
+            Ok(store) => store,
+            Err(error) => return json!({ "status": "failed", "message": error.to_string() }),
+        };
+        match usage_page_url_for_store(&store, id) {
+            Ok(url) => url,
+            Err(message) => return json!({ "status": "failed", "message": message }),
+        }
+    };
+    match open_url(&url, None::<&str>) {
+        Ok(_) => json!({ "status": "ok", "url": url }),
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
+}
+
+fn providers_secret_response(state_root: &std::path::Path, payload: &Value) -> Value {
+    let id = payload
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    match provider_api_key(state_root, id) {
+        Ok(api_key) => json!({ "status": "ok", "apiKey": api_key }),
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
+}
+
+fn log_provider_event(logger: &crate::logging::DiagnosticLogger, event: &str, response: &Value) {
+    let status = response
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let keep = status != "ok"
+        || matches!(
+            event,
+            "providers.saved"
+                | "providers.deleted"
+                | "providers.activated"
+                | "providers.reordered"
+                | "endpoint.key_created"
+                | "endpoint.key_deleted"
+        );
+    if !keep {
+        return;
+    }
+    let mut detail = serde_json::Map::new();
+    if let Some(status) = response.get("status") {
+        detail.insert("status".to_string(), status.clone());
+    }
+    if let Some(id) = response
+        .get("savedId")
+        .or_else(|| response.get("activeId"))
+        .or_else(|| response.get("id"))
+    {
+        detail.insert("id".to_string(), id.clone());
+    }
+    if let Some(message) = response.get("message") {
+        detail.insert("message".to_string(), message.clone());
+    }
+    let _ = logger.append(event, Value::Object(detail));
+}
+
+async fn providers_models_response(state_root: &std::path::Path, payload: &Value) -> Value {
+    match fetch_provider_models(state_root, payload).await {
+        Ok(models) => json!({
+            "status": "ok",
+            "models": models,
+            "message": if models.is_empty() {
+                "No models returned".to_string()
+            } else {
+                format!("{} models", models.len())
+            },
+        }),
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
+}
+
+async fn providers_test_response(state_root: &std::path::Path, payload: &Value) -> Value {
+    match test_provider_connection(state_root, payload).await {
+        Ok((status_code, preview)) => json!({
+            "status": if (200..300).contains(&status_code) { "ok" } else { "failed" },
+            "statusCode": status_code,
+            "message": if preview.is_empty() {
+                format!("HTTP {status_code}")
+            } else {
+                format!("HTTP {status_code}: {preview}")
+            },
         }),
         Err(error) => json!({ "status": "failed", "message": error.to_string() }),
     }
@@ -516,6 +1019,31 @@ mod tests {
     }
 
     #[test]
+    fn settings_only_action_allows_settings_window() {
+        let settings = BridgeCaller {
+            target_id: SETTINGS_WINDOW_TARGET_ID.to_string(),
+            helper_instance_id: SETTINGS_WINDOW_TARGET_ID.to_string(),
+            href: "helper://settings".to_string(),
+            has_focus: true,
+            visibility_state: "visible".to_string(),
+        };
+        assert!(settings_only_action(&settings).is_none());
+        let renderer = BridgeCaller {
+            target_id: "page-1".to_string(),
+            helper_instance_id: "helper-1".to_string(),
+            href: "app://-/index.html".to_string(),
+            has_focus: true,
+            visibility_state: "visible".to_string(),
+        };
+        let denied = settings_only_action(&renderer).expect("denied");
+        assert_eq!(denied["status"], "failed");
+        assert!(denied["message"]
+            .as_str()
+            .unwrap()
+            .contains("Helper Settings"));
+    }
+
+    #[test]
     fn runtime_activity_records_caller_identity() {
         let activity = RuntimeActivity::default();
         let caller = BridgeCaller {
@@ -567,7 +1095,8 @@ mod tests {
         assert!(!should_log_bridge_request("/ports/list", "ok"));
         assert!(!should_log_bridge_request("/runtime/activity", "ok"));
         assert!(should_log_bridge_request("/ports/list", "failed"));
-        assert!(should_log_bridge_request("/backend/status", "ok"));
+        assert!(!should_log_bridge_request("/backend/status", "ok"));
+        assert!(should_log_bridge_request("/backend/status", "failed"));
     }
 
     #[test]

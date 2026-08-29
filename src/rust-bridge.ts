@@ -1,5 +1,6 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { createConnection } from "node:net";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
@@ -14,13 +15,58 @@ type JsonValue =
 	| { [key: string]: JsonValue };
 
 const RUST_BRIDGE_PATHS = new Set([
-	"/export-markdown",
-	"/fork-thread-project",
-	"/projects/remote-list",
+	"/providers/list",
+	"/providers/save",
+	"/providers/delete",
+	"/providers/activate",
+	"/providers/test",
+	"/providers/models",
+	"/providers/oauth/start",
+	"/providers/oauth/poll",
+	"/providers/oauth/status",
 ]);
 
 export function isRustBridgePath(path: string): boolean {
 	return RUST_BRIDGE_PATHS.has(path);
+}
+
+const PROVIDER_PROXY_PORT = 3721;
+
+function providerProxyListening(timeoutMs = 200): Promise<boolean> {
+	return new Promise((resolve) => {
+		const socket = createConnection({ host: "127.0.0.1", port: PROVIDER_PROXY_PORT });
+		const timer = setTimeout(() => {
+			socket.destroy();
+			resolve(false);
+		}, timeoutMs);
+		socket.once("connect", () => {
+			clearTimeout(timer);
+			socket.end();
+			resolve(true);
+		});
+		socket.once("error", () => {
+			clearTimeout(timer);
+			resolve(false);
+		});
+	});
+}
+
+export async function ensureProviderProxy(): Promise<void> {
+	if (await providerProxyListening()) return;
+	const binary = rustBridgeBinaryPath();
+	const child = spawn(binary, ["--provider-proxy"], {
+		detached: true,
+		stdio: "ignore",
+	});
+	child.unref();
+	const deadline = Date.now() + 5000;
+	while (Date.now() < deadline) {
+		if (await providerProxyListening()) return;
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+	throw new Error(
+		`Failed to start provider proxy on 127.0.0.1:${PROVIDER_PROXY_PORT}`,
+	);
 }
 
 function repoRoot(): string {
@@ -113,6 +159,9 @@ export async function invokeRustBridge(
 	path: string,
 	payload: Record<string, JsonValue>,
 ): Promise<JsonValue> {
+	if (path.startsWith("/providers/")) {
+		await ensureProviderProxy();
+	}
 	const binary = rustBridgeBinaryPath();
 	const { stdout, stderr } = await execFileAsync(binary, [
 		path,

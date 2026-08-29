@@ -4,8 +4,6 @@
   "styles.js",
   "settings.js",
   "usage-banner.js",
-  "native-settings.js",
-  "sessions.js",
   "ports.js",
   "bootstrap.js"
 ]

@@ -20,10 +20,8 @@ import { launchSystemOpen } from "./system-open";
 
 import {
 	fallbackOpenRequestResponse,
-	openZedRemote,
 	resolveSshTargetForHostId,
 	resolveSshTargetResponse,
-	zedRemoteStatus,
 } from "./zed";
 
 type JsonValue =
@@ -43,33 +41,31 @@ export type BridgeCaller = {
 };
 
 type HelperSettings = {
-	markdownExportEnabled: boolean;
-	sessionMoveEnabled: boolean;
-	markdownFriendlyFilenameEnabled: boolean;
-	autoNamingMinChars: number;
-	autoNamingMaxChars: number;
 	portForwardingEnabled: boolean;
 	portAutoForwardWeb: boolean;
 	portSameLocalPort: boolean;
 	hideUsageLimitBannerEnabled: boolean;
+	launchAtLoginEnabled: boolean;
 };
 type HelperSettingKey = keyof HelperSettings;
-type AutoNamingAliasKey = "autoNamingMinWords" | "autoNamingMaxWords";
 
 const defaultSettings: HelperSettings = {
-	markdownExportEnabled: false,
-	sessionMoveEnabled: false,
-	markdownFriendlyFilenameEnabled: true,
-	autoNamingMinChars: 4,
-	autoNamingMaxChars: 10,
 	portForwardingEnabled: false,
 	portAutoForwardWeb: true,
 	portSameLocalPort: true,
 	hideUsageLimitBannerEnabled: false,
+	launchAtLoginEnabled: false,
 };
 const legacySettingsKeys = new Set([
 	"sessionDeleteEnabled",
 	"autoRenameMenuEnabled",
+	"markdownExportEnabled",
+	"sessionMoveEnabled",
+	"markdownFriendlyFilenameEnabled",
+	"autoNamingMinChars",
+	"autoNamingMaxChars",
+	"autoNamingMinWords",
+	"autoNamingMaxWords",
 ]);
 
 const portManager = new PortForwardManager();
@@ -146,7 +142,6 @@ function readSettings(): HelperSettings {
 		if (legacySettingsKeys.has(key)) continue;
 		throw new Error(`Unknown settings key: ${key}`);
 	}
-	validateAutoNamingRange(next);
 	return next;
 }
 
@@ -158,7 +153,6 @@ function updateSettings(payload: Record<string, JsonValue>): HelperSettings {
 			throw new Error(`Unknown settings key: ${key}`);
 		}
 	}
-	validateAutoNamingRange(next);
 	writeFileSync(
 		helperConfigPath(),
 		`${JSON.stringify(next, null, 2)}\n`,
@@ -169,19 +163,12 @@ function updateSettings(payload: Record<string, JsonValue>): HelperSettings {
 
 function applySettingsEntry(
 	settings: HelperSettings,
-	source: Record<string, JsonValue>,
+	_source: Record<string, JsonValue>,
 	key: string,
 	value: JsonValue,
 ): boolean {
-	if (isHelperSettingKey(key)) {
-		setSettingValue(settings, key, value);
-		return true;
-	}
-	if (!isAutoNamingAliasKey(key)) return false;
-	const canonicalAutoNamingKey = canonicalAutoNamingSettingKey(key);
-	if (!Object.hasOwn(source, canonicalAutoNamingKey)) {
-		setSettingValue(settings, key, value);
-	}
+	if (!isHelperSettingKey(key)) return false;
+	setSettingValue(settings, key, value);
 	return true;
 }
 
@@ -189,74 +176,15 @@ function isHelperSettingKey(key: string): key is HelperSettingKey {
 	return Object.hasOwn(defaultSettings, key);
 }
 
-function isAutoNamingAliasKey(key: string): key is AutoNamingAliasKey {
-	return key === "autoNamingMinWords" || key === "autoNamingMaxWords";
-}
-
-function canonicalAutoNamingSettingKey(
-	key: AutoNamingAliasKey,
-): HelperSettingKey {
-	if (key === "autoNamingMinWords") return "autoNamingMinChars";
-	return "autoNamingMaxChars";
-}
-
 function setSettingValue(
 	settings: HelperSettings,
-	key: HelperSettingKey | AutoNamingAliasKey,
+	key: HelperSettingKey,
 	value: JsonValue,
 ): void {
-	if (
-		key === "autoNamingMinChars" ||
-		key === "autoNamingMaxChars" ||
-		key === "autoNamingMinWords" ||
-		key === "autoNamingMaxWords"
-	) {
-		if (!Number.isInteger(value)) {
-			throw new Error(`Settings value for ${key} must be an integer`);
-		}
-		const count = Number(value);
-		if (count < 1 || count > 20) {
-			throw new Error(`Settings value for ${key} must be between 1 and 20`);
-		}
-		if (key === "autoNamingMinChars" || key === "autoNamingMinWords")
-			settings.autoNamingMinChars = count;
-		else settings.autoNamingMaxChars = count;
-		return;
-	}
 	if (typeof value !== "boolean") {
 		throw new Error(`Settings value for ${key} must be a boolean`);
 	}
-	switch (key) {
-		case "markdownExportEnabled":
-			settings.markdownExportEnabled = value;
-			return;
-		case "sessionMoveEnabled":
-			settings.sessionMoveEnabled = value;
-			return;
-		case "markdownFriendlyFilenameEnabled":
-			settings.markdownFriendlyFilenameEnabled = value;
-			return;
-		case "portForwardingEnabled":
-			settings.portForwardingEnabled = value;
-			return;
-		case "portAutoForwardWeb":
-			settings.portAutoForwardWeb = value;
-			return;
-		case "portSameLocalPort":
-			settings.portSameLocalPort = value;
-			return;
-		case "hideUsageLimitBannerEnabled":
-			settings.hideUsageLimitBannerEnabled = value;
-			return;
-	}
-}
-
-function validateAutoNamingRange(settings: HelperSettings): void {
-	if (settings.autoNamingMinChars > settings.autoNamingMaxChars) {
-		throw new Error(
-			"autoNamingMinChars must be less than or equal to autoNamingMaxChars",
-		);
-	}
+	settings[key] = value;
 }
 
 function listUserScripts(): string[] {
@@ -268,8 +196,10 @@ function listUserScripts(): string[] {
 function readLatestLogContents(): string {
 	try {
 		const contents = readFileSync(logPath(), "utf8");
-		const lines = contents.split("\n").filter(Boolean);
-		return lines.slice(-80).join("\n");
+		const clipped =
+			contents.length > 128 * 1024 ? contents.slice(-128 * 1024) : contents;
+		const lines = clipped.split("\n").filter(Boolean);
+		return lines.slice(-50).join("\n");
 	} catch {
 		return "";
 	}
@@ -460,14 +390,10 @@ export async function handleBridgeRequest(
 			const id = typeof payload.id === "string" ? payload.id : "";
 			return portManager.stop(id);
 		}
-		case "/zed-remote/status":
-			return zedRemoteStatus();
 		case "/zed-remote/resolve-host":
 			return resolveSshTargetResponse(payload);
 		case "/zed-remote/fallback-request":
 			return fallbackOpenRequestResponse();
-		case "/zed-remote/open":
-			return openZedRemote(payload);
 		default:
 			return {
 				status: "failed",

@@ -2829,7 +2829,7 @@ async function handlePortCommand(button) {
   }
   if (command === "open-settings") {
     closePortForwardRowMenu();
-    await openNativeHelperSettingsFromApp("general");
+    await openHelperSettingsFromRuntime("general");
     return;
   }
   if (command === "show-mapping-menu") {

@@ -23,7 +23,7 @@ test("runtime hides usage-limit overlays behind an explicit setting", () => {
 test("usage-limit overlay matching normalizes curly apostrophes", () => {
   expect(source).toContain("\\u2018");
   expect(source).toContain("\\u2019");
-  expect(source).toContain("You're out of Codex and Work usage");
+  expect(source).toContain("you're out of codex");
 });
 
 test("usage-limit overlay hide does not claim to reset account limits", () => {

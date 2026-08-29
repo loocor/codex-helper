@@ -68,7 +68,6 @@ mod tests {
         let state_dir = StateDir::init_at(root).expect("state dir");
         let settings = settings::read_settings(&state_dir.config_path).expect("settings");
 
-        assert!(!settings.markdown_export_enabled);
-        assert!(!settings.session_move_enabled);
+        assert!(!settings.port_forwarding_enabled);
     }
 }

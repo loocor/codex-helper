@@ -13,10 +13,6 @@ function installObserver() {
   const observer = new MutationObserver(() => {
     maintainPortsPanel();
     maintainUsageLimitBanner();
-    installNativeHelperSettingsGroup();
-    if (helperNativeSettingsRoot && !helperNativeSettingsRoot.isConnected) {
-      clearNativeHelperSettingsPage();
-    }
   });
   observer.observe(document.documentElement, {
     childList: true,
@@ -46,30 +42,6 @@ function onHelperRuntimeClick(event) {
   ) {
     closePortForwardRowMenu();
   }
-  const nativeSettingsEntry = target.closest(
-    `[${helperNativeSettingsEntryAttribute}]`,
-  );
-  if (nativeSettingsEntry instanceof HTMLElement) {
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation();
-    const pageId =
-      nativeSettingsEntry.getAttribute(helperNativeSettingsEntryAttribute) ||
-      "general";
-    try {
-      openNativeHelperSettingsPage(pageId);
-    } catch (error) {
-      showHelperToast(error?.message || String(error));
-      logDiagnostic("settings_open_failed", {
-        page: pageId,
-        error: error?.message || String(error),
-      });
-    }
-    return;
-  }
-  if (helperNativeSettingsRoot && isNativeSettingsNavigationClick(target)) {
-    clearNativeHelperSettingsPage();
-  }
   const portCommand = target.closest(`[${helperPortCommandAttribute}]`);
   if (portCommand instanceof HTMLElement) {
     event.preventDefault();
@@ -89,6 +61,7 @@ function onHelperRuntimeClick(event) {
   event.stopPropagation();
   handleHelperCommand(
     command.getAttribute(helperCommandAttribute) || "",
+    command,
   ).catch((error) => {
     setHelperText(
       "[data-codex-helper-backend]",
@@ -101,26 +74,6 @@ function onHelperRuntimeClick(event) {
   });
 }
 
-function replaySessionContextMenu(event, target) {
-  target.dispatchEvent(
-    new MouseEvent("contextmenu", {
-      bubbles: true,
-      cancelable: true,
-      view: window,
-      clientX: event.clientX,
-      clientY: event.clientY,
-      screenX: event.screenX,
-      screenY: event.screenY,
-      button: event.button,
-      buttons: event.buttons,
-      ctrlKey: event.ctrlKey,
-      shiftKey: event.shiftKey,
-      altKey: event.altKey,
-      metaKey: event.metaKey,
-    }),
-  );
-}
-
 function onHelperRuntimeContextMenu(event) {
   const target = event.target;
   if (!(target instanceof Element)) return;
@@ -129,30 +82,7 @@ function onHelperRuntimeContextMenu(event) {
     event.preventDefault();
     event.stopImmediatePropagation();
     openPortLocalUrlMenu(portLocalUrl, event);
-    return;
   }
-  const row = sessionRowFromTarget(target);
-  if (!(row instanceof HTMLElement)) return;
-  if (!sessionContextMenuReady() && !sessionContextMenuReplayInFlight) {
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    sessionContextMenuReplayInFlight = true;
-    prepareSessionContextMenu()
-      .catch((error) => {
-        logDiagnostic("session_menu_prepare_failed", {
-          error: error?.message || String(error),
-        });
-      })
-      .finally(() => {
-        try {
-          if (target.isConnected) replaySessionContextMenu(event, target);
-        } finally {
-          sessionContextMenuReplayInFlight = false;
-        }
-      });
-    return;
-  }
-  trackSessionContextMenu(row);
 }
 
 function onHelperRuntimeKeydown(event) {
@@ -265,8 +195,6 @@ window.__codexHelperRuntimeCleanup = () => {
   if (helperRuntimeObserver) helperRuntimeObserver.disconnect();
   closePortForwardRowMenu();
   closePortForwardDialog();
-  clearNativeHelperSettingsPage();
-  if (sessionContextMenuMapRestore) sessionContextMenuMapRestore();
   removeHelperRuntimeEventListeners();
   pendingPortScan = 0;
   maintainPortsPanelTimer = 0;
@@ -277,18 +205,22 @@ window.__codexHelperRuntimeCleanup = () => {
   lastRuntimeActivityAt = 0;
   lastRemotePortSyncStartedAt = 0;
   lastRemotePortSyncSessionKey = "";
-  cachedRemoteProjectMetadata = [];
-  cachedRemoteProjectMetadataLoaded = false;
   observerInstalled = false;
   helperRuntimeObserver = null;
 };
+
+function onHelperSettingsApplied(wasPortForwardingEnabled) {
+  maintainPortsPanel();
+  maintainUsageLimitBanner();
+  if (featureSettings.portForwardingEnabled) schedulePortScan();
+  else if (wasPortForwardingEnabled) handlePortForwardingDisabled();
+}
 
 installHelperRuntimeEventListeners();
 installHelperStyles();
 removeLegacyPortsBottomPanelUi();
 maintainPortsPanel();
 maintainUsageLimitBanner();
-installNativeHelperSettingsGroup();
 logDiagnostic("runtime.ready", helperRuntimeActivityDetail());
 reportHelperRuntimeActivity();
 refreshFeatureSettings().catch((error) => {
