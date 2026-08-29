@@ -21,6 +21,8 @@ use crate::deepseek_sanitize::{
     rewrite_deepseek_native_sse_block, DeepSeekRestoreMap,
 };
 use crate::endpoint;
+use crate::llm_traffic_log::{redact_header_pairs, PendingLlmLog};
+use crate::logging::DiagnosticLogger;
 use crate::provider_oauth::{
     copilot_request_headers, oauth_bearer_token, oauth_kind_from_provider, OAuthKind,
 };
@@ -71,6 +73,8 @@ struct ProxyState {
     store: ProviderStore,
     state_root: Option<PathBuf>,
     bind_error: Option<String>,
+    logger: Option<Arc<DiagnosticLogger>>,
+    log_llm_traffic: bool,
 }
 
 impl ProviderProxy {
@@ -81,6 +85,8 @@ impl ProviderProxy {
                 store: ProviderStore::default(),
                 state_root: None,
                 bind_error: None,
+                logger: None,
+                log_llm_traffic: false,
             })),
         }
     }
@@ -105,6 +111,17 @@ impl ProviderProxy {
 
     pub fn set_store(&self, store: ProviderStore) {
         self.inner.lock().expect("provider proxy lock").store = store;
+    }
+
+    pub fn set_logger(&self, logger: Arc<DiagnosticLogger>) {
+        self.inner.lock().expect("provider proxy lock").logger = Some(logger);
+    }
+
+    pub fn set_log_llm_traffic(&self, enabled: bool) {
+        self.inner
+            .lock()
+            .expect("provider proxy lock")
+            .log_llm_traffic = enabled;
     }
 
     pub fn active_provider(&self) -> anyhow::Result<Option<Provider>> {
@@ -241,6 +258,7 @@ impl ProviderProxy {
             }
             body = serde_json::to_vec(&json_body)?;
         }
+        let pending_log = self.pending_llm_log(&path, &method, &provider.id, &headers, &body);
         let client = reqwest::Client::builder()
             .no_proxy()
             .build()
@@ -285,11 +303,15 @@ impl ProviderProxy {
         };
         upstream_request =
             upstream_request.header("Authorization", authorization_header_value(&bearer));
-        let response = upstream_request
-            .body(body)
-            .send()
-            .await
-            .context("Provider upstream request failed")?;
+        let response = match upstream_request.body(body).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some(pending_log) = pending_log {
+                    pending_log.fail(&format!("Provider upstream request failed: {error}"));
+                }
+                return Err(error).context("Provider upstream request failed");
+            }
+        };
         let status = response.status();
         let response_headers = response.headers().clone();
         let is_sse = response_headers
@@ -306,6 +328,10 @@ impl ProviderProxy {
             }
             builder = builder.header(name.as_str(), value);
         }
+        let logged_headers = pending_log
+            .as_ref()
+            .map(|_| redact_response_headers(&response_headers))
+            .unwrap_or(Value::Null);
         if !matches!(restore, NativeRestore::None) && status.is_success() {
             if is_sse {
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
@@ -342,24 +368,36 @@ impl ProviderProxy {
                         let _ = tx.send(Ok(rewrite_native_sse_block(&buffer, &restore)));
                     }
                 });
-                let rx_stream = futures_util::stream::unfold(rx, |mut rx| async move {
-                    rx.recv().await.map(|item| (item, rx))
-                })
-                .map(|item| item.map(Frame::data));
-                return Ok(builder.body(BodyExt::boxed(StreamBody::new(rx_stream)))?);
+                return Ok(builder.body(outgoing_body(
+                    receiver_byte_stream(rx),
+                    pending_log,
+                    status.as_u16(),
+                    true,
+                    logged_headers,
+                ))?);
             }
             let body_bytes = response
                 .bytes()
                 .await
                 .context("Failed to read provider upstream body")?;
             let rewritten = rewrite_native_json_bytes(&body_bytes, &restore);
-            return Ok(builder.body(bytes_body(rewritten))?);
+            return Ok(builder.body(logged_bytes_body(
+                rewritten,
+                pending_log,
+                status.as_u16(),
+                logged_headers,
+            ))?);
         }
         let stream = response
             .bytes_stream()
-            .map_err(|error| io::Error::other(error.to_string()))
-            .map_ok(Frame::data);
-        Ok(builder.body(BodyExt::boxed(StreamBody::new(stream)))?)
+            .map_err(|error| io::Error::other(error.to_string()));
+        Ok(builder.body(outgoing_body(
+            stream,
+            pending_log,
+            status.as_u16(),
+            is_sse,
+            logged_headers,
+        ))?)
     }
 }
 
@@ -367,6 +405,80 @@ fn bytes_body(bytes: impl Into<Bytes>) -> ProxyBody {
     Full::new(bytes.into())
         .map_err(|infallible: Infallible| match infallible {})
         .boxed()
+}
+
+fn boxed_bytes_stream<S>(stream: S) -> ProxyBody
+where
+    S: futures_util::Stream<Item = Result<Bytes, io::Error>> + Send + Sync + 'static,
+{
+    BodyExt::boxed(StreamBody::new(stream.map_ok(Frame::data)))
+}
+
+fn receiver_byte_stream(
+    rx: tokio::sync::mpsc::UnboundedReceiver<Result<Bytes, io::Error>>,
+) -> impl futures_util::Stream<Item = Result<Bytes, io::Error>> + Send + Sync + 'static {
+    futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    })
+}
+
+fn redact_response_headers(headers: &reqwest::header::HeaderMap) -> Value {
+    redact_header_pairs(
+        headers
+            .iter()
+            .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str(), value))),
+    )
+}
+
+fn logged_bytes_body(
+    bytes: Vec<u8>,
+    pending: Option<PendingLlmLog>,
+    status: u16,
+    response_headers: Value,
+) -> ProxyBody {
+    if let Some(pending) = pending {
+        pending.succeed(status, false, response_headers, bytes.len());
+    }
+    bytes_body(bytes)
+}
+
+fn outgoing_body<S>(
+    stream: S,
+    pending: Option<PendingLlmLog>,
+    status: u16,
+    sse: bool,
+    response_headers: Value,
+) -> ProxyBody
+where
+    S: futures_util::Stream<Item = Result<Bytes, io::Error>> + Send + Sync + 'static,
+{
+    let Some(pending) = pending else {
+        return boxed_bytes_stream(stream);
+    };
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
+    tokio::spawn(async move {
+        let mut stream = std::pin::pin!(stream);
+        let mut response_bytes = 0usize;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(bytes) => {
+                    response_bytes += bytes.len();
+                    if tx.send(Ok(bytes)).is_err() {
+                        pending.fail("client disconnected before response completed");
+                        return;
+                    }
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    let _ = tx.send(Err(error));
+                    pending.fail(&message);
+                    return;
+                }
+            }
+        }
+        pending.succeed(status, sse, response_headers, response_bytes);
+    });
+    boxed_bytes_stream(receiver_byte_stream(rx))
 }
 
 impl ProviderProxy {
@@ -377,6 +489,38 @@ impl ProviderProxy {
             .state_root
             .clone()
             .ok_or_else(|| anyhow::anyhow!("Helper state dir is unavailable"))
+    }
+
+    fn pending_llm_log(
+        &self,
+        path: &str,
+        method: &hyper::Method,
+        provider_id: &str,
+        headers: &hyper::HeaderMap,
+        body: &[u8],
+    ) -> Option<PendingLlmLog> {
+        if !is_llm_path(path) {
+            return None;
+        }
+        let (logger, enabled) = {
+            let state = self.inner.lock().expect("provider proxy lock");
+            (state.logger.clone(), state.log_llm_traffic)
+        };
+        if !enabled {
+            return None;
+        }
+        let Some(logger) = logger else {
+            eprintln!("LLM traffic logging is enabled but no diagnostic logger is configured");
+            return None;
+        };
+        Some(PendingLlmLog::start(
+            logger,
+            path.split('?').next().unwrap_or(path).to_string(),
+            method.as_str().to_string(),
+            provider_id.to_string(),
+            headers,
+            body,
+        ))
     }
 
     fn authorize_request(
@@ -661,9 +805,10 @@ pub(crate) fn join_provider_upstream_url(base_url: &str, path: &str) -> String {
 mod tests {
     use super::{
         collect_model_ids, is_llm_path, is_responses_path, join_provider_upstream_url,
-        join_provider_upstream_url_for,
+        join_provider_upstream_url_for, ProviderProxy,
     };
     use crate::provider_oauth::OAuthKind;
+    use crate::providers::{Provider, ProviderKind, ProviderStore};
     use serde_json::json;
 
     #[test]
@@ -1078,6 +1223,219 @@ mod tests {
             ]
         }));
         assert_eq!(ids, vec!["claude-sonnet-5", "gpt-4.1"]);
+    }
+
+    async fn wait_for_llm_log(logger: &crate::logging::DiagnosticLogger) -> serde_json::Value {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if let Ok(page) = logger.read_latest() {
+                if let Some(record) = page
+                    .records
+                    .iter()
+                    .find(|record| record.event == "llm.request")
+                {
+                    return record.detail.clone();
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("timed out waiting for llm.request log");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    fn temp_logger() -> (
+        tempfile::TempDir,
+        std::sync::Arc<crate::logging::DiagnosticLogger>,
+    ) {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let logger = std::sync::Arc::new(crate::logging::DiagnosticLogger::new(
+            temp_dir.path().join("logs"),
+        ));
+        (temp_dir, logger)
+    }
+
+    fn test_api_provider(id: &str, model: &str, mock_port: u16) -> Provider {
+        Provider {
+            id: id.to_string(),
+            name: id.to_string(),
+            kind: ProviderKind::ApiKey,
+            model: model.to_string(),
+            base_url: format!("http://127.0.0.1:{mock_port}/v1"),
+            wire_api: "chat_completions".to_string(),
+            api_key: "sk-test".to_string(),
+            compat: String::new(),
+            model_mappings: Vec::new(),
+            models: Vec::new(),
+            catalog_models: Vec::new(),
+            usage_page_url: String::new(),
+        }
+    }
+
+    async fn serve_mock_http(status: &str, body: &[u8]) -> (u16, tokio::task::JoinHandle<Vec<u8>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mock = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock bind");
+        let mock_port = mock.local_addr().expect("mock addr").port();
+        let header = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let body = body.to_vec();
+        let captured = tokio::spawn(async move {
+            let (mut stream, _) = mock.accept().await.expect("mock accept");
+            let mut buf = vec![0u8; 65536];
+            let n = stream.read(&mut buf).await.expect("mock read");
+            stream
+                .write_all(header.as_bytes())
+                .await
+                .expect("mock header");
+            stream.write_all(&body).await.expect("mock body");
+            buf[..n].to_vec()
+        });
+        (mock_port, captured)
+    }
+
+    async fn bind_kimi_proxy(
+        logger: &std::sync::Arc<crate::logging::DiagnosticLogger>,
+        enabled: bool,
+        mock_port: u16,
+    ) -> (ProviderProxy, u16) {
+        let proxy = ProviderProxy::new();
+        proxy.set_logger(logger.clone());
+        proxy.set_log_llm_traffic(enabled);
+        proxy.set_store(ProviderStore {
+            active_id: "kimi".to_string(),
+            providers: vec![test_api_provider("kimi", "kimi-k2.5", mock_port)],
+        });
+        let port = proxy.bind_on(0).await.expect("proxy bind");
+        (proxy, port)
+    }
+
+    #[tokio::test]
+    async fn outgoing_body_records_stream_error() {
+        let (_temp_dir, logger) = temp_logger();
+        let pending = crate::llm_traffic_log::PendingLlmLog::start(
+            logger.clone(),
+            "/v1/responses".to_string(),
+            "POST".to_string(),
+            "kimi".to_string(),
+            &hyper::HeaderMap::new(),
+            b"{}",
+        );
+        let stream = futures_util::stream::iter([
+            Ok(bytes::Bytes::from_static(b"hello")),
+            Err(std::io::Error::other("upstream reset")),
+        ]);
+        let body = super::outgoing_body(stream, Some(pending), 200, true, json!({}));
+        let collected = http_body_util::BodyExt::collect(body).await;
+        assert!(
+            collected.is_err(),
+            "stream error should surface to the client"
+        );
+        let detail = wait_for_llm_log(&logger).await;
+        assert_eq!(detail["error"], "upstream reset");
+        assert_eq!(detail["status"], 0);
+    }
+
+    #[tokio::test]
+    async fn llm_log_disabled_writes_nothing() {
+        let (mock_port, _captured) = serve_mock_http("200 OK", b"{}").await;
+        let (_temp_dir, logger) = temp_logger();
+        let (_proxy, port) = bind_kimi_proxy(&logger, false, mock_port).await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client");
+        let response = client
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .header("Authorization", "Bearer inbound-secret")
+            .json(&json!({
+                "model": "kimi-k2.5",
+                "messages": [{ "role": "user", "content": "hi" }]
+            }))
+            .send()
+            .await
+            .expect("proxy request");
+        assert_eq!(response.status(), 200);
+        let _ = response.bytes().await.expect("body");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let page = logger.read_latest().expect("latest");
+        assert!(
+            page.records
+                .iter()
+                .all(|record| record.event != "llm.request"),
+            "disabled logging should not write llm.request"
+        );
+    }
+
+    #[tokio::test]
+    async fn llm_log_redacts_secrets_and_records_every_call() {
+        let payload = br#"{"id":"chatcmpl-1","api_key":"sk-upstream"}"#;
+        let (mock_port, captured) = serve_mock_http("500 Internal Server Error", payload).await;
+        let (_temp_dir, logger) = temp_logger();
+        let (_proxy, port) = bind_kimi_proxy(&logger, true, mock_port).await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client");
+        let response = client
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .header("Authorization", "Bearer inbound-secret")
+            .json(&json!({
+                "model": "kimi-k2.5",
+                "api_key": "sk-request",
+                "messages": [{ "role": "user", "content": "hi" }]
+            }))
+            .send()
+            .await
+            .expect("proxy request");
+        assert_eq!(response.status(), 500);
+        let _ = response.bytes().await.expect("body");
+        let _ = captured.await.expect("capture join");
+        let detail = wait_for_llm_log(&logger).await;
+        let rendered = detail.to_string();
+        assert_eq!(detail["path"], "/v1/chat/completions");
+        assert_eq!(detail["method"], "POST");
+        assert_eq!(detail["status"], 500);
+        assert_eq!(detail["providerId"], "kimi");
+        assert_eq!(detail["model"], "kimi-k2.5");
+        assert_eq!(detail["userPreview"], "hi");
+        assert!(detail["request"].get("body").is_none());
+        assert!(detail["response"].get("body").is_none());
+        assert!(!rendered.contains("inbound-secret"));
+        assert!(!rendered.contains("sk-test"));
+        assert!(!rendered.contains("sk-request"));
+        assert!(!rendered.contains("sk-upstream"));
+        assert!(detail["request"]["headers"].get("authorization").is_none());
+    }
+
+    #[tokio::test]
+    async fn llm_log_skips_non_llm_paths() {
+        let (mock_port, _captured) = serve_mock_http("200 OK", br#"{"data":[]}"#).await;
+        let (_temp_dir, logger) = temp_logger();
+        let (_proxy, port) = bind_kimi_proxy(&logger, true, mock_port).await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client");
+        let response = client
+            .get(format!("http://127.0.0.1:{port}/v1/models"))
+            .send()
+            .await
+            .expect("proxy request");
+        assert_eq!(response.status(), 200);
+        let _ = response.bytes().await.expect("body");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let page = logger.read_latest().expect("latest");
+        assert!(
+            page.records
+                .iter()
+                .all(|record| record.event != "llm.request"),
+            "non-LLM paths should not write llm.request"
+        );
     }
 
     #[test]

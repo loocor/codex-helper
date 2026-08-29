@@ -35,7 +35,7 @@ Codex Helper 使用一个状态目录：
   state.json
 ```
 
-失败记录会写入 `~/.codex-helper/logs/codex-helper.jsonl`。
+诊断记录按本机日期写入 `~/.codex-helper/logs/codex-helper-YYYY-MM-DD.jsonl`。Helper Settings 的 Logs 页支持分页浏览、内容搜索，以及打开一条记录查看已存储的 detail。General 页的 Diagnostics 开关默认关闭，打开后会把经过本地 Helper 代理的 API Provider LLM 请求元数据写入 logs（密钥 header 会丢弃，并保留短 userPreview 供搜索），不存储请求/响应 body；Official ChatGPT 登录流量不可见。
 
 ## 开发
 

@@ -325,8 +325,39 @@ function onHelperSettingsClick(event) {
   });
 }
 
+function helperLogQueryError(error) {
+  setHelperText(
+    "[data-codex-helper-backend]",
+    error?.message || String(error),
+  );
+  logDiagnostic("settings_command_failed", {
+    command: "logs-query",
+    error: error?.message || String(error),
+  });
+}
+
+function onHelperSettingsInput(event) {
+  const target = event.target;
+  if (
+    target instanceof HTMLInputElement &&
+    target.hasAttribute("data-codex-helper-log-search")
+  ) {
+    scheduleHelperLogSearch(helperLogQueryError);
+  }
+}
+
 function onHelperSettingsChange(event) {
   const target = event.target;
+  if (
+    (target instanceof HTMLSelectElement &&
+      (target.hasAttribute("data-codex-helper-log-date") ||
+        target.hasAttribute("data-codex-helper-log-event-filter"))) ||
+    (target instanceof HTMLInputElement &&
+      target.hasAttribute("data-codex-helper-log-regex"))
+  ) {
+    loadHelperLogs(true).catch(helperLogQueryError);
+    return;
+  }
   if (!(target instanceof HTMLInputElement)) return;
   if (target.hasAttribute(helperNumberAttribute)) {
     event.preventDefault();
@@ -360,7 +391,23 @@ function onHelperSettingsChange(event) {
 }
 
 function onHelperSettingsKeydown(event) {
+  if (event.key === "Enter") {
+    const target = event.target;
+    if (
+      target instanceof HTMLInputElement &&
+      target.hasAttribute("data-codex-helper-log-search")
+    ) {
+      event.preventDefault();
+      loadHelperLogs(true).catch(helperLogQueryError);
+    }
+    return;
+  }
   if (event.key !== "Escape") return;
+  if (helperNativeSettingsRoot?.getAttribute("data-codex-helper-log-view") === "detail") {
+    event.preventDefault();
+    closeHelperLogDetail();
+    return;
+  }
   if (!providerDialogRoot?.isConnected) return;
   handleProviderCommand("provider-dialog-cancel").catch((error) => {
     setHelperText(
@@ -383,6 +430,7 @@ function startHelperSettingsApp() {
   installHelperSettingsShellStyles();
   renderHelperSettingsShell(root);
   document.addEventListener("click", onHelperSettingsClick, true);
+  document.addEventListener("input", onHelperSettingsInput, true);
   document.addEventListener("change", onHelperSettingsChange, true);
   document.addEventListener("keydown", onHelperSettingsKeydown, true);
   window.__codexHelperShowSettingsPage = openNativeHelperSettingsPage;

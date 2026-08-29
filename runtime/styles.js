@@ -226,6 +226,215 @@ function installHelperStyles() {
         flex: 1 1 auto;
         min-height: 0;
       }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        padding: 0 4px;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-toolbar .codex-helper-text-input[data-codex-helper-log-date],
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-toolbar .codex-helper-text-input[data-codex-helper-log-event-filter] {
+        width: auto;
+        flex: 0 0 auto;
+        min-width: 9.5rem;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-toolbar .codex-helper-text-input[data-codex-helper-log-search] {
+        width: auto;
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-toolbar .codex-helper-native-settings-icon-button {
+        flex: 0 0 auto;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-regex {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        flex: 0 0 auto;
+        font-size: 12px;
+        color: color-mix(in srgb, currentColor 70%, transparent);
+        user-select: none;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-pager {
+        display: inline-flex;
+        align-items: center;
+        gap: 2px;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-pager button:disabled {
+        opacity: 0.35;
+        cursor: default;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] [data-codex-helper-log-detail] {
+        display: none;
+        flex: 1 1 auto;
+        min-height: 0;
+        flex-direction: column;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"][data-codex-helper-log-view="detail"] .codex-helper-native-settings-log-toolbar,
+      [${helperNativeSettingsPageAttribute}="logs"][data-codex-helper-log-view="detail"] [data-codex-helper-log-list],
+      [${helperNativeSettingsPageAttribute}="logs"][data-codex-helper-log-view="detail"] .codex-helper-native-settings-log-footer {
+        display: none;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"][data-codex-helper-log-view="detail"] [data-codex-helper-log-detail] {
+        display: flex;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-detail-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        padding: 8px 12px 4px;
+        flex: 0 0 auto;
+        min-width: 0;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-back {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        margin: 0;
+        padding: 4px 2px;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-event {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 13px;
+        line-height: 1;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-back svg {
+        width: 16px;
+        height: 16px;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] [data-codex-helper-log-detail-body] {
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: hidden;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-detail-content {
+        display: flex;
+        flex-direction: row;
+        align-items: stretch;
+        gap: 0;
+        padding: 0;
+        min-width: 0;
+        min-height: 0;
+        flex: 1 1 auto;
+        height: 100%;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-detail-meta {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        flex: 0 0 28.571%;
+        min-width: 148px;
+        max-width: 40%;
+        overflow: auto;
+        padding: 8px 10px 16px 12px;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-split-handle {
+        position: relative;
+        flex: 0 0 8px;
+        margin: 8px 0;
+        cursor: col-resize;
+        touch-action: none;
+        user-select: none;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-split-handle::before {
+        content: "";
+        position: absolute;
+        inset: 0 3px;
+        border-radius: 99px;
+        background: color-mix(in srgb, currentColor 14%, transparent);
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-split-handle:hover::before,
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-split-handle[data-active="true"]::before {
+        background: color-mix(in srgb, currentColor 32%, transparent);
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-detail-field {
+        display: flex;
+        flex-direction: row;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+        min-width: 0;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-detail-field .codex-helper-settings-row-title {
+        flex: 0 1 auto;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-detail-field .codex-helper-settings-row-description {
+        min-width: 0;
+        text-align: right;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        white-space: normal;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-session-reveal {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 4px;
+        padding: 4px 0;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-session-reveal svg {
+        width: 14px;
+        height: 14px;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-json-section {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 auto;
+        min-width: 0;
+        min-height: 0;
+        padding: 8px 12px 12px;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-json {
+        margin: 0;
+        padding: 10px 12px;
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: auto;
+        border-radius: 10px;
+        background: color-mix(in srgb, currentColor 6%, transparent);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-json-copy {
+        position: absolute;
+        top: 16px;
+        right: 24px;
+        z-index: 1;
+        opacity: 0;
+        background: color-mix(in srgb, currentColor 10%, transparent);
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-json-section:hover .codex-helper-native-settings-log-json-copy,
+      [${helperNativeSettingsPageAttribute}="logs"] .codex-helper-native-settings-log-json-section:focus-within .codex-helper-native-settings-log-json-copy {
+        opacity: 1;
+      }
       [${helperNativeSettingsPageAttribute}] .codex-helper-settings-compact-row {
         display: flex;
         align-items: center;
@@ -245,6 +454,30 @@ function installHelperStyles() {
         font: inherit;
         text-align: left;
         cursor: pointer;
+      }
+      [${helperNativeSettingsPageAttribute}] button.codex-helper-settings-compact-row:hover,
+      [${helperNativeSettingsPageAttribute}] button.codex-helper-settings-compact-row:focus-visible {
+        background: color-mix(in srgb, currentColor 6%, transparent);
+        outline: none;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] button.codex-helper-settings-compact-row .codex-helper-settings-compact-text {
+        display: flex;
+        flex-direction: row;
+        align-items: baseline;
+        min-width: 0;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] button.codex-helper-settings-compact-row .codex-helper-settings-row-title {
+        flex: 0 0 auto;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] button.codex-helper-settings-compact-row .codex-helper-settings-row-description {
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+      [${helperNativeSettingsPageAttribute}="logs"] button.codex-helper-settings-compact-row .codex-helper-settings-row-title,
+      [${helperNativeSettingsPageAttribute}="logs"] button.codex-helper-settings-compact-row .codex-helper-settings-row-description {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       [${helperNativeSettingsPageAttribute}] .codex-helper-settings-compact-row:first-child {
         border-top: 0;

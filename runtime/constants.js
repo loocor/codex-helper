@@ -60,5 +60,6 @@ let featureSettings = {
   portSameLocalPort: true,
   hideUsageLimitBannerEnabled: false,
   launchAtLoginEnabled: false,
+  logLlmTrafficEnabled: false,
 };
 let featureSettingsLoaded = false;

@@ -13,6 +13,7 @@ pub struct HelperSettings {
     pub port_same_local_port: bool,
     pub hide_usage_limit_banner_enabled: bool,
     pub launch_at_login_enabled: bool,
+    pub log_llm_traffic_enabled: bool,
 }
 
 impl Default for HelperSettings {
@@ -23,6 +24,7 @@ impl Default for HelperSettings {
             port_same_local_port: true,
             hide_usage_limit_banner_enabled: false,
             launch_at_login_enabled: false,
+            log_llm_traffic_enabled: false,
         }
     }
 }
@@ -101,6 +103,7 @@ fn apply_setting_value(
             settings.hide_usage_limit_banner_enabled = bool_setting(key, value)?
         }
         "launchAtLoginEnabled" => settings.launch_at_login_enabled = bool_setting(key, value)?,
+        "logLlmTrafficEnabled" => settings.log_llm_traffic_enabled = bool_setting(key, value)?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -134,6 +137,7 @@ mod tests {
         assert!(settings.port_same_local_port);
         assert!(!settings.hide_usage_limit_banner_enabled);
         assert!(!settings.launch_at_login_enabled);
+        assert!(!settings.log_llm_traffic_enabled);
     }
 
     #[test]
@@ -225,6 +229,7 @@ mod tests {
         assert!(settings.port_same_local_port);
         assert!(!settings.hide_usage_limit_banner_enabled);
         assert!(!settings.launch_at_login_enabled);
+        assert!(!settings.log_llm_traffic_enabled);
         assert_eq!(settings, persisted);
     }
 
@@ -244,6 +249,25 @@ mod tests {
         let persisted = read_settings(&path).expect("persisted settings");
 
         assert!(settings.hide_usage_limit_banner_enabled);
+        assert_eq!(settings, persisted);
+    }
+
+    #[test]
+    fn update_settings_enables_llm_traffic_logging() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("config.json");
+        ensure_settings_file(&path).expect("initial settings");
+
+        let settings = update_settings(
+            &path,
+            &serde_json::json!({
+                "logLlmTrafficEnabled": true
+            }),
+        )
+        .expect("updated settings");
+        let persisted = read_settings(&path).expect("persisted settings");
+
+        assert!(settings.log_llm_traffic_enabled);
         assert_eq!(settings, persisted);
     }
 
