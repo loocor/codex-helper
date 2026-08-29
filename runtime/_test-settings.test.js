@@ -1,6 +1,6 @@
+import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { expect, test } from "bun:test";
 import { buildRuntimeBundle, buildSettingsBundle } from "./bundle.ts";
 
 const source = buildRuntimeBundle();
@@ -9,6 +9,9 @@ const nativeSettingsSource = readFileSync(
   join(import.meta.dir, "native-settings.js"),
   "utf8",
 );
+function templatePlaceholder(name) {
+  return `$\{${name}}`;
+}
 function extractFunction(name) {
   const marker = `function ${name}(`;
   const start = source.indexOf(marker);
@@ -98,12 +101,13 @@ test("helper settings live in a standalone window bundle", () => {
 });
 
 test("settings page exposes port forwarding policy switches", () => {
-  const templatePlaceholder = (name) => `$\{${name}}`;
   const helperToggleBinding = templatePlaceholder("helperToggleAttribute");
   const descKeyBinding = templatePlaceholder("descKey");
   const toggleKeyBinding = templatePlaceholder("toggleKey");
   expect(settingsSource).toContain("Enable port forwarding");
-  expect(settingsSource).toContain('${helperSettingsSectionAttribute}="${sectionId}"');
+  expect(settingsSource).toContain(
+    `${templatePlaceholder("helperSettingsSectionAttribute")}="${templatePlaceholder("sectionId")}"`,
+  );
   expect(settingsSource).toContain('nativeSettingsGroupSection("Port forwarding"');
   expect(settingsSource).toContain('"port-forwarding")');
   expect(source).toContain("function focusHelperSettingsSection(");
@@ -257,6 +261,7 @@ test("settings page exposes provider management", () => {
   expect(settingsSource).toContain("[data-codex-helper-provider-dialog] > .codex-helper-provider-dialog-actions");
   expect(settingsSource).toContain("padding: 10px 32px");
   expect(settingsSource).toContain("data-tauri-drag-region");
+  expect(settingsSource).toContain("helper-settings-titlebar");
   expect(settingsSource).toContain("helper-settings-nav-drag");
   expect(settingsSource).toContain("helper-settings-content:has([data-codex-helper-provider-dialog])");
   expect(settingsSource).toContain("helper-settings-back");
@@ -336,7 +341,7 @@ test("settings page groups options by feature area", () => {
 test("number settings validate the configured character range before saving", () => {
   expect(source).toContain("if (value < 1 || value > 20)");
   expect(source).toContain(
-    "Settings value for ${key} must be between 1 and 20",
+    `Settings value for ${templatePlaceholder("key")} must be between 1 and 20`,
   );
   expect(source).toContain('logDiagnostic("settings_update_failed", { key, message })');
   expect(source).toContain('applySettings({ status: "ok", settings: featureSettings })');
@@ -405,7 +410,9 @@ test("native settings switches stay visible when unchecked", () => {
 test("native settings sidebar uses contextual helper icons", () => {
   expect(settingsSource).toContain("nativeSettingsStandardIconSvg");
   expect(settingsSource).toContain("codex-helper-native-settings-sidebar-icon");
-  expect(settingsSource).toContain('data-lucide="${iconName}"');
+  expect(settingsSource).toContain(
+    `data-lucide="${templatePlaceholder("iconName")}"`,
+  );
   expect(settingsSource).toContain('standardIconName: "sliders-horizontal"');
   expect(settingsSource).toContain('standardIconName: "file-code-2"');
   expect(settingsSource).toContain('standardIconName: "radio"');

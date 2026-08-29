@@ -155,6 +155,12 @@ mod tests {
     }
 
     #[test]
+    fn settings_window_allows_title_bar_dragging() {
+        let capabilities = include_str!("../capabilities/default.json");
+        assert!(capabilities.contains("core:window:allow-start-dragging"));
+    }
+
+    #[test]
     fn settings_window_follows_system_theme() {
         let source = include_str!("settings_window.rs");
         assert!(source.contains(".theme(None)"));

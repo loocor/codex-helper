@@ -845,7 +845,7 @@ function installHelperStyles() {
         flex: 1 1 auto;
         min-height: 0;
         overflow: auto;
-        padding: 36px 32px 16px;
+        padding: 52px 32px 16px;
         gap: 16px;
       }
       [data-codex-helper-provider-dialog] .codex-helper-provider-dialog-panel {
