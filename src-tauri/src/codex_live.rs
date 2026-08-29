@@ -44,6 +44,80 @@ pub fn default_codex_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".codex"))
 }
 
+pub fn find_session_rollout(codex_home: &Path, session_id: &str) -> anyhow::Result<PathBuf> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        anyhow::bail!("Session id is missing");
+    }
+    if !session_id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        anyhow::bail!("Session id is invalid");
+    }
+    let suffix = format!("-{session_id}.jsonl");
+    let mut found = Vec::new();
+    for dir_name in ["sessions", "archived_sessions"] {
+        collect_session_rollouts(&codex_home.join(dir_name), &suffix, &mut found)?;
+    }
+    if found.is_empty() {
+        anyhow::bail!("Session file was not found for {session_id}");
+    }
+    found.sort_by(|left, right| {
+        let left_live = path_has_component(left, "sessions");
+        let right_live = path_has_component(right, "sessions");
+        match (left_live, right_live) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => {
+                let left_modified = left.metadata().and_then(|meta| meta.modified()).ok();
+                let right_modified = right.metadata().and_then(|meta| meta.modified()).ok();
+                right_modified.cmp(&left_modified)
+            }
+        }
+    });
+    Ok(found.remove(0))
+}
+
+fn path_has_component(path: &Path, name: &str) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == name)
+}
+
+fn collect_session_rollouts(
+    root: &Path,
+    suffix: &str,
+    found: &mut Vec<PathBuf>,
+) -> anyhow::Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    let entries =
+        fs::read_dir(root).with_context(|| format!("Failed to read {}", root.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("Failed to read {}", root.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        if file_type.is_dir() {
+            collect_session_rollouts(&path, suffix, found)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if name.starts_with("rollout-") && name.ends_with(suffix) {
+            found.push(path);
+        }
+    }
+    Ok(())
+}
+
 pub fn config_path(codex_home: &Path) -> PathBuf {
     codex_home.join("config.toml")
 }
@@ -229,6 +303,33 @@ pub fn apply_api_provider(document: &mut DocumentMut, write: LiveProviderWrite<'
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_session_rollout_prefers_live_sessions() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let live = temp
+            .path()
+            .join("sessions/2026/08/29/rollout-2026-08-29T10-00-00-sess-1.jsonl");
+        let archived = temp
+            .path()
+            .join("archived_sessions/rollout-2026-08-29T09-00-00-sess-1.jsonl");
+        fs::create_dir_all(live.parent().expect("parent")).expect("live dir");
+        fs::create_dir_all(archived.parent().expect("parent")).expect("archived dir");
+        fs::write(
+            &live, "{}
+",
+        )
+        .expect("live file");
+        fs::write(
+            &archived, "{}
+",
+        )
+        .expect("archived file");
+        let found = find_session_rollout(temp.path(), "sess-1").expect("found");
+        assert_eq!(found, live);
+        let missing = find_session_rollout(temp.path(), "missing").unwrap_err();
+        assert!(missing.to_string().contains("was not found"));
+    }
 
     #[test]
     fn apply_api_provider_preserves_unrelated_tables() {

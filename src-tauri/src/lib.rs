@@ -9,6 +9,7 @@ mod deepseek_sanitize;
 mod endpoint;
 mod launch_at_login;
 mod launcher;
+mod llm_traffic_log;
 mod logging;
 pub mod model_catalog;
 mod ports;

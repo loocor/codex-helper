@@ -156,7 +156,10 @@ pub async fn handle_bridge_request(ctx: BridgeContext, request: BridgeRequest) -
             Err(error) => json!({ "status": "failed", "message": error.to_string() }),
         },
         "/settings/set" => match update_settings(&ctx.state_dir.config_path, &payload) {
-            Ok(settings) => json!({ "status": "ok", "settings": settings }),
+            Ok(settings) => {
+                global_provider_proxy().set_log_llm_traffic(settings.log_llm_traffic_enabled);
+                json!({ "status": "ok", "settings": settings })
+            }
             Err(error) => json!({ "status": "failed", "message": error.to_string() }),
         },
         "/providers/list" => providers_list_response(&ctx.state_dir.root),
@@ -281,6 +284,7 @@ pub async fn handle_bridge_request(ctx: BridgeContext, request: BridgeRequest) -
         "/diagnostics/list" => list_logs_response(&ctx.logger, &payload),
         "/diagnostics/search" => search_logs_response(&ctx.logger, &payload),
         "/diagnostics/reveal-log" => reveal_path_response(&ctx.logger.log_path()),
+        "/diagnostics/reveal-session" => reveal_session_response(&payload),
         "/logs/reveal" => reveal_path_response(&ctx.state_dir.logs_dir),
         "/scripts/reveal" => reveal_path_response(&ctx.state_dir.scripts_dir),
         "/state/reveal" => reveal_path_response(&ctx.state_dir.root),
@@ -850,6 +854,17 @@ async fn providers_test_response(state_root: &std::path::Path, payload: &Value) 
                 format!("HTTP {status_code}: {preview}")
             },
         }),
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
+}
+
+fn reveal_session_response(payload: &Value) -> Value {
+    let session_id = payload
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    match crate::codex_live::find_session_rollout(&default_codex_home(), session_id) {
+        Ok(path) => reveal_path_response(&path),
         Err(error) => json!({ "status": "failed", "message": error.to_string() }),
     }
 }

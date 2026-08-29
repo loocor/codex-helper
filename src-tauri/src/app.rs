@@ -295,7 +295,7 @@ pub fn run() {
             let logger = Arc::new(DiagnosticLogger::new(state_dir.logs_dir.clone()));
             handle.manage(HelperState {
                 state_dir: state_dir.clone(),
-                logger,
+                logger: logger.clone(),
                 port_manager: port_manager.clone(),
                 controller: controller.clone(),
             });
@@ -306,6 +306,11 @@ pub fn run() {
             let startup_app = app.handle().clone();
             let proxy = global_provider_proxy();
             proxy.set_state_root(state_dir.root.clone());
+            proxy.set_logger(logger);
+            match crate::settings::read_settings(&state_dir.config_path) {
+                Ok(settings) => proxy.set_log_llm_traffic(settings.log_llm_traffic_enabled),
+                Err(error) => eprintln!("failed to load LLM log setting: {error}"),
+            }
             if let Ok(store) = read_store(&state_dir.root) {
                 proxy.set_store(store);
             }
