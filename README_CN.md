@@ -55,7 +55,8 @@ Tauri 后端当前默认目标是 macOS 的 `/Applications/ChatGPT.app`。
 
 ## 发布
 
-推送 `v*` tag 会通过 GitHub Actions 构建已签名、已 notarize 的 DMG。secret 配置和本地签名说明见 [docs/release-guide.md](docs/release-guide.md)。
+推送 `v*` tag 会通过 GitHub Actions 构建已签名、已 notarize 的 DMG 和 updater 归档。secret 配置和本地签名说明见 [docs/release-guide.md](docs/release-guide.md)。
+Helper Settings → About 会检查 GitHub Releases 上的 `latest.json` 并安装更新。
 
 App 和菜单栏图标位于 `src-tauri/icons/`：
 

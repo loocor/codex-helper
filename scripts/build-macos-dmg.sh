@@ -39,6 +39,7 @@ if [[ "$PROFILE" == "debug" ]]; then
 else
   DMG="${OUTPUT_DIR}/${APP_NAME}-${VERSION}-macos-${ARCH_SUFFIX}.dmg"
 fi
+UPDATER_ARCHIVE="${OUTPUT_DIR}/${APP_NAME}-${VERSION}-macos-${ARCH_SUFFIX}.app.tar.gz"
 ENTITLEMENTS="${TAURI}/assets/entitlements.plist"
 ICON="${TAURI}/icons/icon.png"
 
@@ -53,6 +54,16 @@ has_notary_credentials() {
   [[ -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_ISSUER:-}" && -n "${APPLE_API_KEY_PATH:-}" ]] && return 0
   [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]] && return 0
   return 1
+}
+
+require_updater_signing() {
+  if [[ "${REQUIRE_UPDATER_SIGNING:-}" != "1" ]]; then
+    return
+  fi
+  if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+    echo "TAURI_SIGNING_PRIVATE_KEY is required when REQUIRE_UPDATER_SIGNING=1" >&2
+    exit 1
+  fi
 }
 
 require_notarization_credentials() {
@@ -74,6 +85,7 @@ require_notarization_credentials() {
 
 require_release_signing
 require_notarization_credentials
+require_updater_signing
 
 if ! [[ "$NOTARY_MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
   echo "NOTARY_MAX_ATTEMPTS must be a positive integer" >&2
@@ -105,6 +117,7 @@ submit_notarization() {
 mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 DMG="${OUTPUT_DIR}/$(basename "$DMG")"
+UPDATER_ARCHIVE="${OUTPUT_DIR}/$(basename "$UPDATER_ARCHIVE")"
 
 echo "build ${TARGET} v${VERSION} (${PROFILE})"
 CARGO_ARGS=(--manifest-path "${TAURI}/Cargo.toml" --target "$TARGET" --bin codex-helper)
@@ -142,6 +155,25 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
 PLIST
 printf 'APPL????' > "${APP}/Contents/PkgInfo"
 
+create_updater_archive() {
+  if [[ "${REQUIRE_UPDATER_SIGNING:-}" != "1" && -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+    return
+  fi
+  if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+    echo "TAURI_SIGNING_PRIVATE_KEY is required to sign updater archives" >&2
+    exit 1
+  fi
+  if ! command -v bun >/dev/null 2>&1; then
+    echo "bun is required to sign updater archives" >&2
+    exit 1
+  fi
+  if [[ "${SKIP_NOTARIZE:-}" != "1" ]]; then
+    xcrun stapler staple "$APP"
+  fi
+  tar -C "$STAGE" -czf "$UPDATER_ARCHIVE" "${APP_NAME}.app"
+  bunx --bun @tauri-apps/cli signer sign "$UPDATER_ARCHIVE"
+}
+
 sign_app() {
   local identity="${APPLE_SIGNING_IDENTITY:--}"
   if [[ "$identity" == "-" ]]; then
@@ -177,5 +209,10 @@ if [[ "${SKIP_NOTARIZE:-}" != "1" ]]; then
   fi
 fi
 
+create_updater_archive
+
 echo "$APP"
 echo "$DMG"
+if [[ -f "$UPDATER_ARCHIVE" ]]; then
+  echo "$UPDATER_ARCHIVE"
+fi

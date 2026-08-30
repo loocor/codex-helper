@@ -112,6 +112,12 @@ async fn helper_bridge(
     payload: Option<Value>,
 ) -> Result<Value, String> {
     let payload = payload.unwrap_or_else(|| json!({}));
+    if path == "/update/check" {
+        return Ok(crate::updater::check_for_update(&app).await);
+    }
+    if path == "/update/install" {
+        return Ok(crate::updater::install_update(&app).await);
+    }
     if path == "/settings/set" {
         if let Some(enabled) = payload.get("launchAtLoginEnabled").and_then(Value::as_bool) {
             if let Err(error) = crate::launch_at_login::apply_launch_at_login(enabled) {
@@ -286,6 +292,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![helper_bridge])
         .setup(move |app| {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);

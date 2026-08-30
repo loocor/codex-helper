@@ -9,6 +9,7 @@ const RUNTIME_FOOTER: &str = "\n})();\n";
 include!(concat!(env!("OUT_DIR"), "/runtime_modules.rs"));
 
 const BUILD_DATE_PLACEHOLDER_LITERAL: &str = "\"__CODEX_HELPER_BUILD_DATE__\"";
+const VERSION_PLACEHOLDER_LITERAL: &str = "\"__CODEX_HELPER_VERSION__\"";
 
 fn helper_build_date() -> &'static str {
     let date = env!("CODEX_HELPER_BUILD_DATE");
@@ -18,8 +19,20 @@ fn helper_build_date() -> &'static str {
     date
 }
 
+fn helper_version() -> &'static str {
+    let version = env!("CARGO_PKG_VERSION");
+    if version.is_empty() {
+        panic!("CARGO_PKG_VERSION was empty at compile time");
+    }
+    version
+}
+
 fn helper_build_date_literal() -> String {
     serde_json::to_string(helper_build_date()).expect("serialize helper build date")
+}
+
+fn helper_version_literal() -> String {
+    serde_json::to_string(helper_version()).expect("serialize helper version")
 }
 
 fn bundle_module_sources(sources: &[&str], kind: &str) -> String {
@@ -27,7 +40,12 @@ fn bundle_module_sources(sources: &[&str], kind: &str) -> String {
     if !body.contains(BUILD_DATE_PLACEHOLDER_LITERAL) {
         panic!("{kind} bundle is missing the helper build date placeholder");
     }
-    let body = body.replace(BUILD_DATE_PLACEHOLDER_LITERAL, &helper_build_date_literal());
+    if !body.contains(VERSION_PLACEHOLDER_LITERAL) {
+        panic!("{kind} bundle is missing the helper version placeholder");
+    }
+    let body = body
+        .replace(BUILD_DATE_PLACEHOLDER_LITERAL, &helper_build_date_literal())
+        .replace(VERSION_PLACEHOLDER_LITERAL, &helper_version_literal());
     format!("{RUNTIME_HEADER}{body}{RUNTIME_FOOTER}")
 }
 
@@ -118,6 +136,15 @@ mod tests {
             bundled.contains(&expected),
             "packaged runtime did not inject the compile-time helper build date"
         );
+        let expected_version = format!("const helperVersion = {};", helper_version_literal());
+        assert!(
+            !bundled.contains("__CODEX_HELPER_VERSION__"),
+            "packaged runtime left the version placeholder in place"
+        );
+        assert!(
+            bundled.contains(&expected_version),
+            "packaged runtime did not inject the compile-time helper version"
+        );
     }
 
     #[test]
@@ -144,6 +171,15 @@ mod tests {
         assert!(
             bundled.contains(&expected),
             "settings runtime did not inject the compile-time helper build date"
+        );
+        let expected_version = format!("const helperVersion = {};", helper_version_literal());
+        assert!(
+            !bundled.contains("__CODEX_HELPER_VERSION__"),
+            "settings runtime left the version placeholder in place"
+        );
+        assert!(
+            bundled.contains(&expected_version),
+            "settings runtime did not inject the compile-time helper version"
         );
         assert!(
             bundled.contains("function startHelperSettingsApp("),

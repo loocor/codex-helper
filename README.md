@@ -55,7 +55,8 @@ The Tauri backend currently targets macOS `/Applications/ChatGPT.app` by default
 
 ## Releases
 
-Push a `v*` tag to build signed, notarized DMGs via GitHub Actions. See [docs/release-guide.md](docs/release-guide.md) for secrets and local signing.
+Push a `v*` tag to build signed, notarized DMGs and updater archives via GitHub Actions. See [docs/release-guide.md](docs/release-guide.md) for secrets and local signing.
+Helper Settings → About checks `latest.json` from GitHub Releases and can install the update.
 
 App and menu bar icons live in `src-tauri/icons/`:
 

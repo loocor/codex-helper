@@ -619,6 +619,23 @@ function installHelperStyles() {
         font-size: 15px;
         font-weight: 600;
       }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-about-notes {
+        display: block;
+        padding: 12px;
+        border-top: 0.5px solid color-mix(in srgb, currentColor 10%, transparent);
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-about-notes[hidden] {
+        display: none;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-native-settings-about-notes-body {
+        margin: 8px 0 0;
+        max-height: 240px;
+        overflow: auto;
+        white-space: pre-wrap;
+        font: inherit;
+        font-size: 12px;
+        line-height: 1.45;
+      }
       [data-codex-helper-port-row][data-codex-helper-port-row-menu-open="true"]
         [class*="summary-panel-row-accessory"] {
         opacity: 1 !important;

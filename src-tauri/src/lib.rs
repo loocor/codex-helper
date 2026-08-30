@@ -23,6 +23,7 @@ mod runtime;
 mod settings;
 mod settings_window;
 pub mod state_dir;
+mod updater;
 mod xai_sanitize;
 pub mod zed;
 

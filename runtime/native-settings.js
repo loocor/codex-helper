@@ -312,6 +312,19 @@ function nativeSettingsAboutPageContent() {
       </div>
       <a href="${helperRepoUrl}" target="_blank" rel="noopener noreferrer" class="codex-helper-native-settings-icon-button codex-helper-external-link" aria-label="Open project repository">${nativeSettingsIconSvg("open")}</a>
     </div>
+    <div class="codex-helper-native-settings-about-row">
+      <div class="helper-settings-about-copy">
+        <div class="codex-helper-settings-row-title">Update</div>
+        <div class="codex-helper-settings-row-description" data-codex-helper-update-detail>Checking for updates</div>
+      </div>
+      <button type="button" class="${helperActionClass}" ${helperCommandAttribute}="check-update" data-codex-helper-update-action disabled>Check</button>
+    </div>
+    <div class="codex-helper-native-settings-about-notes" data-codex-helper-update-notes-row hidden>
+      <div class="helper-settings-about-copy">
+        <div class="codex-helper-settings-row-title">Latest release</div>
+        <pre class="codex-helper-native-settings-about-notes-body" data-codex-helper-update-notes></pre>
+      </div>
+    </div>
   `);
 }
 

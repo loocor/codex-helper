@@ -16,6 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - uses: oven-sh/setup-bun@v2
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -44,6 +46,8 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
 
@@ -57,6 +61,8 @@ jobs:
           test -n "$APPLE_API_KEY" || { echo "missing APPLE_API_KEY" >&2; exit 1; }
           test -n "$APPLE_API_ISSUER" || { echo "missing APPLE_API_ISSUER" >&2; exit 1; }
           test -n "$APPLE_API_PRIVATE_KEY" || { echo "missing APPLE_API_PRIVATE_KEY" >&2; exit 1; }
+          test -n "$TAURI_SIGNING_PRIVATE_KEY" || { echo "missing TAURI_SIGNING_PRIVATE_KEY" >&2; exit 1; }
+          test -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" || { echo "missing TAURI_SIGNING_PRIVATE_KEY_PASSWORD" >&2; exit 1; }
 
       - name: Import Developer ID certificate
         env:
@@ -113,6 +119,9 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           REQUIRE_SIGNING: "1"
           REQUIRE_NOTARIZE: "1"
+          REQUIRE_UPDATER_SIGNING: "1"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           NOTARY_WAIT_TIMEOUT: "10m"
           NOTARY_MAX_ATTEMPTS: "3"
           OUTPUT_DIR: ${{ github.workspace }}/dist/macos
@@ -123,7 +132,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: dmg-${{ matrix.target }}
-          path: dist/macos/*.dmg
+          path: |
+            dist/macos/*.dmg
+            dist/macos/*.app.tar.gz
+            dist/macos/*.app.tar.gz.sig
 
       - name: Cleanup macOS signing materials
         if: always()
@@ -141,14 +153,43 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
+
       - uses: actions/download-artifact@v4
         with:
           path: dist/macos
           merge-multiple: true
 
-      - run: find dist -name '*.dmg' -print
+      - run: find dist \( -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' \) -print
+
+      - name: Generate updater latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${VERSION%%-*}"
+          NOTES_FILE="$RUNNER_TEMP/release-notes.md"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$GITHUB_REF_NAME" \
+            --jq .body > "$NOTES_FILE"
+          chmod +x scripts/generate-latest-json.sh
+          scripts/generate-latest-json.sh \
+            --version "$VERSION" \
+            --notes-file "$NOTES_FILE" \
+            --pub-date "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+            --asset-base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}" \
+            --aarch64-archive "dist/macos/CodexHelper-${VERSION}-macos-aarch64.app.tar.gz" \
+            --aarch64-sig "dist/macos/CodexHelper-${VERSION}-macos-aarch64.app.tar.gz.sig" \
+            --x86_64-archive "dist/macos/CodexHelper-${VERSION}-macos-x86_64.app.tar.gz" \
+            --x86_64-sig "dist/macos/CodexHelper-${VERSION}-macos-x86_64.app.tar.gz.sig" \
+            --output dist/macos/latest.json
+
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
             dist/**/*.dmg
+            dist/**/*.app.tar.gz
+            dist/**/*.app.tar.gz.sig
+            dist/**/latest.json

@@ -59,6 +59,88 @@ async function refreshHelperPage() {
   if (helperNativeSettingsActivePage === "endpoint") {
     renderEndpoint(extra);
   }
+  if (helperNativeSettingsActivePage === "about") {
+    await refreshHelperUpdateStatus();
+  }
+}
+
+function setHelperUpdateAction(command, label, disabled) {
+  for (const root of helperSettingsRoots()) {
+    const button = root.querySelector("[data-codex-helper-update-action]");
+    if (!(button instanceof HTMLButtonElement)) continue;
+    button.setAttribute(helperCommandAttribute, command);
+    button.textContent = label;
+    button.disabled = disabled;
+  }
+}
+
+function setHelperUpdateNotes(notes) {
+  const text = typeof notes === "string" ? notes : "";
+  for (const root of helperSettingsRoots()) {
+    const notesRow = root.querySelector("[data-codex-helper-update-notes-row]");
+    const notesBody = root.querySelector("[data-codex-helper-update-notes]");
+    if (notesBody instanceof HTMLElement) {
+      notesBody.textContent = text;
+    }
+    if (notesRow instanceof HTMLElement) {
+      notesRow.hidden = text.trim() === "";
+    }
+  }
+}
+
+function applyHelperUpdateStatus(result) {
+  if (typeof result?.currentVersion !== "string" || !result.currentVersion) {
+    throw new Error("Update check did not return the current version");
+  }
+  if (typeof result.latestVersion !== "string" || !result.latestVersion) {
+    throw new Error("Update check did not return the latest version");
+  }
+  setHelperUpdateNotes(result.notes);
+  if (result.available) {
+    setHelperText(
+      "[data-codex-helper-update-detail]",
+      `Version ${result.latestVersion} is available`,
+    );
+    setHelperUpdateAction("install-update", "Update", false);
+    return;
+  }
+  setHelperText(
+    "[data-codex-helper-update-detail]",
+    `Version ${result.currentVersion} is up to date`,
+  );
+  setHelperUpdateAction("check-update", "Check", false);
+}
+
+function applyHelperUpdateError(message) {
+  setHelperUpdateNotes("");
+  setHelperText("[data-codex-helper-update-detail]", message);
+  setHelperUpdateAction("check-update", "Check", false);
+}
+
+async function refreshHelperUpdateStatus() {
+  setHelperUpdateAction("check-update", "Check", true);
+  setHelperText("[data-codex-helper-update-detail]", "Checking for updates");
+  try {
+    const result = await bridge("/update/check");
+    if (result?.status !== "ok") {
+      throw new Error(result?.message || "Failed to check for updates");
+    }
+    applyHelperUpdateStatus(result);
+  } catch (error) {
+    applyHelperUpdateError(error?.message || String(error));
+  }
+}
+
+async function installHelperUpdate() {
+  setHelperUpdateAction("install-update", "Update", true);
+  setHelperText("[data-codex-helper-update-detail]", "Installing update");
+  const result = await bridge("/update/install");
+  if (result?.status !== "ok") {
+    applyHelperUpdateError(result?.message || "Failed to install update");
+    setHelperUpdateAction("install-update", "Update", false);
+    return;
+  }
+  setHelperText("[data-codex-helper-update-detail]", "Restarting Codex Helper");
 }
 
 const helperLogPager = {
@@ -833,6 +915,14 @@ async function handleHelperCommand(command, source) {
   }[command];
   if (command === "refresh") {
     await refreshHelperPage();
+    return;
+  }
+  if (command === "check-update") {
+    await refreshHelperUpdateStatus();
+    return;
+  }
+  if (command === "install-update") {
+    await installHelperUpdate();
     return;
   }
   if (command === "logs-prev") {

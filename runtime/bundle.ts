@@ -18,6 +18,8 @@ const RUNTIME_FOOTER = `
 const NON_MODULE_FILES = new Set(["bundle.ts", "index.json", "settings-index.json"]);
 const BUILD_DATE_PLACEHOLDER = "__CODEX_HELPER_BUILD_DATE__";
 const BUILD_DATE_PLACEHOLDER_LITERAL = `"${BUILD_DATE_PLACEHOLDER}"`;
+const VERSION_PLACEHOLDER = "__CODEX_HELPER_VERSION__";
+const VERSION_PLACEHOLDER_LITERAL = `"${VERSION_PLACEHOLDER}"`;
 
 function isRuntimeTestFile(fileName: string): boolean {
 	return fileName.startsWith("_test");
@@ -59,7 +61,8 @@ function concatRuntimeModules(moduleNames: string[]): string {
 		.replaceAll(
 			BUILD_DATE_PLACEHOLDER_LITERAL,
 			JSON.stringify(runtimeBuildDate()),
-		);
+		)
+		.replaceAll(VERSION_PLACEHOLDER_LITERAL, JSON.stringify(runtimeVersion()));
 }
 
 function runtimeBuildDate(): string {
@@ -71,6 +74,19 @@ function runtimeBuildDate(): string {
 		year: "numeric",
 		timeZone: "UTC",
 	});
+}
+
+function runtimeVersion(): string {
+	const configured = process.env.CODEX_HELPER_VERSION?.trim();
+	if (configured) return configured;
+	const packageJson = JSON.parse(
+		readFileSync(join(runtimeSrcDir, "../package.json"), "utf8"),
+	) as { version?: string };
+	const version = packageJson.version?.trim();
+	if (!version) {
+		throw new Error("package.json is missing a version");
+	}
+	return version;
 }
 
 export function buildRuntimeBundle(): string {

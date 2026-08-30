@@ -489,6 +489,12 @@ test("native settings about page is independent from general", () => {
   expect(settingsSource).toContain("Last updated");
   expect(settingsSource).toContain("A local runtime helper for Codex settings");
   expect(settingsSource).toContain("Project repository");
+  expect(settingsSource).toContain("data-codex-helper-update-detail");
+  expect(settingsSource).toContain('command === "check-update"');
+  expect(settingsSource).toContain('command === "install-update"');
+  expect(settingsSource).toContain("Latest release");
+  expect(settingsSource).toContain("/update/check");
+  expect(settingsSource).not.toContain("api.github.com");
   expect(settingsSource).not.toContain('nativeSettingsExternalLinkRow(\n        "Project repository"');
 });
 
@@ -500,6 +506,7 @@ test("runtime bundle injects the helper build date at build time", () => {
 
     expect(bundled).toContain('const helperBuildDate = "May 26, 2026";');
     expect(bundled).not.toContain("__CODEX_HELPER_BUILD_DATE__");
+    expect(bundled).not.toContain("__CODEX_HELPER_VERSION__");
   } finally {
     if (previous === undefined) delete process.env.CODEX_HELPER_BUILD_DATE;
     else process.env.CODEX_HELPER_BUILD_DATE = previous;

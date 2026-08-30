@@ -44,5 +44,13 @@
     "icon": [
       "icons/icon.png"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFCOTA1NjU0QTMyQzY4OTkKUldTWmFDeWpWRmFRcXo1aW03RTR5Vmk3YVMwWFZYTFN1N2MrZnViMEZwWkxqT3F5dlNBQy9ZbFgK",
+      "endpoints": [
+        "https://github.com/loocor/codex-helper/releases/latest/download/latest.json"
+      ]
+    }
   }
 }
