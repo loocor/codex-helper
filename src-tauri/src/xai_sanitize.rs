@@ -135,7 +135,8 @@ fn request_model_looks_like_grok(model: &str) -> bool {
     if let Some(idx) = slug.rfind('/') {
         slug = slug[idx + 1..].trim();
     }
-    slug.to_ascii_lowercase().starts_with("grok")
+    let slug = slug.to_ascii_lowercase();
+    slug == "grok" || slug.starts_with("grok-")
 }
 
 fn request_targets_grok_45(body: &Value) -> bool {
@@ -1602,6 +1603,26 @@ mod tests {
             None
         );
         assert_eq!(prefixed["model"], "xai/grok-4.20");
+    }
+
+    #[test]
+    fn keeps_exact_grok_slug() {
+        let mut body = json!({ "model": "grok" });
+        assert_eq!(
+            rewrite_xai_unknown_request_model(&mut body, "grok-4.6", &HashSet::new()),
+            None
+        );
+        assert_eq!(body["model"], "grok");
+    }
+
+    #[test]
+    fn remaps_non_hyphen_grok_prefix() {
+        let mut body = json!({ "model": "grokking-1" });
+        assert_eq!(
+            rewrite_xai_unknown_request_model(&mut body, "grok-4.6", &HashSet::new()),
+            Some(("grokking-1".to_string(), "grok-4.6".to_string()))
+        );
+        assert_eq!(body["model"], "grok-4.6");
     }
 
     #[test]
