@@ -5,7 +5,8 @@
 //! Request-side: strip private fields, flatten `namespace` tools, rewrite
 //! `tool_search` and `custom` tools into functions (including history
 //! `tool_search_call` / `custom_tool_call` items), rewrite `agent_message`,
-//! collapse root `oneOf`/`anyOf` schemas. Return-path: restore flattened
+//! collapse mixed root `oneOf`/`anyOf` schemas (shallow `$ref`/`$defs`,
+//! drop non-object branches, lift a single object). Return-path: restore flattened
 //! function-call names, restore `tool_search_call` / `custom_tool_call`, and
 //! rewrite whole-float tool arguments so Codex Desktop serde accepts Grok
 //! `92116.0` as `i32`/`u64`.
@@ -64,11 +65,12 @@ pub fn apply_xai_native_responses_request_compat(
     promote_tool_search_output_tools(body);
     let namespaces = namespace_restore_map(body);
     let custom_tool_names = compat_custom::custom_tool_names_from_request(body, &HashSet::new());
-    sanitize_xai_responses_request(body);
-    rewrite_xai_agent_message_input_items(body);
+    // Decide the live model first so grok-4.5 field strips see the rewritten SKU.
     if let Some(upstream_model) = upstream_model {
         rewrite_xai_unknown_request_model(body, upstream_model, allowed_models);
     }
+    sanitize_xai_responses_request(body);
+    rewrite_xai_agent_message_input_items(body);
     XaiNativeRestoreMap {
         namespaces,
         custom_tool_names,
@@ -119,10 +121,22 @@ pub fn rewrite_xai_unknown_request_model(
         .map(str::trim)
         .unwrap_or("")
         .to_string();
+    if !request.is_empty() && request_model_looks_like_grok(&request) {
+        return None;
+    }
     if !rewrite_unmatched_request_model(body, upstream_model, allowed_models) {
         return None;
     }
     Some((request, upstream_model.trim().to_string()))
+}
+
+fn request_model_looks_like_grok(model: &str) -> bool {
+    let mut slug = model.trim();
+    if let Some(idx) = slug.rfind('/') {
+        slug = slug[idx + 1..].trim();
+    }
+    let slug = slug.to_ascii_lowercase();
+    slug == "grok" || slug.starts_with("grok-")
 }
 
 fn request_targets_grok_45(body: &Value) -> bool {
@@ -1033,28 +1047,121 @@ fn xai_function_parameters_need_simplification(params: &Value) -> bool {
         Value::Null => true,
         Value::Object(obj) if obj.is_empty() => true,
         Value::Object(obj) => {
+            if obj.get("$ref").is_some() {
+                return true;
+            }
+            if root_union_needs_rewrite(obj) {
+                return true;
+            }
             match obj.get("type") {
-                None | Some(Value::Null) => return true,
-                Some(Value::String(type_name)) if type_name != "object" => return true,
-                _ => {}
+                None | Some(Value::Null) => true,
+                Some(Value::String(type_name)) if type_name != "object" => true,
+                _ => false,
             }
-            for union_key in ["oneOf", "anyOf"] {
-                let Some(branches) = obj.get(union_key).and_then(Value::as_array) else {
-                    continue;
-                };
-                if branches.is_empty() {
-                    continue;
-                }
-                if branches
-                    .iter()
-                    .any(|branch| branch.get("type").and_then(Value::as_str) != Some("object"))
-                {
-                    return true;
-                }
-            }
-            false
         }
         _ => true,
+    }
+}
+
+fn root_union_key(obj: &Map<String, Value>) -> Option<&'static str> {
+    ["oneOf", "anyOf"].into_iter().find(|key| {
+        obj.get(*key)
+            .and_then(Value::as_array)
+            .is_some_and(|branches| !branches.is_empty())
+    })
+}
+
+fn root_union_needs_rewrite(obj: &Map<String, Value>) -> bool {
+    let Some(union_key) = root_union_key(obj) else {
+        return false;
+    };
+    let Some(branches) = obj.get(union_key).and_then(Value::as_array) else {
+        return false;
+    };
+    branches
+        .iter()
+        .any(|branch| branch.get("$ref").is_some() || !is_object_schema(branch))
+}
+
+fn local_schema_defs(schema: &Map<String, Value>) -> Option<&Map<String, Value>> {
+    schema
+        .get("$defs")
+        .or_else(|| schema.get("definitions"))
+        .or_else(|| schema.get("defs"))
+        .and_then(Value::as_object)
+}
+
+fn local_def_name(reference: &str) -> Option<&str> {
+    let name = reference
+        .strip_prefix("#/$defs/")
+        .or_else(|| reference.strip_prefix("#/definitions/"))
+        .or_else(|| reference.strip_prefix("#/defs/"))?;
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    Some(name)
+}
+
+fn resolve_shallow_schema_ref(branch: &Value, defs: Option<&Map<String, Value>>) -> Value {
+    let Some(reference) = branch.get("$ref").and_then(Value::as_str) else {
+        return branch.clone();
+    };
+    let Some(name) = local_def_name(reference) else {
+        return branch.clone();
+    };
+    defs.and_then(|defs| defs.get(name).cloned())
+        .unwrap_or_else(|| branch.clone())
+}
+
+fn is_object_schema(value: &Value) -> bool {
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    match obj.get("type").and_then(Value::as_str) {
+        Some("object") => true,
+        Some(_) => false,
+        None => obj.contains_key("properties"),
+    }
+}
+
+fn normalize_object_schema_branch(mut branch: Value) -> Value {
+    if let Some(obj) = branch.as_object_mut() {
+        obj.insert("type".to_string(), json!("object"));
+        obj.entry("properties".to_string())
+            .or_insert_with(|| json!({}));
+        obj.remove("$ref");
+    }
+    branch
+}
+
+fn copy_local_schema_defs(source: &Map<String, Value>, target: &mut Map<String, Value>) {
+    for key in ["$defs", "definitions", "defs"] {
+        if let Some(value) = source.get(key) {
+            target.insert(key.to_string(), value.clone());
+        }
+    }
+}
+
+fn rewrite_root_union_schema(obj: &Map<String, Value>) -> Option<Value> {
+    let union_key = root_union_key(obj)?;
+    let branches = obj.get(union_key).and_then(Value::as_array)?;
+    let defs = local_schema_defs(obj);
+    let mut object_branches: Vec<Value> = branches
+        .iter()
+        .map(|branch| resolve_shallow_schema_ref(branch, defs))
+        .filter(|branch| is_object_schema(branch))
+        .map(normalize_object_schema_branch)
+        .collect();
+
+    match object_branches.len() {
+        0 => Some(xai_safe_empty_object_schema()),
+        1 => object_branches.pop(),
+        _ => {
+            let mut result = Map::new();
+            result.insert(union_key.to_string(), Value::Array(object_branches));
+            copy_local_schema_defs(obj, &mut result);
+            Some(Value::Object(result))
+        }
     }
 }
 
@@ -1063,32 +1170,15 @@ fn simplify_xai_function_parameters(params: Option<&Value>) -> Value {
         None | Some(Value::Null) => xai_safe_empty_object_schema(),
         Some(Value::Object(obj)) if obj.is_empty() => xai_safe_empty_object_schema(),
         Some(Value::Object(obj)) => {
-            for union_key in ["oneOf", "anyOf"] {
-                if let Some(branches) = obj.get(union_key).and_then(Value::as_array) {
-                    if branches
-                        .iter()
-                        .any(|branch| branch.get("type").and_then(Value::as_str) != Some("object"))
-                    {
-                        if let Some(object_branch) = branches.iter().find(|branch| {
-                            branch
-                                .get("type")
-                                .and_then(Value::as_str)
-                                .is_some_and(|kind| kind == "object")
-                        }) {
-                            let mut result = object_branch.clone();
-                            if let Some(result_obj) = result.as_object_mut() {
-                                result_obj.insert("type".to_string(), json!("object"));
-                                result_obj
-                                    .entry("properties".to_string())
-                                    .or_insert_with(|| json!({}));
-                            }
-                            return result;
-                        }
-                        return xai_safe_empty_object_schema();
-                    }
-                }
+            let resolved =
+                resolve_shallow_schema_ref(&Value::Object(obj.clone()), local_schema_defs(obj));
+            let Some(resolved_obj) = resolved.as_object() else {
+                return xai_safe_empty_object_schema();
+            };
+            if let Some(rewritten) = rewrite_root_union_schema(resolved_obj) {
+                return rewritten;
             }
-            let mut result = Value::Object(obj.clone());
+            let mut result = Value::Object(resolved_obj.clone());
             if let Some(result_obj) = result.as_object_mut() {
                 if result_obj.get("type").and_then(Value::as_str) != Some("object") {
                     result_obj.insert("type".to_string(), json!("object"));
@@ -1096,6 +1186,7 @@ fn simplify_xai_function_parameters(params: Option<&Value>) -> Value {
                         .entry("properties".to_string())
                         .or_insert_with(|| json!({}));
                 }
+                result_obj.remove("$ref");
             }
             result
         }
@@ -1495,6 +1586,210 @@ mod tests {
             None
         );
         assert_eq!(body["model"], "grok-4.5");
+    }
+
+    #[test]
+    fn keeps_unknown_grok_prefixed_request_model() {
+        let mut body = json!({ "model": "grok-4.20" });
+        assert_eq!(
+            rewrite_xai_unknown_request_model(&mut body, "grok-4.6", &HashSet::new()),
+            None
+        );
+        assert_eq!(body["model"], "grok-4.20");
+
+        let mut prefixed = json!({ "model": "xai/grok-4.20" });
+        assert_eq!(
+            rewrite_xai_unknown_request_model(&mut prefixed, "grok-4.6", &HashSet::new()),
+            None
+        );
+        assert_eq!(prefixed["model"], "xai/grok-4.20");
+    }
+
+    #[test]
+    fn keeps_exact_grok_slug() {
+        let mut body = json!({ "model": "grok" });
+        assert_eq!(
+            rewrite_xai_unknown_request_model(&mut body, "grok-4.6", &HashSet::new()),
+            None
+        );
+        assert_eq!(body["model"], "grok");
+    }
+
+    #[test]
+    fn remaps_non_hyphen_grok_prefix() {
+        let mut body = json!({ "model": "grokking-1" });
+        assert_eq!(
+            rewrite_xai_unknown_request_model(&mut body, "grok-4.6", &HashSet::new()),
+            Some(("grokking-1".to_string(), "grok-4.6".to_string()))
+        );
+        assert_eq!(body["model"], "grok-4.6");
+    }
+
+    #[test]
+    fn apply_compat_rewrites_model_before_grok_45_field_strip() {
+        let mut body = json!({
+            "model": "gpt-5.6-sol",
+            "stop": ["x"],
+            "presence_penalty": 0.2
+        });
+        apply_xai_native_responses_request_compat(&mut body, Some("grok-4.5"), &HashSet::new());
+        assert_eq!(body["model"], "grok-4.5");
+        assert!(body.get("stop").is_none());
+        assert!(body.get("presence_penalty").is_none());
+    }
+
+    #[test]
+    fn lifts_ref_union_object_branch_instead_of_empty_schema() {
+        let mut body = json!({
+            "model": "grok-4.6",
+            "tools": [{
+                "type": "function",
+                "name": "mcp__codex_app__automation_update",
+                "parameters": {
+                    "$defs": {
+                        "Create": {
+                            "type": "object",
+                            "properties": {
+                                "action": { "type": "string" },
+                                "prompt": { "type": "string" }
+                            },
+                            "required": ["action"]
+                        }
+                    },
+                    "oneOf": [
+                        { "$ref": "#/$defs/Create" },
+                        { "type": "null" }
+                    ]
+                }
+            }]
+        });
+        assert!(sanitize_xai_responses_request(&mut body));
+        let params = &body["tools"][0]["parameters"];
+        assert_eq!(params["type"], "object");
+        assert_eq!(params["properties"]["action"]["type"], "string");
+        assert_eq!(params["properties"]["prompt"]["type"], "string");
+        assert_eq!(params["required"], json!(["action"]));
+        assert!(params.get("oneOf").is_none());
+        assert!(params.get("$defs").is_none());
+    }
+
+    #[test]
+    fn drops_null_and_keeps_object_union_branches() {
+        let mut body = json!({
+            "model": "grok-4.6",
+            "tools": [{
+                "type": "function",
+                "name": "lookup",
+                "parameters": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "slug": { "type": "string" }
+                            },
+                            "required": ["id"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "slug": { "type": "string" }
+                            },
+                            "required": ["slug"]
+                        },
+                        { "type": "null" }
+                    ]
+                }
+            }]
+        });
+        assert!(sanitize_xai_responses_request(&mut body));
+        let params = &body["tools"][0]["parameters"];
+        assert!(params.get("type").is_none());
+        assert_eq!(params["oneOf"].as_array().unwrap().len(), 2);
+        assert_eq!(params["oneOf"][0]["required"], json!(["id"]));
+        assert_eq!(params["oneOf"][1]["required"], json!(["slug"]));
+        assert!(params.get("required").is_none());
+    }
+
+    #[test]
+    fn keeps_all_object_union_untouched() {
+        let mut body = json!({
+            "model": "grok-4.6",
+            "tools": [{
+                "type": "function",
+                "name": "lookup",
+                "parameters": {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "action": { "type": "string" },
+                                "id": { "type": "string" }
+                            },
+                            "required": ["action", "id"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "action": { "type": "string" },
+                                "slug": { "type": "string" }
+                            },
+                            "required": ["action", "slug"]
+                        }
+                    ]
+                }
+            }]
+        });
+        let original = body["tools"][0]["parameters"].clone();
+        sanitize_xai_responses_request(&mut body);
+        assert_eq!(body["tools"][0]["parameters"], original);
+    }
+
+    #[test]
+    fn keeps_resolved_ref_union_instead_of_merging_or_emptying() {
+        let mut body = json!({
+            "model": "grok-4.6",
+            "tools": [{
+                "type": "function",
+                "name": "mcp__codex_app__automation_update",
+                "parameters": {
+                    "$defs": {
+                        "Create": {
+                            "type": "object",
+                            "properties": {
+                                "action": { "type": "string" },
+                                "prompt": { "type": "string" }
+                            },
+                            "required": ["action", "prompt"]
+                        },
+                        "Update": {
+                            "type": "object",
+                            "properties": {
+                                "action": { "type": "string" },
+                                "id": { "type": "string" }
+                            },
+                            "required": ["action", "id"]
+                        }
+                    },
+                    "oneOf": [
+                        { "$ref": "#/$defs/Create" },
+                        { "$ref": "#/$defs/Update" },
+                        { "type": "null" }
+                    ]
+                }
+            }]
+        });
+        assert!(sanitize_xai_responses_request(&mut body));
+        let params = &body["tools"][0]["parameters"];
+        assert_eq!(params["oneOf"].as_array().unwrap().len(), 2);
+        assert_eq!(params["oneOf"][0]["required"], json!(["action", "prompt"]));
+        assert_eq!(params["oneOf"][1]["required"], json!(["action", "id"]));
+        assert!(params.get("type").is_none());
+        assert!(params.get("required").is_none());
+        assert!(params.get("properties").is_none());
+        assert_eq!(params["oneOf"][0]["properties"]["prompt"]["type"], "string");
+        assert_eq!(params["oneOf"][1]["properties"]["id"]["type"], "string");
     }
 
     #[test]
