@@ -4,6 +4,7 @@ use std::time::Instant;
 use hyper::HeaderMap;
 use serde_json::{json, Map, Value};
 
+use crate::llm_compat_inventory::ResponseCompatInventory;
 use crate::logging::DiagnosticLogger;
 
 pub const USER_PREVIEW_MAX_CHARS: usize = 500;
@@ -67,8 +68,8 @@ impl PendingLlmLog {
         }
     }
 
-    pub fn fail(mut self, error: &str) {
-        self.finish_incomplete(error);
+    pub fn fail(mut self, error: &str, inventory: Option<&ResponseCompatInventory>) {
+        self.finish_incomplete(error, inventory);
     }
 
     pub fn succeed(
@@ -77,11 +78,19 @@ impl PendingLlmLog {
         sse: bool,
         response_headers: Value,
         response_bytes: usize,
+        inventory: Option<&ResponseCompatInventory>,
     ) {
         if let Some(request_id) = value_string(&response_headers, "x-request-id") {
             self.request_id = Some(request_id);
         }
-        self.write(status, sse, response_headers, response_bytes, None);
+        self.write(
+            status,
+            sse,
+            response_headers,
+            response_bytes,
+            None,
+            inventory,
+        );
     }
 
     fn write(
@@ -91,6 +100,7 @@ impl PendingLlmLog {
         response_headers: Value,
         response_bytes: usize,
         error: Option<&str>,
+        inventory: Option<&ResponseCompatInventory>,
     ) {
         if self.finished {
             return;
@@ -120,20 +130,23 @@ impl PendingLlmLog {
         if let Some(error) = error {
             detail["error"] = json!(error);
         }
+        if let Some(compat) = compat_detail(status, error, inventory) {
+            detail["compat"] = compat;
+        }
         if let Err(error) = self.logger.append("llm.request", detail) {
             eprintln!("failed to append llm.request log: {error}");
         }
     }
 
-    fn finish_incomplete(&mut self, error: &str) {
-        self.write(0, false, json!({}), 0, Some(error));
+    fn finish_incomplete(&mut self, error: &str, inventory: Option<&ResponseCompatInventory>) {
+        self.write(0, false, json!({}), 0, Some(error), inventory);
     }
 }
 
 impl Drop for PendingLlmLog {
     fn drop(&mut self) {
         if !self.finished {
-            self.finish_incomplete("proxy request did not complete");
+            self.finish_incomplete("proxy request did not complete", None);
         }
     }
 }
@@ -158,6 +171,17 @@ where
         map.insert(key.to_string(), Value::String(value.to_string()));
     }
     Value::Object(map)
+}
+
+fn compat_detail(
+    status: u16,
+    error: Option<&str>,
+    inventory: Option<&ResponseCompatInventory>,
+) -> Option<Value> {
+    match inventory {
+        Some(inventory) => inventory.log_value(status, error),
+        None => ResponseCompatInventory::default().log_value(status, error),
+    }
 }
 
 fn insert_optional(detail: &mut Value, key: &str, value: Option<&str>) {
@@ -430,6 +454,7 @@ mod tests {
                 "x-ratelimit-remaining-requests": "12"
             }),
             24,
+            None,
         );
 
         let page = logger.read_latest().expect("latest");
@@ -449,8 +474,58 @@ mod tests {
         assert_eq!(detail["response"]["headers"]["server"], "cloudflare");
         assert!(detail["request"].get("body").is_none());
         assert!(detail["response"].get("body").is_none());
+        assert!(detail.get("compat").is_none());
         assert!(!stored.contains("sk-secret"));
         assert!(!stored.contains("sk-request"));
         assert_eq!(page.records[0].summary, "search me");
+    }
+
+    #[test]
+    fn pending_llm_log_attaches_bounded_compat_without_bodies_or_argument_values() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let logger = Arc::new(DiagnosticLogger::new(temp_dir.path().join("logs")));
+        let pending = PendingLlmLog::start(
+            logger.clone(),
+            "/v1/responses".to_string(),
+            "POST".to_string(),
+            "xai".to_string(),
+            &HeaderMap::new(),
+            br#"{"model":"grok-4.6"}"#,
+        );
+        let mut inventory = ResponseCompatInventory::default();
+        inventory.observe_pair(
+            &json!({
+                "type": "function_call",
+                "name": "view_image",
+                "call_id": "call_1",
+                "arguments": { "path": "/secret/cursor.png" }
+            }),
+            &json!({
+                "type": "function_call",
+                "name": "view_image",
+                "call_id": "call_1",
+                "arguments": "{\"path\":\"/secret/cursor.png\"}"
+            }),
+        );
+        pending.succeed(200, true, json!({}), 32, Some(&inventory));
+
+        let page = logger.read_latest().expect("latest");
+        let detail = &page.records[0].detail;
+        let stored = detail.to_string();
+        assert_eq!(detail["compat"]["suspect"], true);
+        assert_eq!(
+            detail["compat"]["reasons"],
+            json!(["arguments_object", "rewritten_function_call"])
+        );
+        assert_eq!(detail["compat"]["functionCalls"][0]["name"], "view_image");
+        assert_eq!(
+            detail["compat"]["functionCalls"][0]["argumentsKind"],
+            "object"
+        );
+        assert_eq!(detail["compat"]["functionCalls"][0]["rewritten"], true);
+        assert!(detail["request"].get("body").is_none());
+        assert!(detail["response"].get("body").is_none());
+        assert!(!stored.contains("/secret/cursor.png"));
+        assert!(!stored.contains("cursor.png"));
     }
 }

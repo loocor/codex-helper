@@ -21,6 +21,7 @@ use crate::deepseek_sanitize::{
     rewrite_deepseek_native_sse_block, DeepSeekRestoreMap,
 };
 use crate::endpoint;
+use crate::llm_compat_inventory::ResponseCompatInventory;
 use crate::llm_traffic_log::{redact_header_pairs, PendingLlmLog};
 use crate::logging::DiagnosticLogger;
 use crate::provider_oauth::{
@@ -307,7 +308,7 @@ impl ProviderProxy {
             Ok(response) => response,
             Err(error) => {
                 if let Some(pending_log) = pending_log {
-                    pending_log.fail(&format!("Provider upstream request failed: {error}"));
+                    pending_log.fail(&format!("Provider upstream request failed: {error}"), None);
                 }
                 return Err(error).context("Provider upstream request failed");
             }
@@ -334,6 +335,10 @@ impl ProviderProxy {
             .unwrap_or(Value::Null);
         if !matches!(restore, NativeRestore::None) && status.is_success() {
             if is_sse {
+                let inventory = pending_log
+                    .as_ref()
+                    .map(|_| Arc::new(Mutex::new(ResponseCompatInventory::default())));
+                let rewrite_inventory = inventory.clone();
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
                 tokio::spawn(async move {
                     let mut buffer = String::new();
@@ -347,10 +352,12 @@ impl ProviderProxy {
                                     if block.trim().is_empty() {
                                         continue;
                                     }
-                                    if tx
-                                        .send(Ok(rewrite_native_sse_block(&block, &restore)))
-                                        .is_err()
-                                    {
+                                    let rewritten = rewrite_inspected_sse_block(
+                                        &block,
+                                        &restore,
+                                        rewrite_inventory.as_ref(),
+                                    );
+                                    if tx.send(Ok(rewritten)).is_err() {
                                         return;
                                     }
                                 }
@@ -365,7 +372,12 @@ impl ProviderProxy {
                         buffer.push_str(&String::from_utf8_lossy(&remainder));
                     }
                     if !buffer.trim().is_empty() {
-                        let _ = tx.send(Ok(rewrite_native_sse_block(&buffer, &restore)));
+                        let rewritten = rewrite_inspected_sse_block(
+                            &buffer,
+                            &restore,
+                            rewrite_inventory.as_ref(),
+                        );
+                        let _ = tx.send(Ok(rewritten));
                     }
                 });
                 return Ok(builder.body(outgoing_body(
@@ -374,6 +386,8 @@ impl ProviderProxy {
                     status.as_u16(),
                     true,
                     logged_headers,
+                    inventory,
+                    false,
                 ))?);
             }
             let body_bytes = response
@@ -381,13 +395,23 @@ impl ProviderProxy {
                 .await
                 .context("Failed to read provider upstream body")?;
             let rewritten = rewrite_native_json_bytes(&body_bytes, &restore);
+            let inventory = pending_log.as_ref().map(|_| {
+                let mut inventory = ResponseCompatInventory::default();
+                inventory.observe_json_pair_bytes(&body_bytes, &rewritten);
+                inventory
+            });
             return Ok(builder.body(logged_bytes_body(
                 rewritten,
                 pending_log,
                 status.as_u16(),
                 logged_headers,
+                inventory,
             ))?);
         }
+        let inventory = pending_log
+            .as_ref()
+            .map(|_| Arc::new(Mutex::new(ResponseCompatInventory::default())));
+        let inspect_stream = inventory.is_some();
         let stream = response
             .bytes_stream()
             .map_err(|error| io::Error::other(error.to_string()));
@@ -397,6 +421,8 @@ impl ProviderProxy {
             status.as_u16(),
             is_sse,
             logged_headers,
+            inventory,
+            inspect_stream,
         ))?)
     }
 }
@@ -435,11 +461,122 @@ fn logged_bytes_body(
     pending: Option<PendingLlmLog>,
     status: u16,
     response_headers: Value,
+    inventory: Option<ResponseCompatInventory>,
 ) -> ProxyBody {
     if let Some(pending) = pending {
-        pending.succeed(status, false, response_headers, bytes.len());
+        pending.succeed(
+            status,
+            false,
+            response_headers,
+            bytes.len(),
+            inventory.as_ref(),
+        );
     }
     bytes_body(bytes)
+}
+
+fn rewrite_inspected_sse_block(
+    block: &str,
+    restore: &NativeRestore,
+    inventory: Option<&Arc<Mutex<ResponseCompatInventory>>>,
+) -> Bytes {
+    let rewritten = rewrite_native_sse_block(block, restore);
+    if let Some(inventory) = inventory {
+        lock_compat_inventory(inventory).observe_sse_pair(block, &rewritten);
+    }
+    rewritten
+}
+
+fn lock_compat_inventory(
+    inventory: &Arc<Mutex<ResponseCompatInventory>>,
+) -> std::sync::MutexGuard<'_, ResponseCompatInventory> {
+    inventory
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn snapshot_compat_inventory(
+    inventory: &Option<Arc<Mutex<ResponseCompatInventory>>>,
+) -> Option<ResponseCompatInventory> {
+    inventory
+        .as_ref()
+        .map(|inventory| lock_compat_inventory(inventory).clone())
+}
+
+fn succeed_pending(
+    pending: PendingLlmLog,
+    status: u16,
+    sse: bool,
+    response_headers: Value,
+    response_bytes: usize,
+    inventory: &Option<Arc<Mutex<ResponseCompatInventory>>>,
+) {
+    let snapshot = snapshot_compat_inventory(inventory);
+    pending.succeed(
+        status,
+        sse,
+        response_headers,
+        response_bytes,
+        snapshot.as_ref(),
+    );
+}
+
+fn fail_pending(
+    pending: PendingLlmLog,
+    error: &str,
+    inventory: &Option<Arc<Mutex<ResponseCompatInventory>>>,
+) {
+    let snapshot = snapshot_compat_inventory(inventory);
+    pending.fail(error, snapshot.as_ref());
+}
+
+struct StreamInventory {
+    sse: bool,
+    sse_buffer: String,
+    remainder: Vec<u8>,
+    json_buf: Option<Vec<u8>>,
+}
+
+impl StreamInventory {
+    fn new(sse: bool) -> Self {
+        Self {
+            sse,
+            sse_buffer: String::new(),
+            remainder: Vec::new(),
+            json_buf: if sse { None } else { Some(Vec::new()) },
+        }
+    }
+
+    fn observe_chunk(&mut self, inventory: &Arc<Mutex<ResponseCompatInventory>>, bytes: &[u8]) {
+        if self.sse {
+            append_utf8_safe(&mut self.sse_buffer, &mut self.remainder, bytes);
+            while let Some(block) = take_sse_block(&mut self.sse_buffer) {
+                if !block.trim().is_empty() {
+                    lock_compat_inventory(inventory).observe_sse_block(&block);
+                }
+            }
+            return;
+        }
+        if let Some(buf) = &mut self.json_buf {
+            buf.extend_from_slice(bytes);
+        }
+    }
+
+    fn finish(mut self, inventory: &Arc<Mutex<ResponseCompatInventory>>) {
+        if self.sse {
+            if !self.remainder.is_empty() {
+                self.sse_buffer
+                    .push_str(&String::from_utf8_lossy(&self.remainder));
+            }
+            if !self.sse_buffer.trim().is_empty() {
+                lock_compat_inventory(inventory).observe_sse_block(&self.sse_buffer);
+            }
+            return;
+        }
+        if let Some(buf) = self.json_buf {
+            lock_compat_inventory(inventory).observe_json_bytes(&buf);
+        }
+    }
 }
 
 fn outgoing_body<S>(
@@ -448,6 +585,8 @@ fn outgoing_body<S>(
     status: u16,
     sse: bool,
     response_headers: Value,
+    inventory: Option<Arc<Mutex<ResponseCompatInventory>>>,
+    inspect_stream: bool,
 ) -> ProxyBody
 where
     S: futures_util::Stream<Item = Result<Bytes, io::Error>> + Send + Sync + 'static,
@@ -459,24 +598,42 @@ where
     tokio::spawn(async move {
         let mut stream = std::pin::pin!(stream);
         let mut response_bytes = 0usize;
+        let mut inspector = inspect_stream.then(|| StreamInventory::new(sse));
         while let Some(item) = stream.next().await {
             match item {
                 Ok(bytes) => {
                     response_bytes += bytes.len();
+                    if let (Some(inspector), Some(inventory)) = (&mut inspector, &inventory) {
+                        inspector.observe_chunk(inventory, &bytes);
+                    }
                     if tx.send(Ok(bytes)).is_err() {
-                        pending.fail("client disconnected before response completed");
+                        fail_pending(
+                            pending,
+                            "client disconnected before response completed",
+                            &inventory,
+                        );
                         return;
                     }
                 }
                 Err(error) => {
                     let message = error.to_string();
                     let _ = tx.send(Err(error));
-                    pending.fail(&message);
+                    fail_pending(pending, &message, &inventory);
                     return;
                 }
             }
         }
-        pending.succeed(status, sse, response_headers, response_bytes);
+        if let (Some(inspector), Some(inventory)) = (inspector, &inventory) {
+            inspector.finish(inventory);
+        }
+        succeed_pending(
+            pending,
+            status,
+            sse,
+            response_headers,
+            response_bytes,
+            &inventory,
+        );
     });
     boxed_bytes_stream(receiver_byte_stream(rx))
 }
@@ -1329,7 +1486,7 @@ mod tests {
             Ok(bytes::Bytes::from_static(b"hello")),
             Err(std::io::Error::other("upstream reset")),
         ]);
-        let body = super::outgoing_body(stream, Some(pending), 200, true, json!({}));
+        let body = super::outgoing_body(stream, Some(pending), 200, true, json!({}), None, false);
         let collected = http_body_util::BodyExt::collect(body).await;
         assert!(
             collected.is_err(),
@@ -1338,6 +1495,53 @@ mod tests {
         let detail = wait_for_llm_log(&logger).await;
         assert_eq!(detail["error"], "upstream reset");
         assert_eq!(detail["status"], 0);
+        assert_eq!(detail["compat"]["suspect"], true);
+        assert_eq!(detail["compat"]["reasons"], json!(["stream_error"]));
+        assert!(detail["request"].get("body").is_none());
+        assert!(detail["response"].get("body").is_none());
+    }
+
+    #[test]
+    fn rewrite_inspected_sse_block_records_object_arguments_without_values() {
+        use super::{rewrite_inspected_sse_block, NativeRestore};
+        use crate::llm_compat_inventory::ResponseCompatInventory;
+        use crate::xai_sanitize::XaiNativeRestoreMap;
+        use std::sync::{Arc, Mutex};
+
+        let restore = NativeRestore::Xai(XaiNativeRestoreMap::default());
+        let inventory = Arc::new(Mutex::new(ResponseCompatInventory::default()));
+        let block = r#"data: {"type":"function_call","name":"view_image","call_id":"c1","arguments":{"path":"/secret/cursor.png"}}"#;
+        let rewritten = rewrite_inspected_sse_block(block, &restore, Some(&inventory));
+        let rewritten_text = String::from_utf8(rewritten.to_vec()).expect("utf8");
+        let data = rewritten_text
+            .lines()
+            .find(|line| line.starts_with("data:"))
+            .expect("data line")
+            .trim_start_matches("data:")
+            .trim();
+        let parsed: serde_json::Value = serde_json::from_str(data).expect("json");
+        assert_eq!(parsed["name"], "view_image");
+        assert!(
+            parsed["arguments"].is_string(),
+            "object arguments should stringify, got {parsed}"
+        );
+
+        let compat = inventory
+            .lock()
+            .expect("inventory")
+            .log_value(200, None)
+            .expect("compat");
+        let rendered = compat.to_string();
+        assert_eq!(compat["functionCalls"][0]["name"], "view_image");
+        assert_eq!(compat["functionCalls"][0]["argumentsKind"], "object");
+        assert_eq!(compat["functionCalls"][0]["rewritten"], true);
+        assert!(compat["reasons"]
+            .as_array()
+            .expect("reasons")
+            .iter()
+            .any(|reason| reason == "arguments_object"));
+        assert!(!rendered.contains("/secret/cursor.png"));
+        assert!(!rendered.contains("cursor.png"));
     }
 
     #[tokio::test]

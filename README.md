@@ -35,7 +35,7 @@ Codex Helper owns one state directory:
   state.json
 ```
 
-Diagnostics are written to dated JSONL files under `~/.codex-helper/logs/` (`codex-helper-YYYY-MM-DD.jsonl`, local date). Helper Settings → Logs can page through them, search their contents, and open a record to inspect its stored detail. A Diagnostics setting (off by default) can also record API-provider LLM request metadata from the local Helper proxy (secrets stripped from headers, plus a short user-message preview). Request and response bodies are not stored. Official ChatGPT login traffic is not included.
+Diagnostics are written to dated JSONL files under `~/.codex-helper/logs/` (`codex-helper-YYYY-MM-DD.jsonl`, local date). Helper Settings → Logs can page through them, search their contents, and open a record to inspect its stored detail. A Diagnostics setting (off by default) can also record API-provider LLM request metadata from the local Helper proxy (secrets stripped from headers, plus a short user-message preview). Request and response bodies are not stored. When that setting is on, Helper may also keep a bounded compat summary for suspect responses or rewritten function_call items. Official ChatGPT login traffic is not included.
 
 ## Development
 
