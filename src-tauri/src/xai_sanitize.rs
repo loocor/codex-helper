@@ -6,10 +6,10 @@
 //! `tool_search` and `custom` tools into functions (including history
 //! `tool_search_call` / `custom_tool_call` items), rewrite `agent_message`,
 //! collapse mixed root `oneOf`/`anyOf` schemas (shallow `$ref`/`$defs`,
-//! drop non-object branches, lift a single object). Return-path: restore flattened
-//! function-call names, restore `tool_search_call` / `custom_tool_call`, and
-//! rewrite whole-float tool arguments so Codex Desktop serde accepts Grok
-//! `92116.0` as `i32`/`u64`.
+//! drop non-object branches, lift a single object). Return-path: stringify
+//! object `function_call.arguments`, rewrite whole-float tool arguments so
+//! Codex Desktop serde accepts Grok `92116.0` as `i32`/`u64`, then restore
+//! flattened names and `tool_search_call` / `custom_tool_call`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -1291,10 +1291,13 @@ fn input_text_part(text: &str) -> Value {
     json!({ "type": "input_text", "text": text })
 }
 
-/// Rewrite whole-number JSON floats (`92116.0`) to integers (`92116`) on
-/// completed function-call argument payloads. Grok emits JSON Number floats for
-/// integer tool fields; Codex Desktop then fails local serde (`expected i32` /
-/// `expected u64`) and never runs the tool.
+/// Normalize completed function-call argument payloads for Codex Desktop.
+///
+/// Grok often emits `arguments` as a JSON object, especially for small tools
+/// such as `view_image`. Codex serde expects a JSON string; an object is dropped
+/// and the turn ends with no visible message. Whole-number JSON floats
+/// (`92116.0`) are also rewritten to integers (`92116`) because Codex fails
+/// local serde (`expected i32` / `expected u64`) and never runs the tool.
 pub fn normalize_xai_function_call_integer_arguments(value: &mut Value) -> bool {
     match value {
         Value::Array(items) => {
@@ -1328,18 +1331,28 @@ pub fn normalize_xai_function_call_integer_arguments(value: &mut Value) -> bool 
 }
 
 fn normalize_function_call_arguments_field(obj: &mut Map<String, Value>) -> bool {
-    match obj.get_mut("arguments") {
-        Some(Value::String(arguments)) => match rewrite_whole_float_arguments_json(arguments) {
+    let Some(arguments) = obj.get("arguments") else {
+        return false;
+    };
+    if arguments.is_null() {
+        return false;
+    }
+    if let Some(text) = arguments.as_str() {
+        return match rewrite_whole_float_arguments_json(text) {
             Ok(Some(rewritten)) => {
-                *arguments = rewritten;
+                obj.insert("arguments".to_string(), Value::String(rewritten));
                 true
             }
-            Ok(None) => false,
-            Err(_) => false,
-        },
-        Some(other) => rewrite_whole_number_floats(other),
-        None => false,
+            _ => false,
+        };
     }
+    let mut value = obj.remove("arguments").unwrap_or(Value::Null);
+    let _ = rewrite_whole_number_floats(&mut value);
+    obj.insert(
+        "arguments".to_string(),
+        Value::String(json_compact_string(&value)),
+    );
+    true
 }
 
 fn rewrite_whole_float_arguments_json(
@@ -1409,15 +1422,22 @@ fn whole_float_to_json_int(number: &Number) -> Option<Number> {
     }
 }
 
+fn rewrite_xai_native_response_value(value: &mut Value, restore_map: &XaiNativeRestoreMap) -> bool {
+    // Stringify/normalize arguments while the item is still `function_call`.
+    // Custom/tool_search restore would otherwise move the payload and leave
+    // object arguments or whole-floats in a shape Codex Desktop cannot serde.
+    let mut changed = normalize_xai_function_call_integer_arguments(value);
+    changed |= restore_tool_search_calls(value);
+    changed |= compat_custom::restore_custom_tool_calls(value, &restore_map.custom_tool_names);
+    changed |= restore_response_namespaces(value, &restore_map.namespaces);
+    changed
+}
+
 pub fn rewrite_xai_native_json_bytes(bytes: &[u8], restore_map: &XaiNativeRestoreMap) -> Vec<u8> {
     let Ok(mut value) = serde_json::from_slice::<Value>(bytes) else {
         return bytes.to_vec();
     };
-    let mut changed = restore_tool_search_calls(&mut value);
-    changed |= compat_custom::restore_custom_tool_calls(&mut value, &restore_map.custom_tool_names);
-    changed |= restore_response_namespaces(&mut value, &restore_map.namespaces);
-    changed |= normalize_xai_function_call_integer_arguments(&mut value);
-    if !changed {
+    if !rewrite_xai_native_response_value(&mut value, restore_map) {
         return bytes.to_vec();
     }
     serde_json::to_vec(&value).unwrap_or_else(|_| bytes.to_vec())
@@ -1445,11 +1465,7 @@ pub fn rewrite_xai_native_sse_block(block: &str, restore_map: &XaiNativeRestoreM
         Ok(value) => value,
         Err(_) => return Bytes::from(format!("{block}\n\n")),
     };
-    let mut changed = restore_tool_search_calls(&mut event);
-    changed |= compat_custom::restore_custom_tool_calls(&mut event, &restore_map.custom_tool_names);
-    changed |= restore_response_namespaces(&mut event, &restore_map.namespaces);
-    changed |= normalize_xai_function_call_integer_arguments(&mut event);
-    if !changed {
+    if !rewrite_xai_native_response_value(&mut event, restore_map) {
         return Bytes::from(format!("{block}\n\n"));
     }
     let restored = serde_json::to_string(&event).unwrap_or(data);
@@ -2109,6 +2125,82 @@ mod tests {
         assert_eq!(arguments["nested"]["n"].as_i64(), Some(92116));
         assert_eq!(arguments["arr"][0].as_u64(), Some(120000));
         assert_eq!(arguments["arr"][1].as_f64(), Some(1.5));
+    }
+
+    #[test]
+    fn function_call_object_arguments_are_stringified() {
+        let mut body = json!({
+            "output": [{
+                "type": "function_call",
+                "name": "view_image",
+                "call_id": "call_1",
+                "arguments": { "path": "/tmp/a.png" }
+            }]
+        });
+        assert!(normalize_xai_function_call_integer_arguments(&mut body));
+        let arguments = body["output"][0]["arguments"]
+            .as_str()
+            .expect("string args");
+        let parsed: Value = serde_json::from_str(arguments).unwrap();
+        assert_eq!(parsed["path"], "/tmp/a.png");
+    }
+
+    #[test]
+    fn function_call_object_arguments_stringify_and_rewrite_whole_floats() {
+        let mut body = json!({
+            "output": [{
+                "type": "function_call",
+                "name": "write_stdin",
+                "arguments": { "session_id": 92116.0, "yield_time_ms": 120000.0 }
+            }]
+        });
+        assert!(normalize_xai_function_call_integer_arguments(&mut body));
+        let arguments: Value =
+            serde_json::from_str(body["output"][0]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments["session_id"].as_i64(), Some(92116));
+        assert_eq!(arguments["yield_time_ms"].as_u64(), Some(120000));
+    }
+
+    #[test]
+    fn sse_block_stringifies_object_function_call_arguments() {
+        let restore = XaiNativeRestoreMap::default();
+        let block = concat!(
+            "event: response.output_item.done\n",
+            r#"data: {"type":"function_call","name":"view_image","call_id":"call_1","arguments":{"path":"/tmp/a.png"}}"#,
+            "\n\n"
+        );
+        let rewritten = rewrite_xai_native_sse_block(block, &restore);
+        let text = String::from_utf8(rewritten.to_vec()).unwrap();
+        let data = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("sse data");
+        let event: Value = serde_json::from_str(data).unwrap();
+        let arguments: Value = serde_json::from_str(event["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(event["name"], "view_image");
+        assert_eq!(arguments["path"], "/tmp/a.png");
+    }
+
+    #[test]
+    fn sse_block_normalizes_object_arguments_before_custom_restore() {
+        let mut restore = XaiNativeRestoreMap::default();
+        restore.custom_tool_names.insert("apply_patch".to_string());
+        let block = concat!(
+            "event: response.output_item.done\n",
+            r#"data: {"type":"function_call","name":"apply_patch","call_id":"call_1","arguments":{"input":"patch","yield_time_ms":120000.0}}"#,
+            "\n\n"
+        );
+        let rewritten = rewrite_xai_native_sse_block(block, &restore);
+        let text = String::from_utf8(rewritten.to_vec()).unwrap();
+        let data = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("sse data");
+        let event: Value = serde_json::from_str(data).unwrap();
+        assert_eq!(event["type"], "custom_tool_call");
+        assert_eq!(event["name"], "apply_patch");
+        assert_eq!(event["input"], "patch");
+        assert!(event.get("arguments").is_none());
     }
 
     #[test]
