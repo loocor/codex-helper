@@ -307,6 +307,7 @@ test("settings page exposes API provider LLM traffic logging switch", () => {
   expect(settingsSource).toContain("Log API provider LLM traffic");
   expect(settingsSource).toContain("Official ChatGPT login traffic is not visible");
   expect(settingsSource).toContain("Request and response bodies are not stored.");
+  expect(settingsSource).toContain("bounded compat summary");
   expect(settingsSource).not.toContain("Bodies are redacted and truncated.");
   expect(settingsSource).toContain('"logLlmTrafficEnabled"');
   expect(source).toContain("logLlmTrafficEnabled: false");

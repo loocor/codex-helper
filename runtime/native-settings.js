@@ -402,7 +402,7 @@ function nativeSettingsPageContent(pageId) {
       ${nativeSettingsSwitchRow("Hide usage-limit overlay", "Hide the You're out of Codex and Work usage card above the composer. This does not reset or bypass account limits.", "hideUsageLimitBannerEnabled", "hideUsageLimitBannerEnabled", "Hide usage-limit overlay")}
     `)}
     ${nativeSettingsGroupSection("Diagnostics", `
-      ${nativeSettingsSwitchRow("Log API provider LLM traffic", "Record request metadata and a short user-message preview for API-provider calls that go through the local Helper proxy. Official ChatGPT login traffic is not visible. Request and response bodies are not stored.", "logLlmTrafficEnabled", "logLlmTrafficEnabled", "Log API provider LLM traffic")}
+      ${nativeSettingsSwitchRow("Log API provider LLM traffic", "Record request metadata and a short user-message preview for API-provider calls that go through the local Helper proxy. Official ChatGPT login traffic is not visible. Request and response bodies are not stored. Suspect responses and rewritten function_call items keep a bounded compat summary instead of a body.", "logLlmTrafficEnabled", "logLlmTrafficEnabled", "Log API provider LLM traffic")}
     `)}
     ${nativeSettingsGroupSection("Port forwarding", `
       ${nativeSettingsSwitchRow("Enable port forwarding", "Detect and forward ports from agent sessions.", "portForwardingEnabled", "portForwardingEnabled", "Enable port forwarding")}
