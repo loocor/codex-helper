@@ -103,6 +103,10 @@ impl ResponseCompatInventory {
         self.apply_sse_payload(parse_sse_payload(block));
     }
 
+    pub fn has_reasoning_without_output(&self) -> bool {
+        self.saw_reasoning && !self.saw_message && !self.saw_function_call
+    }
+
     pub fn observe_sse_pair(&mut self, before_block: &str, after_bytes: &[u8]) {
         let after_block = String::from_utf8_lossy(after_bytes);
         match (
@@ -158,7 +162,7 @@ impl ResponseCompatInventory {
     }
 
     fn reasoning_without_output(&self) -> bool {
-        self.saw_reasoning && !self.saw_message && !self.saw_function_call
+        self.has_reasoning_without_output()
     }
 
     fn reasons(&self, status: u16, error: Option<&str>) -> Vec<&'static str> {
@@ -325,6 +329,23 @@ fn error_reason(error: &str) -> &'static str {
 fn push_reason(reasons: &mut Vec<&'static str>, reason: &'static str) {
     if !reasons.contains(&reason) {
         reasons.push(reason);
+    }
+}
+
+pub fn sse_block_is_response_completed(block: &str) -> bool {
+    for line in block.lines() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if let Some(event) = line.strip_prefix("event:") {
+            if event.trim() == "response.completed" {
+                return true;
+            }
+        }
+    }
+    match parse_sse_payload(block) {
+        SsePayload::Json(value) => {
+            value.get("type").and_then(Value::as_str) == Some("response.completed")
+        }
+        _ => false,
     }
 }
 
@@ -543,6 +564,19 @@ mod tests {
         assert_eq!(value["functionCalls"][0]["argumentsKind"], "string");
         assert_eq!(value["functionCalls"][0]["rewritten"], true);
         assert!(!value.to_string().contains("92116"));
+    }
+
+    #[test]
+    fn sse_block_detects_response_completed_event() {
+        assert!(sse_block_is_response_completed(
+            "event: response.completed\ndata: {\"type\":\"response.completed\"}",
+        ));
+        assert!(sse_block_is_response_completed(
+            r#"data: {"type":"response.completed","response":{"id":"resp_1"}}"#,
+        ));
+        assert!(!sse_block_is_response_completed(
+            r#"data: {"type":"reasoning","encrypted_content":"SECRET"}"#,
+        ));
     }
 
     #[test]

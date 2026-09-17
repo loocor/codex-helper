@@ -103,6 +103,7 @@ pub fn sanitize_xai_responses_request(body: &mut Value) -> bool {
     changed |= strip_null_reasoning_content(body);
     changed |= filter_unsupported_tools(body);
     changed |= normalize_xai_function_tool_parameter_schemas(body);
+    changed |= crate::xai_view_image::rewrite_view_image_tool(body);
     changed
 }
 
@@ -1427,6 +1428,7 @@ fn rewrite_xai_native_response_value(value: &mut Value, restore_map: &XaiNativeR
     // Custom/tool_search restore would otherwise move the payload and leave
     // object arguments or whole-floats in a shape Codex Desktop cannot serde.
     let mut changed = normalize_xai_function_call_integer_arguments(value);
+    changed |= crate::xai_view_image::adapt_view_image_function_calls(value);
     changed |= restore_tool_search_calls(value);
     changed |= compat_custom::restore_custom_tool_calls(value, &restore_map.custom_tool_names);
     changed |= restore_response_namespaces(value, &restore_map.namespaces);
@@ -1465,19 +1467,23 @@ pub fn rewrite_xai_native_sse_block(block: &str, restore_map: &XaiNativeRestoreM
         Ok(value) => value,
         Err(_) => return Bytes::from(format!("{block}\n\n")),
     };
-    if !rewrite_xai_native_response_value(&mut event, restore_map) {
+    let changed = rewrite_xai_native_response_value(&mut event, restore_map);
+    let events = crate::xai_view_image::split_view_image_event(&event);
+    if !changed && events.len() <= 1 {
         return Bytes::from(format!("{block}\n\n"));
     }
-    let restored = serde_json::to_string(&event).unwrap_or(data);
     let mut out = String::new();
-    if let Some(name) = event_name {
-        out.push_str("event: ");
-        out.push_str(name);
-        out.push('\n');
+    for payload in events {
+        let restored = serde_json::to_string(&payload).unwrap_or_else(|_| data.clone());
+        if let Some(name) = event_name {
+            out.push_str("event: ");
+            out.push_str(name);
+            out.push('\n');
+        }
+        out.push_str("data: ");
+        out.push_str(&restored);
+        out.push_str("\n\n");
     }
-    out.push_str("data: ");
-    out.push_str(&restored);
-    out.push_str("\n\n");
     Bytes::from(out)
 }
 
@@ -2179,6 +2185,32 @@ mod tests {
         let arguments: Value = serde_json::from_str(event["arguments"].as_str().unwrap()).unwrap();
         assert_eq!(event["name"], "view_image");
         assert_eq!(arguments["path"], "/tmp/a.png");
+    }
+
+    #[test]
+    fn sse_block_expands_view_image_paths_into_single_path_calls() {
+        let restore = XaiNativeRestoreMap::default();
+        let block = concat!(
+            "event: response.output_item.done\n",
+            r#"data: {"type":"function_call","name":"view_image","call_id":"call_1","arguments":{"paths":["/tmp/a.png","/tmp/b.png"]}}"#,
+            "\n\n"
+        );
+        let rewritten = rewrite_xai_native_sse_block(block, &restore);
+        let text = String::from_utf8(rewritten.to_vec()).unwrap();
+        let data_lines: Vec<&str> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .collect();
+        assert_eq!(data_lines.len(), 2, "{text}");
+        let first: Value = serde_json::from_str(data_lines[0]).unwrap();
+        let second: Value = serde_json::from_str(data_lines[1]).unwrap();
+        let first_args: Value = serde_json::from_str(first["arguments"].as_str().unwrap()).unwrap();
+        let second_args: Value =
+            serde_json::from_str(second["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(first["call_id"], "call_1");
+        assert_eq!(second["call_id"], "call_1__1");
+        assert_eq!(first_args["path"], "/tmp/a.png");
+        assert_eq!(second_args["path"], "/tmp/b.png");
     }
 
     #[test]
