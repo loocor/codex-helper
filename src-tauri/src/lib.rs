@@ -26,6 +26,7 @@ mod settings_window;
 pub mod state_dir;
 mod updater;
 mod xai_sanitize;
+mod xai_view_image;
 pub mod zed;
 
 pub fn run() {

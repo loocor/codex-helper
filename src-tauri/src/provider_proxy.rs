@@ -21,7 +21,7 @@ use crate::deepseek_sanitize::{
     rewrite_deepseek_native_sse_block, DeepSeekRestoreMap,
 };
 use crate::endpoint;
-use crate::llm_compat_inventory::ResponseCompatInventory;
+use crate::llm_compat_inventory::{sse_block_is_response_completed, ResponseCompatInventory};
 use crate::llm_traffic_log::{redact_header_pairs, PendingLlmLog};
 use crate::logging::DiagnosticLogger;
 use crate::provider_oauth::{
@@ -335,9 +335,7 @@ impl ProviderProxy {
             .unwrap_or(Value::Null);
         if !matches!(restore, NativeRestore::None) && status.is_success() {
             if is_sse {
-                let inventory = pending_log
-                    .as_ref()
-                    .map(|_| Arc::new(Mutex::new(ResponseCompatInventory::default())));
+                let inventory = Arc::new(Mutex::new(ResponseCompatInventory::default()));
                 let rewrite_inventory = inventory.clone();
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
                 tokio::spawn(async move {
@@ -352,12 +350,12 @@ impl ProviderProxy {
                                     if block.trim().is_empty() {
                                         continue;
                                     }
-                                    let rewritten = rewrite_inspected_sse_block(
+                                    if !send_inspected_sse_block(
+                                        &tx,
                                         &block,
                                         &restore,
-                                        rewrite_inventory.as_ref(),
-                                    );
-                                    if tx.send(Ok(rewritten)).is_err() {
+                                        &rewrite_inventory,
+                                    ) {
                                         return;
                                     }
                                 }
@@ -372,21 +370,18 @@ impl ProviderProxy {
                         buffer.push_str(&String::from_utf8_lossy(&remainder));
                     }
                     if !buffer.trim().is_empty() {
-                        let rewritten = rewrite_inspected_sse_block(
-                            &buffer,
-                            &restore,
-                            rewrite_inventory.as_ref(),
-                        );
-                        let _ = tx.send(Ok(rewritten));
+                        let _ =
+                            send_inspected_sse_block(&tx, &buffer, &restore, &rewrite_inventory);
                     }
                 });
+                let log_inventory = pending_log.as_ref().map(|_| inventory);
                 return Ok(builder.body(outgoing_body(
                     receiver_byte_stream(rx),
                     pending_log,
                     status.as_u16(),
                     true,
                     logged_headers,
-                    inventory,
+                    log_inventory,
                     false,
                 ))?);
             }
@@ -475,6 +470,30 @@ fn logged_bytes_body(
     bytes_body(bytes)
 }
 
+const REASONING_ONLY_COMPLETED: &str = "upstream completed with reasoning only";
+
+fn send_inspected_sse_block(
+    tx: &tokio::sync::mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+    block: &str,
+    restore: &NativeRestore,
+    inventory: &Arc<Mutex<ResponseCompatInventory>>,
+) -> bool {
+    let rewritten = rewrite_inspected_sse_block(block, restore, Some(inventory));
+    if should_fail_reasoning_only_completed(inventory, block) {
+        let _ = tx.send(Err(io::Error::other(REASONING_ONLY_COMPLETED)));
+        return false;
+    }
+    tx.send(Ok(rewritten)).is_ok()
+}
+
+fn should_fail_reasoning_only_completed(
+    inventory: &Arc<Mutex<ResponseCompatInventory>>,
+    block: &str,
+) -> bool {
+    sse_block_is_response_completed(block)
+        && lock_compat_inventory(inventory).has_reasoning_without_output()
+}
+
 fn rewrite_inspected_sse_block(
     block: &str,
     restore: &NativeRestore,
@@ -482,9 +501,38 @@ fn rewrite_inspected_sse_block(
 ) -> Bytes {
     let rewritten = rewrite_native_sse_block(block, restore);
     if let Some(inventory) = inventory {
-        lock_compat_inventory(inventory).observe_sse_pair(block, &rewritten);
+        observe_rewritten_sse_blocks(block, &rewritten, inventory);
     }
     rewritten
+}
+
+fn observe_rewritten_sse_blocks(
+    before_block: &str,
+    rewritten: &Bytes,
+    inventory: &Arc<Mutex<ResponseCompatInventory>>,
+) {
+    let mut buffer = String::from_utf8_lossy(rewritten).into_owned();
+    if !buffer.is_empty() && !buffer.ends_with("\n\n") && !buffer.ends_with("\r\n\r\n") {
+        buffer.push_str("\n\n");
+    }
+    let mut first = true;
+    let mut saw_block = false;
+    while let Some(piece) = take_sse_block(&mut buffer) {
+        if piece.trim().is_empty() {
+            continue;
+        }
+        saw_block = true;
+        let mut lock = lock_compat_inventory(inventory);
+        if first {
+            lock.observe_sse_pair(before_block, piece.as_bytes());
+            first = false;
+        } else {
+            lock.observe_sse_block(&piece);
+        }
+    }
+    if !saw_block {
+        lock_compat_inventory(inventory).observe_sse_pair(before_block, rewritten);
+    }
 }
 
 fn lock_compat_inventory(
@@ -547,35 +595,49 @@ impl StreamInventory {
         }
     }
 
-    fn observe_chunk(&mut self, inventory: &Arc<Mutex<ResponseCompatInventory>>, bytes: &[u8]) {
+    fn observe_chunk(
+        &mut self,
+        inventory: &Arc<Mutex<ResponseCompatInventory>>,
+        bytes: &[u8],
+    ) -> bool {
         if self.sse {
             append_utf8_safe(&mut self.sse_buffer, &mut self.remainder, bytes);
             while let Some(block) = take_sse_block(&mut self.sse_buffer) {
-                if !block.trim().is_empty() {
-                    lock_compat_inventory(inventory).observe_sse_block(&block);
+                if block.trim().is_empty() {
+                    continue;
+                }
+                let mut lock = lock_compat_inventory(inventory);
+                lock.observe_sse_block(&block);
+                if sse_block_is_response_completed(&block) && lock.has_reasoning_without_output() {
+                    return true;
                 }
             }
-            return;
+            return false;
         }
         if let Some(buf) = &mut self.json_buf {
             buf.extend_from_slice(bytes);
         }
+        false
     }
 
-    fn finish(mut self, inventory: &Arc<Mutex<ResponseCompatInventory>>) {
+    fn finish(mut self, inventory: &Arc<Mutex<ResponseCompatInventory>>) -> bool {
         if self.sse {
             if !self.remainder.is_empty() {
                 self.sse_buffer
                     .push_str(&String::from_utf8_lossy(&self.remainder));
             }
             if !self.sse_buffer.trim().is_empty() {
-                lock_compat_inventory(inventory).observe_sse_block(&self.sse_buffer);
+                let mut lock = lock_compat_inventory(inventory);
+                lock.observe_sse_block(&self.sse_buffer);
+                return sse_block_is_response_completed(&self.sse_buffer)
+                    && lock.has_reasoning_without_output();
             }
-            return;
+            return false;
         }
         if let Some(buf) = self.json_buf {
             lock_compat_inventory(inventory).observe_json_bytes(&buf);
         }
+        false
     }
 }
 
@@ -603,8 +665,12 @@ where
             match item {
                 Ok(bytes) => {
                     response_bytes += bytes.len();
-                    if let (Some(inspector), Some(inventory)) = (&mut inspector, &inventory) {
-                        inspector.observe_chunk(inventory, &bytes);
+                    if let (Some(inspector), Some(current)) = (&mut inspector, &inventory) {
+                        if inspector.observe_chunk(current, &bytes) {
+                            fail_pending(pending, REASONING_ONLY_COMPLETED, &inventory);
+                            let _ = tx.send(Err(io::Error::other(REASONING_ONLY_COMPLETED)));
+                            return;
+                        }
                     }
                     if tx.send(Ok(bytes)).is_err() {
                         fail_pending(
@@ -623,8 +689,12 @@ where
                 }
             }
         }
-        if let (Some(inspector), Some(inventory)) = (inspector, &inventory) {
-            inspector.finish(inventory);
+        if let (Some(inspector), Some(current)) = (inspector, &inventory) {
+            if inspector.finish(current) {
+                fail_pending(pending, REASONING_ONLY_COMPLETED, &inventory);
+                let _ = tx.send(Err(io::Error::other(REASONING_ONLY_COMPLETED)));
+                return;
+            }
         }
         succeed_pending(
             pending,
@@ -1542,6 +1612,102 @@ mod tests {
             .any(|reason| reason == "arguments_object"));
         assert!(!rendered.contains("/secret/cursor.png"));
         assert!(!rendered.contains("cursor.png"));
+    }
+
+    #[tokio::test]
+    async fn outgoing_body_fails_reasoning_only_completed_sse() {
+        let (_temp_dir, logger) = temp_logger();
+        let pending = crate::llm_traffic_log::PendingLlmLog::start(
+            logger.clone(),
+            "/v1/responses".to_string(),
+            "POST".to_string(),
+            "xai".to_string(),
+            &hyper::HeaderMap::new(),
+            b"{}",
+        );
+        let inventory = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::llm_compat_inventory::ResponseCompatInventory::default(),
+        ));
+        let stream = futures_util::stream::iter([
+            Ok(bytes::Bytes::from_static(
+                b"event: response.output_item.done\ndata: {\"type\":\"reasoning\"}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(
+                b"event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n",
+            )),
+        ]);
+        let body = super::outgoing_body(
+            stream,
+            Some(pending),
+            200,
+            true,
+            json!({}),
+            Some(inventory),
+            true,
+        );
+        let collected = http_body_util::BodyExt::collect(body).await;
+        assert!(
+            collected.is_err(),
+            "reasoning-only completed SSE should fail the client stream"
+        );
+        let detail = wait_for_llm_log(&logger).await;
+        assert_eq!(detail["error"], super::REASONING_ONLY_COMPLETED);
+        assert_eq!(detail["status"], 0);
+        assert_eq!(detail["compat"]["suspect"], true);
+        let reasons = detail["compat"]["reasons"].as_array().expect("reasons");
+        assert!(reasons.iter().any(|reason| reason == "stream_error"));
+        assert!(reasons
+            .iter()
+            .any(|reason| reason == "reasoning_without_output"));
+        assert!(detail["request"].get("body").is_none());
+        assert!(detail["response"].get("body").is_none());
+    }
+
+    #[tokio::test]
+    async fn outgoing_body_forwards_reasoning_when_function_call_completed() {
+        let (_temp_dir, logger) = temp_logger();
+        let pending = crate::llm_traffic_log::PendingLlmLog::start(
+            logger.clone(),
+            "/v1/responses".to_string(),
+            "POST".to_string(),
+            "xai".to_string(),
+            &hyper::HeaderMap::new(),
+            b"{}",
+        );
+        let inventory = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::llm_compat_inventory::ResponseCompatInventory::default(),
+        ));
+        let stream = futures_util::stream::iter([
+            Ok(bytes::Bytes::from_static(
+                b"data: {\"type\":\"reasoning\"}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(
+                b"data: {\"type\":\"function_call\",\"name\":\"exec\",\"arguments\":\"{}\"}\n\n",
+            )),
+            Ok(bytes::Bytes::from_static(
+                b"event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n",
+            )),
+        ]);
+        let body = super::outgoing_body(
+            stream,
+            Some(pending),
+            200,
+            true,
+            json!({}),
+            Some(inventory),
+            true,
+        );
+        let collected = http_body_util::BodyExt::collect(body)
+            .await
+            .expect("complete stream")
+            .to_bytes();
+        let text = String::from_utf8(collected.to_vec()).expect("utf8");
+        assert!(text.contains("response.completed"));
+        let detail = wait_for_llm_log(&logger).await;
+        assert!(detail.get("error").is_none());
+        assert_eq!(detail["status"], 200);
+        assert!(detail["request"].get("body").is_none());
+        assert!(detail["response"].get("body").is_none());
     }
 
     #[tokio::test]
