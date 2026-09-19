@@ -926,7 +926,53 @@ pub async fn fetch_provider_models(
     }
     let body: Value = serde_json::from_str(&text)
         .with_context(|| format!("Provider models response from {url} is not JSON"))?;
-    Ok(collect_model_ids(&body))
+    let ids = collect_model_ids(&body);
+    if ids.is_empty() {
+        if let Some(detail) = provider_error_detail(&body) {
+            anyhow::bail!("Provider models request for {url} returned no models: {detail}");
+        }
+    }
+    Ok(ids)
+}
+
+/// Some gateways wrap failures in HTTP 200 responses (for example bigmodel's
+/// `{"code":401,"msg":"...","success":false}`). Surface those payloads instead
+/// of reporting an empty model list.
+fn provider_error_detail(body: &Value) -> Option<String> {
+    if let Some(error) = body.get("error").filter(|value| !value.is_null()) {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let code = match error.get("code") {
+            Some(Value::String(code)) => Some(code.clone()),
+            Some(code) => Some(code.to_string()),
+            None => None,
+        };
+        return Some(match (code, message) {
+            (Some(code), Some(message)) => format!("provider error {code}: {message}"),
+            (Some(code), None) => format!("provider error {code}"),
+            (None, Some(message)) => format!("provider error: {message}"),
+            (None, None) => "provider returned an error response".to_string(),
+        });
+    }
+    let success = body.get("success").and_then(Value::as_bool);
+    let code = body.get("code").and_then(Value::as_i64);
+    let message = body
+        .get("msg")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if success != Some(false) && !code.is_some_and(|value| value != 200) {
+        return None;
+    }
+    Some(match (code, message) {
+        (Some(code), Some(message)) => format!("provider error (code {code}): {message}"),
+        (Some(code), None) => format!("provider error (code {code})"),
+        (None, Some(message)) => format!("provider error: {message}"),
+        (None, None) => "provider returned no models".to_string(),
+    })
 }
 
 fn collect_model_ids(body: &Value) -> Vec<String> {
@@ -1032,7 +1078,7 @@ pub(crate) fn join_provider_upstream_url(base_url: &str, path: &str) -> String {
 mod tests {
     use super::{
         collect_model_ids, is_llm_path, is_responses_path, join_provider_upstream_url,
-        join_provider_upstream_url_for, ProviderProxy,
+        join_provider_upstream_url_for, provider_error_detail, ProviderProxy,
     };
     use crate::provider_oauth::OAuthKind;
     use crate::providers::{Provider, ProviderKind, ProviderStore};
@@ -1060,6 +1106,29 @@ mod tests {
             join_provider_upstream_url("https://api.x.ai/v1", "/v1/responses?stream=true"),
             "https://api.x.ai/v1/responses?stream=true"
         );
+    }
+
+    #[test]
+    fn error_detail_exposes_http200_wrapped_failures() {
+        assert_eq!(
+            provider_error_detail(&json!({
+                "code": 401,
+                "msg": "令牌已过期或验证不正确",
+                "success": false
+            }))
+            .expect("wrapped error"),
+            "provider error (code 401): 令牌已过期或验证不正确"
+        );
+        assert_eq!(
+            provider_error_detail(&json!({
+                "error": { "code": "authorized_error", "message": "login fail (1004)" }
+            }))
+            .expect("openai-style error"),
+            "provider error authorized_error: login fail (1004)"
+        );
+        assert!(provider_error_detail(&json!({ "data": [] })).is_none());
+        assert!(provider_error_detail(&json!({ "code": 200, "data": [] })).is_none());
+        assert!(provider_error_detail(&json!({ "error": null, "data": [] })).is_none());
     }
 
     #[tokio::test]

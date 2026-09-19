@@ -17,8 +17,8 @@ use serde_json::{json, Value};
 use crate::codex_live::{auth_has_oauth_login, default_codex_home, read_auth};
 use crate::provider_oauth::{oauth_bearer_token, oauth_is_signed_in, OAuthKind};
 use crate::providers::{
-    provider_device_oauth_kind, provider_is_bigmodel, provider_is_deepseek, read_store, Provider,
-    ProviderStore,
+    provider_device_oauth_kind, provider_is_bigmodel, provider_is_deepseek, provider_is_minimax,
+    read_store, Provider, ProviderStore,
 };
 
 const CHATGPT_USAGE_URL: &str = "https://chatgpt.com/";
@@ -31,6 +31,11 @@ const MOONSHOT_USAGE_URL: &str = "https://platform.moonshot.cn/console";
 const OPENROUTER_USAGE_URL: &str = "https://openrouter.ai/activity";
 const BIGMODEL_USAGE_PAGE_URL: &str = "https://bigmodel.cn/coding-plan/personal/usage";
 const BIGMODEL_USAGE_API: &str = "https://open.bigmodel.cn/api/monitor/usage/quota/limit";
+const MINIMAX_USAGE_PAGE_URL: &str = "https://platform.minimax.cn";
+const MINIMAX_USAGE_API_CN: &str =
+    "https://api.minimaxi.com/v1/api/openplatform/coding_plan/remains";
+const MINIMAX_USAGE_API_INTL: &str =
+    "https://api.minimax.io/v1/api/openplatform/coding_plan/remains";
 const GROK_BILLING_ENDPOINT: &str =
     "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig";
 
@@ -60,6 +65,9 @@ fn inferred_usage_page_url(provider: &Provider) -> Option<&'static str> {
     }
     if host.contains("bigmodel") {
         return Some(BIGMODEL_USAGE_PAGE_URL);
+    }
+    if host.contains("minimax") {
+        return Some(MINIMAX_USAGE_PAGE_URL);
     }
     if host.contains("moonshot") || host.contains("kimi") {
         return Some(MOONSHOT_USAGE_URL);
@@ -190,6 +198,9 @@ async fn query_live_usage(
     }
     if provider_is_bigmodel(provider) {
         return query_bigmodel_usage(provider).await.map(Some);
+    }
+    if provider_is_minimax(provider) {
+        return query_minimax_usage(provider).await.map(Some);
     }
     Ok(None)
 }
@@ -503,6 +514,7 @@ async fn query_bigmodel_usage(provider: &Provider) -> Result<LiveUsage, String> 
         .get(BIGMODEL_USAGE_API)
         .header("Authorization", api_key)
         .header("Accept", "application/json")
+        .header("Accept-Language", "en-US,en")
         .send()
         .await
         .map_err(|error| format!("BigModel usage query failed: {error}"))?;
@@ -539,7 +551,30 @@ struct BigModelUsageLimit {
     #[serde(rename = "type")]
     limit_type: Option<String>,
     percentage: Option<f64>,
+    unit: Option<i64>,
     next_reset_time: Option<Value>,
+}
+
+enum BigModelWindow {
+    FiveHour,
+    Weekly,
+}
+
+impl BigModelWindow {
+    /// `unit: 3` marks the 5-hour rolling window and `unit: 6` the weekly
+    /// window. Reset times cannot classify the buckets: near the end of a
+    /// week the weekly window can reset before the rolling one.
+    fn from_limit(limit: &BigModelUsageLimit) -> Option<Self> {
+        match limit.unit {
+            Some(3) => Some(Self::FiveHour),
+            Some(6) => Some(Self::Weekly),
+            _ => None,
+        }
+    }
+}
+
+fn is_bigmodel_token_quota(kind: &str) -> bool {
+    kind.eq_ignore_ascii_case("TOKENS_LIMIT") || kind.eq_ignore_ascii_case("CREDIT_LIMIT")
 }
 
 fn bigmodel_rejection_message(body: &BigModelUsageResponse) -> String {
@@ -597,25 +632,57 @@ fn live_usage_from_bigmodel(body: BigModelUsageResponse) -> Result<LiveUsage, St
         .ok_or_else(|| "BigModel usage response had no data".to_string())?
         .limits
         .unwrap_or_default();
-    let mut token_limits: Vec<&BigModelUsageLimit> = limits
+    let mut five_hour: Option<(&BigModelUsageLimit, Option<i64>)> = None;
+    let mut weekly: Option<(&BigModelUsageLimit, Option<i64>)> = None;
+    let mut unclassified: Vec<(&BigModelUsageLimit, Option<i64>)> = Vec::new();
+    for limit in limits
         .iter()
         .filter(|limit| {
             limit
                 .limit_type
                 .as_deref()
-                .is_some_and(|kind| kind.eq_ignore_ascii_case("TOKENS_LIMIT"))
+                .is_some_and(is_bigmodel_token_quota)
         })
-        .collect();
-    if token_limits.is_empty() {
-        return Err("BigModel usage response had no token quota".to_string());
+    {
+        let entry = (limit, bigmodel_reset_secs(&limit.next_reset_time));
+        match BigModelWindow::from_limit(limit) {
+            Some(BigModelWindow::FiveHour) if five_hour.is_none() => five_hour = Some(entry),
+            Some(BigModelWindow::Weekly) if weekly.is_none() => weekly = Some(entry),
+            _ => unclassified.push(entry),
+        }
     }
-    token_limits.sort_by_key(|limit| bigmodel_reset_secs(&limit.next_reset_time).unwrap_or(i64::MAX));
-    let five_hour = token_limits[0];
-    let used_percent = five_hour
-        .percentage
-        .ok_or_else(|| "BigModel usage response had no quota percentage".to_string())?;
-    let weekly = token_limits.get(1).and_then(|limit| limit.percentage);
-    let resets_at = bigmodel_reset_secs(&five_hour.next_reset_time).and_then(unix_ts_to_rfc3339);
+    // Entries without a recognizable `unit` fall back to reset-time order,
+    // but a missing reset time means the rolling window (which may sit at 0%
+    // with no reset scheduled).
+    unclassified.sort_by_key(|(_, reset)| (reset.is_some(), reset.unwrap_or(i64::MIN)));
+    for entry in unclassified {
+        if five_hour.is_none() {
+            five_hour = Some(entry);
+        } else if weekly.is_none() {
+            weekly = Some(entry);
+        }
+    }
+    if five_hour.is_none() {
+        let mut observed: Vec<String> = limits
+            .iter()
+            .filter_map(|limit| limit.limit_type.clone())
+            .collect();
+        observed.sort();
+        observed.dedup();
+        let observed = if observed.is_empty() {
+            "none reported".to_string()
+        } else {
+            observed.join(", ")
+        };
+        return Err(format!(
+            "BigModel usage response had no token quota (limit types: {observed})"
+        ));
+    }
+    let (five_hour, five_hour_reset) = five_hour
+        .ok_or_else(|| "BigModel usage response had no 5-hour quota".to_string())?;
+    let used_percent = five_hour.percentage.unwrap_or(0.0);
+    let weekly = weekly.and_then(|(limit, _)| limit.percentage);
+    let resets_at = five_hour_reset.and_then(unix_ts_to_rfc3339);
     Ok(LiveUsage {
         summary: bigmodel_usage_summary(used_percent, weekly, resets_at.as_deref()),
         used_percent: Some(used_percent.clamp(0.0, 100.0)),
@@ -633,6 +700,121 @@ fn bigmodel_usage_summary(used_percent: f64, weekly: Option<f64>, resets_at: Opt
         text.push_str(&label);
     }
     text
+}
+
+async fn query_minimax_usage(provider: &Provider) -> Result<LiveUsage, String> {
+    let api_key = provider.api_key.trim();
+    if api_key.is_empty() {
+        return Err("MiniMax API key is required".to_string());
+    }
+    // International accounts live on minimax.io; the CN platform answers on
+    // minimaxi.com (and minimax.cn). Anything else falls back to the CN host.
+    let haystack = format!(
+        "{} {} {}",
+        provider.id, provider.name, provider.base_url
+    )
+    .to_ascii_lowercase();
+    let url = if haystack.contains("minimax.io") {
+        MINIMAX_USAGE_API_INTL
+    } else {
+        MINIMAX_USAGE_API_CN
+    };
+    let client = http_client().map_err(|error| error.to_string())?;
+    let response = client
+        .get(url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|error| format!("MiniMax usage query failed: {error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Failed to read MiniMax usage response: {error}"))?;
+    if !status.is_success() {
+        return Err(format!("MiniMax usage query failed (HTTP {status}): {body}"));
+    }
+    let parsed: MiniMaxRemainsResponse = serde_json::from_str(&body)
+        .map_err(|error| format!("MiniMax usage response was not valid JSON: {error}"))?;
+    live_usage_from_minimax(parsed)
+}
+
+#[derive(Debug, Deserialize)]
+struct MiniMaxRemainsResponse {
+    base_resp: Option<MiniMaxBaseResp>,
+    model_remains: Option<Vec<MiniMaxModelRemains>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MiniMaxBaseResp {
+    status_code: Option<i64>,
+    status_msg: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MiniMaxModelRemains {
+    model_name: Option<String>,
+    current_interval_remaining_percent: Option<f64>,
+    end_time: Option<Value>,
+    current_weekly_status: Option<i64>,
+    current_weekly_remaining_percent: Option<f64>,
+    weekly_end_time: Option<Value>,
+}
+
+fn live_usage_from_minimax(body: MiniMaxRemainsResponse) -> Result<LiveUsage, String> {
+    if let Some(base_resp) = &body.base_resp {
+        let code = base_resp.status_code.unwrap_or(0);
+        if code != 0 {
+            let message = base_resp
+                .status_msg
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("unknown error");
+            return Err(format!("MiniMax usage query failed (code {code}): {message}"));
+        }
+    }
+    let item = body
+        .model_remains
+        .unwrap_or_default()
+        .into_iter()
+        .find(|item| item.model_name.as_deref() == Some("general"))
+        .ok_or_else(|| "MiniMax usage response had no coding plan quota".to_string())?;
+    let five_hour = 100.0
+        - item
+            .current_interval_remaining_percent
+            .unwrap_or(0.0);
+    let resets_at = bigmodel_reset_secs(&item.end_time).and_then(unix_ts_to_rfc3339);
+    // Weekly status 1 means the plan has a weekly bucket; other values (such
+    // as 3) mark plans without one, where the percent is pinned at 100.
+    let weekly = if item.current_weekly_status == Some(1) {
+        item.current_weekly_remaining_percent
+            .map(|remain| 100.0 - remain)
+    } else {
+        None
+    };
+    let weekly_resets = if weekly.is_some() {
+        bigmodel_reset_secs(&item.weekly_end_time).and_then(unix_ts_to_rfc3339)
+    } else {
+        None
+    };
+    let summary = minimax_usage_summary(
+        five_hour,
+        weekly,
+        resets_at
+            .as_deref()
+            .or(weekly_resets.as_deref()),
+    );
+    Ok(LiveUsage {
+        summary,
+        used_percent: Some(five_hour.clamp(0.0, 100.0)),
+        resets_at,
+    })
+}
+
+fn minimax_usage_summary(used_percent: f64, weekly: Option<f64>, resets_at: Option<&str>) -> String {
+    bigmodel_usage_summary(used_percent, weekly, resets_at)
 }
 
 fn http_client() -> anyhow::Result<reqwest::Client> {
@@ -955,6 +1137,10 @@ mod tests {
             Some(BIGMODEL_USAGE_PAGE_URL)
         );
         assert_eq!(
+            usage_page_url(&provider("minimax", "", "https://api.minimax.cn/v1")).as_deref(),
+            Some(MINIMAX_USAGE_PAGE_URL)
+        );
+        assert_eq!(
             usage_page_url(&provider("custom", "", "https://api.example.com/v1")),
             None
         );
@@ -1119,12 +1305,27 @@ mod tests {
         BigModelUsageLimit {
             limit_type: Some(limit_type.to_string()),
             percentage: Some(percentage),
+            unit: None,
+            next_reset_time,
+        }
+    }
+
+    fn bigmodel_limit_with_unit(
+        limit_type: &str,
+        percentage: f64,
+        unit: i64,
+        next_reset_time: Option<Value>,
+    ) -> BigModelUsageLimit {
+        BigModelUsageLimit {
+            limit_type: Some(limit_type.to_string()),
+            percentage: Some(percentage),
+            unit: Some(unit),
             next_reset_time,
         }
     }
 
     #[test]
-    fn bigmodel_token_limits_pick_5h_window_and_weekly_summary() {
+    fn bigmodel_unit_field_classifies_windows_over_reset_order() {
         let live = live_usage_from_bigmodel(BigModelUsageResponse {
             code: Some(200),
             msg: Some("ok".to_string()),
@@ -1133,35 +1334,63 @@ mod tests {
                 level: Some("pro".to_string()),
                 limits: Some(vec![
                     bigmodel_limit("TIME_LIMIT", 7.0, None),
-                    bigmodel_limit(
-                        "TOKENS_LIMIT",
-                        53.0,
-                        Some(json!("2026-09-21T08:00:00Z")),
-                    ),
-                    bigmodel_limit(
-                        "TOKENS_LIMIT",
-                        44.0,
-                        Some(json!("2026-09-19T18:00:00Z")),
-                    ),
+                    // Near week end the weekly window can reset before the
+                    // rolling one; unit=3 must still win the 5h slot.
+                    bigmodel_limit_with_unit("TOKENS_LIMIT", 53.0, 6, Some(json!(1_791_000_000_000i64))),
+                    bigmodel_limit_with_unit("TOKENS_LIMIT", 44.0, 3, Some(json!(1_791_500_000_000i64))),
                 ]),
             }),
         })
         .expect("usage");
         assert_eq!(live.used_percent, Some(44.0));
-        assert_eq!(
-            live.resets_at.as_deref(),
-            Some("2026-09-19T18:00:00+00:00")
-        );
-        assert!(
-            live.summary.contains("44% used (5h)"),
-            "{}",
-            live.summary
-        );
-        assert!(
-            live.summary.contains("53% used (week)"),
-            "{}",
-            live.summary
-        );
+        assert_eq!(live.resets_at.as_deref(), Some("2026-10-08T22:53:20+00:00"));
+        assert!(live.summary.contains("44% used (5h)"), "{}", live.summary);
+        assert!(live.summary.contains("53% used (week)"), "{}", live.summary);
+    }
+
+    #[test]
+    fn bigmodel_unclassified_limits_fall_back_to_reset_order() {
+        let live = live_usage_from_bigmodel(BigModelUsageResponse {
+            code: Some(200),
+            msg: None,
+            success: Some(true),
+            data: Some(BigModelUsageData {
+                level: None,
+                limits: Some(vec![
+                    bigmodel_limit("TOKENS_LIMIT", 53.0, Some(json!(1_791_000_000_000i64))),
+                    bigmodel_limit("TOKENS_LIMIT", 44.0, None),
+                ]),
+            }),
+        })
+        .expect("usage");
+        assert_eq!(live.used_percent, Some(44.0));
+        assert_eq!(weekly_percent(&live.summary), Some(53.0));
+    }
+
+    fn weekly_percent(summary: &str) -> Option<f64> {
+        let marker = summary.find("% used (week)")?;
+        let start = summary[..marker].rfind(' ')? + 1;
+        summary[start..marker].trim().parse().ok()
+    }
+
+    #[test]
+    fn bigmodel_credit_limit_counts_as_token_quota() {
+        let live = live_usage_from_bigmodel(BigModelUsageResponse {
+            code: Some(200),
+            msg: None,
+            success: Some(true),
+            data: Some(BigModelUsageData {
+                level: None,
+                limits: Some(vec![bigmodel_limit_with_unit(
+                    "CREDIT_LIMIT",
+                    12.5,
+                    3,
+                    Some(json!(1_800_000_000_000i64)),
+                )]),
+            }),
+        })
+        .expect("usage");
+        assert_eq!(live.used_percent, Some(12.5));
     }
 
     #[test]
@@ -1172,9 +1401,10 @@ mod tests {
             success: Some(true),
             data: Some(BigModelUsageData {
                 level: None,
-                limits: Some(vec![bigmodel_limit(
+                limits: Some(vec![bigmodel_limit_with_unit(
                     "TOKENS_LIMIT",
                     12.5,
+                    3,
                     Some(json!(1_800_000_000_000i64)),
                 )]),
             }),
@@ -1199,7 +1429,7 @@ mod tests {
     }
 
     #[test]
-    fn bigmodel_missing_token_quota_is_an_error() {
+    fn bigmodel_missing_token_quota_reports_observed_types() {
         let error = live_usage_from_bigmodel(BigModelUsageResponse {
             code: Some(200),
             msg: None,
@@ -1211,5 +1441,58 @@ mod tests {
         })
         .expect_err("no token quota");
         assert!(error.contains("no token quota"), "{}", error);
+        assert!(error.contains("TIME_LIMIT"), "{}", error);
+    }
+
+    fn minimax_remains(
+        interval_remaining: f64,
+        weekly_status: Option<i64>,
+        weekly_remaining: Option<f64>,
+    ) -> MiniMaxRemainsResponse {
+        MiniMaxRemainsResponse {
+            base_resp: Some(MiniMaxBaseResp {
+                status_code: Some(0),
+                status_msg: Some("success".to_string()),
+            }),
+            model_remains: Some(vec![MiniMaxModelRemains {
+                model_name: Some("general".to_string()),
+                current_interval_remaining_percent: Some(interval_remaining),
+                end_time: Some(json!(1_800_000_000_000i64)),
+                current_weekly_status: weekly_status,
+                current_weekly_remaining_percent: weekly_remaining,
+                weekly_end_time: None,
+            }]),
+        }
+    }
+
+    #[test]
+    fn minimax_remaining_percent_becomes_used_summary() {
+        let live = live_usage_from_minimax(minimax_remains(88.0, Some(1), Some(80.0)))
+            .expect("usage");
+        assert_eq!(live.used_percent, Some(12.0));
+        assert!(live.summary.contains("12% used (5h)"), "{}", live.summary);
+        assert!(live.summary.contains("20% used (week)"), "{}", live.summary);
+    }
+
+    #[test]
+    fn minimax_inactive_weekly_bucket_is_skipped() {
+        let live = live_usage_from_minimax(minimax_remains(50.0, Some(3), Some(100.0)))
+            .expect("usage");
+        assert_eq!(live.used_percent, Some(50.0));
+        assert!(!live.summary.contains("(week)"), "{}", live.summary);
+    }
+
+    #[test]
+    fn minimax_base_resp_error_surfaces_message() {
+        let error = live_usage_from_minimax(MiniMaxRemainsResponse {
+            base_resp: Some(MiniMaxBaseResp {
+                status_code: Some(1004),
+                status_msg: Some("login fail".to_string()),
+            }),
+            model_remains: None,
+        })
+        .expect_err("rejected");
+        assert!(error.contains("code 1004"), "{}", error);
+        assert!(error.contains("login fail"), "{}", error);
     }
 }
