@@ -40,6 +40,7 @@ const MINIMAX_USAGE_API_CN: &str =
 const MINIMAX_USAGE_API_INTL: &str =
     "https://api.minimax.io/v1/api/openplatform/coding_plan/remains";
 const KIMI_CODING_USAGE_API: &str = "https://api.kimi.com/coding/v1/usages";
+const KIMI_PLATFORM_BALANCE_API: &str = "https://api.moonshot.cn/v1/users/me/balance";
 const COPILOT_USAGE_API: &str = "https://api.github.com/copilot_internal/user";
 const GROK_BILLING_ENDPOINT: &str =
     "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig";
@@ -891,6 +892,22 @@ async fn query_kimi_usage(provider: &Provider) -> Result<LiveUsage, String> {
     if api_key.is_empty() {
         return Err("Kimi API key is required".to_string());
     }
+    // Kimi For Coding subscription keys (api.kimi.com/coding) have rolling
+    // usage windows; pay-as-you-go platform keys (api.moonshot.cn) only
+    // expose the account balance.
+    let haystack = format!(
+        "{} {} {}",
+        provider.id, provider.name, provider.base_url
+    )
+    .to_ascii_lowercase();
+    if haystack.contains("api.kimi.com/coding") {
+        query_kimi_coding_usage(api_key).await
+    } else {
+        query_kimi_platform_balance(api_key).await
+    }
+}
+
+async fn query_kimi_coding_usage(api_key: &str) -> Result<LiveUsage, String> {
     let client = http_client().map_err(|error| error.to_string())?;
     let response = client
         .get(KIMI_CODING_USAGE_API)
@@ -910,6 +927,30 @@ async fn query_kimi_usage(provider: &Provider) -> Result<LiveUsage, String> {
     let parsed: KimiUsageResponse = serde_json::from_str(&body)
         .map_err(|error| format!("Kimi usage response was not valid JSON: {error}"))?;
     live_usage_from_kimi(parsed)
+}
+
+async fn query_kimi_platform_balance(api_key: &str) -> Result<LiveUsage, String> {
+    let client = http_client().map_err(|error| error.to_string())?;
+    let response = client
+        .get(KIMI_PLATFORM_BALANCE_API)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|error| format!("Kimi balance query failed: {error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Failed to read Kimi balance response: {error}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "Kimi balance query failed (HTTP {status}): {body}"
+        ));
+    }
+    let parsed: KimiBalanceResponse = serde_json::from_str(&body)
+        .map_err(|error| format!("Kimi balance response was not valid JSON: {error}"))?;
+    live_usage_from_kimi_balance(parsed)
 }
 
 #[derive(Debug, Deserialize)]
@@ -950,8 +991,56 @@ fn live_usage_from_kimi(body: KimiUsageResponse) -> Result<LiveUsage, String> {
     })
 }
 
+#[derive(Debug, Deserialize)]
+struct KimiBalanceResponse {
+    code: Option<i64>,
+    status: Option<bool>,
+    data: Option<KimiBalanceData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KimiBalanceData {
+    available_balance: Option<f64>,
+    voucher_balance: Option<f64>,
+    #[allow(dead_code)]
+    cash_balance: Option<f64>,
+}
+
+fn live_usage_from_kimi_balance(body: KimiBalanceResponse) -> Result<LiveUsage, String> {
+    if body.status == Some(false) || body.code.is_some_and(|code| code != 0) {
+        return Err(format!(
+            "Kimi balance query failed (code {}, status {})",
+            body.code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "?".to_string()),
+            body.status
+                .map(|status| status.to_string())
+                .unwrap_or_else(|| "?".to_string()),
+        ));
+    }
+    let data = body
+        .data
+        .ok_or_else(|| "Kimi balance response had no data".to_string())?;
+    let available = data
+        .available_balance
+        .ok_or_else(|| "Kimi balance response had no available_balance".to_string())?;
+    let voucher = data.voucher_balance.unwrap_or(0.0);
+    let mut summary = format!("¥{available:.2} remaining");
+    if voucher > 0.0 {
+        summary.push_str(&format!(" (voucher ¥{voucher:.2})"));
+    }
+    Ok(LiveUsage {
+        summary,
+        used_percent: None,
+        resets_at: None,
+    })
+}
+
 async fn query_copilot_usage(github_token: &str) -> Result<LiveUsage, String> {
-    let client = http_client().map_err(|error| error.to_string())?;
+    // api.github.com is often unreachable without a proxy, so this client
+    // honors the system proxy configuration instead of forcing direct
+    // connections like the domestic provider queries do.
+    let client = http_system_proxy_client().map_err(|error| error.to_string())?;
     let mut request = client
         .get(COPILOT_USAGE_API)
         .header("Authorization", format!("token {github_token}"))
@@ -1048,6 +1137,16 @@ fn live_usage_from_copilot(body: CopilotUsageResponse) -> LiveUsage {
 fn http_client() -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
         .no_proxy()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .context("Failed to build usage client")
+}
+
+/// Honors the system proxy configuration (environment variables and, on
+/// macOS, the system proxy settings) for endpoints that are unreachable by
+/// direct connections.
+fn http_system_proxy_client() -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .context("Failed to build usage client")
@@ -1830,5 +1929,33 @@ mod tests {
         });
         assert_eq!(live.used_percent, None);
         assert_eq!(live.summary, "premium unlimited · free");
+    }
+
+    #[test]
+    fn kimi_balance_becomes_remaining_summary() {
+        let live = live_usage_from_kimi_balance(KimiBalanceResponse {
+            code: Some(0),
+            status: Some(true),
+            data: Some(KimiBalanceData {
+                available_balance: Some(54.78392),
+                voucher_balance: Some(1.5),
+                cash_balance: Some(54.78392),
+            }),
+        })
+        .expect("usage");
+        assert_eq!(live.used_percent, None);
+        assert_eq!(live.summary, "¥54.78 remaining (voucher ¥1.50)");
+    }
+
+    #[test]
+    fn kimi_balance_rejection_surfaces_code() {
+        let error = live_usage_from_kimi_balance(KimiBalanceResponse {
+            code: Some(1001),
+            status: Some(false),
+            data: None,
+        })
+        .expect_err("rejected");
+        assert!(error.contains("code 1001"), "{}", error);
+        assert!(error.contains("false"), "{}", error);
     }
 }
