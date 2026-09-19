@@ -562,6 +562,10 @@ async function refreshActiveProviderUsage() {
   for (const node of nodes) {
     const clickable = node.getAttribute(helperCommandAttribute) === "open-provider-usage";
     if (result?.status === "failed") {
+      logProviderEvent("providers.usage_failed", {
+        id: providerActiveId,
+        message: result.message,
+      });
       setProviderUsagePie(node, {
         percent: null,
         tooltip: result.message || "Usage query failed",

@@ -520,6 +520,15 @@ pub fn provider_is_bigmodel(provider: &Provider) -> bool {
     haystack.contains("bigmodel") || haystack.contains("zhipu")
 }
 
+pub fn provider_is_minimax(provider: &Provider) -> bool {
+    let haystack = format!(
+        "{} {} {} {}",
+        provider.id, provider.name, provider.base_url, provider.compat
+    )
+    .to_ascii_lowercase();
+    haystack.contains("minimax")
+}
+
 /// DeepSeek `/v1/responses` accepts custom tools but only `apply_patch`.
 /// Other named custom tools (especially Codex `exec`) are rewritten to functions.
 pub fn provider_needs_deepseek_responses_sanitize(provider: &Provider) -> bool {
