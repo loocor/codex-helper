@@ -15,10 +15,13 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::codex_live::{auth_has_oauth_login, default_codex_home, read_auth};
-use crate::provider_oauth::{oauth_bearer_token, oauth_is_signed_in, OAuthKind};
+use crate::provider_oauth::{
+    copilot_github_token, copilot_request_headers, oauth_bearer_token, oauth_is_signed_in,
+    OAuthKind,
+};
 use crate::providers::{
-    provider_device_oauth_kind, provider_is_bigmodel, provider_is_deepseek, provider_is_minimax,
-    read_store, Provider, ProviderStore,
+    provider_device_oauth_kind, provider_is_bigmodel, provider_is_deepseek, provider_is_kimi,
+    provider_is_minimax, read_store, Provider, ProviderStore,
 };
 
 const CHATGPT_USAGE_URL: &str = "https://chatgpt.com/";
@@ -36,6 +39,8 @@ const MINIMAX_USAGE_API_CN: &str =
     "https://api.minimaxi.com/v1/api/openplatform/coding_plan/remains";
 const MINIMAX_USAGE_API_INTL: &str =
     "https://api.minimax.io/v1/api/openplatform/coding_plan/remains";
+const KIMI_CODING_USAGE_API: &str = "https://api.kimi.com/coding/v1/usages";
+const COPILOT_USAGE_API: &str = "https://api.github.com/copilot_internal/user";
 const GROK_BILLING_ENDPOINT: &str =
     "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig";
 
@@ -201,6 +206,17 @@ async fn query_live_usage(
     }
     if provider_is_minimax(provider) {
         return query_minimax_usage(provider).await.map(Some);
+    }
+    if provider_is_kimi(provider) {
+        return query_kimi_usage(provider).await.map(Some);
+    }
+    if let Some(OAuthKind::GithubCopilot) = provider_device_oauth_kind(provider) {
+        if oauth_is_signed_in(state_root, OAuthKind::GithubCopilot) {
+            let token = copilot_github_token(state_root)
+                .await
+                .map_err(|error| error.to_string())?;
+            return query_copilot_usage(&token).await.map(Some);
+        }
     }
     Ok(None)
 }
@@ -868,6 +884,165 @@ fn live_usage_from_minimax(body: MiniMaxRemainsResponse) -> Result<LiveUsage, St
         used_percent: Some(five_hour.clamp(0.0, 100.0)),
         resets_at,
     })
+}
+
+async fn query_kimi_usage(provider: &Provider) -> Result<LiveUsage, String> {
+    let api_key = provider.api_key.trim();
+    if api_key.is_empty() {
+        return Err("Kimi API key is required".to_string());
+    }
+    let client = http_client().map_err(|error| error.to_string())?;
+    let response = client
+        .get(KIMI_CODING_USAGE_API)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|error| format!("Kimi usage query failed: {error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Failed to read Kimi usage response: {error}"))?;
+    if !status.is_success() {
+        return Err(format!("Kimi usage query failed (HTTP {status}): {body}"));
+    }
+    let parsed: KimiUsageResponse = serde_json::from_str(&body)
+        .map_err(|error| format!("Kimi usage response was not valid JSON: {error}"))?;
+    live_usage_from_kimi(parsed)
+}
+
+#[derive(Debug, Deserialize)]
+struct KimiUsageResponse {
+    limits: Option<Vec<KimiUsageLimit>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KimiUsageLimit {
+    detail: Option<KimiUsageDetail>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KimiUsageDetail {
+    limit: Option<f64>,
+    remaining: Option<f64>,
+    reset_time: Option<Value>,
+}
+
+fn live_usage_from_kimi(body: KimiUsageResponse) -> Result<LiveUsage, String> {
+    let detail = body
+        .limits
+        .unwrap_or_default()
+        .into_iter()
+        .find_map(|limit| limit.detail)
+        .ok_or_else(|| "Kimi usage response had no quota details".to_string())?;
+    let total = detail.limit.unwrap_or(0.0);
+    if total <= 0.0 {
+        return Err("Kimi usage response had no quota limit".to_string());
+    }
+    let remaining = detail.remaining.unwrap_or(0.0);
+    let used_percent = (((total - remaining) / total) * 100.0).clamp(0.0, 100.0);
+    let resets_at = bigmodel_reset_secs(&detail.reset_time).and_then(unix_ts_to_rfc3339);
+    Ok(LiveUsage {
+        summary: usage_summary(used_percent, resets_at.as_deref()),
+        used_percent: Some(used_percent),
+        resets_at,
+    })
+}
+
+async fn query_copilot_usage(github_token: &str) -> Result<LiveUsage, String> {
+    let client = http_client().map_err(|error| error.to_string())?;
+    let mut request = client
+        .get(COPILOT_USAGE_API)
+        .header("Authorization", format!("token {github_token}"))
+        .header("Accept", "application/json");
+    for (name, value) in copilot_request_headers() {
+        request = request.header(name, value);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("Copilot usage query failed: {error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Failed to read Copilot usage response: {error}"))?;
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(format!("Copilot usage query failed (HTTP {status})"));
+    }
+    if !status.is_success() {
+        return Err(format!(
+            "Copilot usage query failed (HTTP {status}): {body}"
+        ));
+    }
+    let parsed: CopilotUsageResponse = serde_json::from_str(&body)
+        .map_err(|error| format!("Copilot usage response was not valid JSON: {error}"))?;
+    Ok(live_usage_from_copilot(parsed))
+}
+
+#[derive(Debug, Deserialize)]
+struct CopilotUsageResponse {
+    copilot_plan: Option<String>,
+    quota_reset_date: Option<String>,
+    quota_snapshots: Option<CopilotQuotaSnapshots>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CopilotQuotaSnapshots {
+    premium_interactions: Option<CopilotQuotaDetail>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CopilotQuotaDetail {
+    entitlement: Option<f64>,
+    remaining: Option<f64>,
+    unlimited: Option<bool>,
+}
+
+fn live_usage_from_copilot(body: CopilotUsageResponse) -> LiveUsage {
+    let plan = body
+        .copilot_plan
+        .as_deref()
+        .map(str::trim)
+        .filter(|plan| !plan.is_empty());
+    let snapshot = body
+        .quota_snapshots
+        .and_then(|snapshots| snapshots.premium_interactions);
+    let mut parts: Vec<String> = Vec::new();
+    let mut used_percent: Option<f64> = None;
+    if let Some(snapshot) = snapshot {
+        let entitlement = snapshot.entitlement.unwrap_or(0.0);
+        let unlimited = snapshot.unlimited.unwrap_or(false);
+        if unlimited || entitlement <= 0.0 {
+            parts.push("premium unlimited".to_string());
+        } else {
+            let remaining = snapshot.remaining.unwrap_or(0.0);
+            let percent = (((entitlement - remaining) / entitlement) * 100.0).clamp(0.0, 100.0);
+            used_percent = Some(percent);
+            parts.push(format!("{:.0}% used (premium)", percent));
+        }
+    }
+    if let Some(plan) = plan {
+        parts.push(plan.to_string());
+    }
+    if let Some(reset) = body
+        .quota_reset_date
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(format!("resets {reset}"));
+    }
+    LiveUsage {
+        summary: if parts.is_empty() {
+            "Usage unavailable".to_string()
+        } else {
+            parts.join(" · ")
+        },
+        used_percent,
+        resets_at: None,
+    }
 }
 
 fn http_client() -> anyhow::Result<reqwest::Client> {
@@ -1594,5 +1769,66 @@ mod tests {
         .expect_err("rejected");
         assert!(error.contains("code 1004"), "{}", error);
         assert!(error.contains("login fail"), "{}", error);
+    }
+
+    #[test]
+    fn kimi_usage_detail_becomes_used_percent() {
+        let live = live_usage_from_kimi(KimiUsageResponse {
+            limits: Some(vec![KimiUsageLimit {
+                detail: Some(KimiUsageDetail {
+                    limit: Some(1000.0),
+                    remaining: Some(250.0),
+                    reset_time: Some(json!("2026-09-25T13:38:00Z")),
+                }),
+            }]),
+        })
+        .expect("usage");
+        assert_eq!(live.used_percent, Some(75.0));
+        assert!(live.summary.starts_with("75% used"), "{}", live.summary);
+        assert_eq!(live.resets_at.as_deref(), Some("2026-09-25T13:38:00+00:00"));
+    }
+
+    #[test]
+    fn kimi_missing_limits_is_an_error() {
+        let error = live_usage_from_kimi(KimiUsageResponse { limits: None })
+            .expect_err("no limits");
+        assert!(error.contains("no quota details"), "{}", error);
+    }
+
+    #[test]
+    fn copilot_quota_snapshot_becomes_premium_percent() {
+        let live = live_usage_from_copilot(CopilotUsageResponse {
+            copilot_plan: Some("pro".to_string()),
+            quota_reset_date: Some("2026-10-01".to_string()),
+            quota_snapshots: Some(CopilotQuotaSnapshots {
+                premium_interactions: Some(CopilotQuotaDetail {
+                    entitlement: Some(300.0),
+                    remaining: Some(120.0),
+                    unlimited: Some(false),
+                }),
+            }),
+        });
+        assert_eq!(live.used_percent, Some(60.0));
+        assert_eq!(
+            live.summary,
+            "60% used (premium) · pro · resets 2026-10-01"
+        );
+    }
+
+    #[test]
+    fn copilot_unlimited_quota_reports_no_percent() {
+        let live = live_usage_from_copilot(CopilotUsageResponse {
+            copilot_plan: Some("free".to_string()),
+            quota_reset_date: None,
+            quota_snapshots: Some(CopilotQuotaSnapshots {
+                premium_interactions: Some(CopilotQuotaDetail {
+                    entitlement: Some(50.0),
+                    remaining: Some(50.0),
+                    unlimited: Some(true),
+                }),
+            }),
+        });
+        assert_eq!(live.used_percent, None);
+        assert_eq!(live.summary, "premium unlimited · free");
     }
 }

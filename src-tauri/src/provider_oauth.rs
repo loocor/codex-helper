@@ -505,6 +505,19 @@ pub async fn oauth_bearer_token(state_root: &Path, kind: OAuthKind) -> anyhow::R
     }
 }
 
+/// Long-lived GitHub OAuth token, used by account-level endpoints such as
+/// `GET /copilot_internal/user`.
+pub async fn copilot_github_token(state_root: &Path) -> anyhow::Result<String> {
+    let path = oauth_path(state_root, OAuthKind::GithubCopilot);
+    let store: CopilotStore = serde_json::from_str(
+        &fs::read_to_string(&path).with_context(|| "GitHub Copilot is not signed in")?,
+    )?;
+    if store.github_token.is_empty() {
+        anyhow::bail!("GitHub Copilot is not signed in");
+    }
+    Ok(store.github_token)
+}
+
 async fn copilot_bearer(state_root: &Path) -> anyhow::Result<String> {
     let path = oauth_path(state_root, OAuthKind::GithubCopilot);
     let mut store: CopilotStore = serde_json::from_str(
