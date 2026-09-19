@@ -990,10 +990,15 @@ fn collect_model_ids(body: &Value) -> Vec<String> {
             if !enabled {
                 continue;
             }
-            if let Some(id) = item.get("id").and_then(Value::as_str).map(str::trim) {
-                if !id.is_empty() {
-                    ids.push(id.to_string());
-                }
+            // OpenAI-style entries carry `id`; Codex model catalogs (bigmodel
+            // /api/v1) identify models by `slug` instead.
+            let id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .or_else(|| item.get("slug").and_then(Value::as_str))
+                .map(str::trim);
+            if let Some(id) = id.filter(|id| !id.is_empty()) {
+                ids.push(id.to_string());
             }
         }
     }
@@ -1105,6 +1110,25 @@ mod tests {
         assert_eq!(
             join_provider_upstream_url("https://api.x.ai/v1", "/v1/responses?stream=true"),
             "https://api.x.ai/v1/responses?stream=true"
+        );
+    }
+
+    #[test]
+    fn collect_model_ids_accepts_codex_catalog_slugs() {
+        let body = json!({
+            "models": [
+                { "slug": "glm-5.3", "display_name": "glm-5.3" },
+                { "slug": "glm-5.3-flash", "display_name": "GLM-5.3-Flash" },
+                { "id": "extra-openai-model" }
+            ]
+        });
+        assert_eq!(
+            collect_model_ids(&body),
+            vec![
+                "extra-openai-model".to_string(),
+                "glm-5.3".to_string(),
+                "glm-5.3-flash".to_string()
+            ]
         );
     }
 
