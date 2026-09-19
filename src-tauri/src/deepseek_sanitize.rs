@@ -39,6 +39,7 @@ fn keep_native() -> HashSet<String> {
 pub fn apply_deepseek_responses_request_compat(body: &mut Value) -> DeepSeekRestoreMap {
     let custom_tool_names = custom_tool_names_from_request(body, &keep_native());
     sanitize_deepseek_responses_request(body);
+    restore_deepseek_reasoning_content(body);
     DeepSeekRestoreMap { custom_tool_names }
 }
 
@@ -53,6 +54,39 @@ pub fn sanitize_deepseek_responses_request(body: &mut Value) -> bool {
     changed |= rewrite_custom_input_items(body, &keep);
     changed |= filter_remaining_custom_tools(body);
     changed
+}
+
+fn restore_deepseek_reasoning_content(body: &mut Value) {
+    let Some(items) = body.get_mut("input").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for item in items {
+        if json_type(item) != Some("reasoning")
+            || item
+                .get("content")
+                .and_then(Value::as_array)
+                .is_some_and(|content| !content.is_empty())
+        {
+            continue;
+        }
+        let Some(summary) = item.get("summary").and_then(Value::as_array) else {
+            continue;
+        };
+        let content: Vec<Value> = summary
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .filter(|text| !text.is_empty())
+            .map(|text| json!({ "type": "reasoning_text", "text": text }))
+            .collect();
+        if content.is_empty() {
+            continue;
+        }
+        let Some(object) = item.as_object_mut() else {
+            continue;
+        };
+        object.insert("content".to_string(), Value::Array(content));
+        object.insert("summary".to_string(), Value::Array(Vec::new()));
+    }
 }
 
 fn json_type(value: &Value) -> Option<&str> {
@@ -271,7 +305,10 @@ pub fn rewrite_deepseek_native_json_bytes(
     let Ok(mut value) = serde_json::from_slice::<Value>(bytes) else {
         return bytes.to_vec();
     };
-    if !restore_custom_tool_calls(&mut value, &restore_map.custom_tool_names) {
+    let custom_tools_changed =
+        restore_custom_tool_calls(&mut value, &restore_map.custom_tool_names);
+    let reasoning_changed = rewrite_deepseek_reasoning_for_codex(&mut value);
+    if !custom_tools_changed && !reasoning_changed {
         return bytes.to_vec();
     }
     serde_json::to_vec(&value).unwrap_or_else(|_| bytes.to_vec())
@@ -299,12 +336,16 @@ pub fn rewrite_deepseek_native_sse_block(block: &str, restore_map: &DeepSeekRest
         Ok(value) => value,
         Err(_) => return Bytes::from(format!("{block}\n\n")),
     };
-    if !restore_custom_tool_calls(&mut event, &restore_map.custom_tool_names) {
+    let custom_tools_changed =
+        restore_custom_tool_calls(&mut event, &restore_map.custom_tool_names);
+    let reasoning_changed = rewrite_deepseek_reasoning_for_codex(&mut event);
+    if !custom_tools_changed && !reasoning_changed {
         return Bytes::from(format!("{block}\n\n"));
     }
     let restored = serde_json::to_string(&event).unwrap_or(data);
     let mut out = String::new();
-    if let Some(name) = event_name {
+    let rewritten_event_name = event.get("type").and_then(Value::as_str).or(event_name);
+    if let Some(name) = rewritten_event_name {
         out.push_str("event: ");
         out.push_str(name);
         out.push('\n');
@@ -313,6 +354,87 @@ pub fn rewrite_deepseek_native_sse_block(block: &str, restore_map: &DeepSeekRest
     out.push_str(&restored);
     out.push_str("\n\n");
     Bytes::from(out)
+}
+
+fn rewrite_deepseek_reasoning_for_codex(value: &mut Value) -> bool {
+    let mut changed = rewrite_reasoning_text_event(value);
+    changed |= move_reasoning_content_to_summary(value);
+    changed
+}
+
+fn rewrite_reasoning_text_event(event: &mut Value) -> bool {
+    let Some(event_type) = event.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    let summary_type = match event_type {
+        "response.reasoning_text.delta" => "response.reasoning_summary_text.delta",
+        "response.reasoning_text.done" => "response.reasoning_summary_text.done",
+        _ => return false,
+    };
+    let Some(object) = event.as_object_mut() else {
+        return false;
+    };
+    object.insert("type".to_string(), json!(summary_type));
+    if let Some(index) = object.remove("content_index") {
+        object.insert("summary_index".to_string(), index);
+    }
+    true
+}
+
+fn move_reasoning_content_to_summary(value: &mut Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            let mut changed = move_reasoning_item_content_to_summary(object);
+            for child in object.values_mut() {
+                changed |= move_reasoning_content_to_summary(child);
+            }
+            changed
+        }
+        Value::Array(items) => {
+            let mut changed = false;
+            for item in items {
+                changed |= move_reasoning_content_to_summary(item);
+            }
+            changed
+        }
+        _ => false,
+    }
+}
+
+fn move_reasoning_item_content_to_summary(object: &mut serde_json::Map<String, Value>) -> bool {
+    if object.get("type").and_then(Value::as_str) != Some("reasoning") {
+        return false;
+    }
+    let Some(content) = object.get("content").and_then(Value::as_array) else {
+        return false;
+    };
+    let mut summary = object
+        .get("summary")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut moved_content = false;
+    for part in content {
+        let Some(text) = part.get("text").and_then(Value::as_str) else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
+        moved_content = true;
+        if !summary
+            .iter()
+            .any(|entry| entry.get("text").and_then(Value::as_str) == Some(text))
+        {
+            summary.push(json!({ "type": "summary_text", "text": text }));
+        }
+    }
+    if !moved_content {
+        return false;
+    }
+    object.insert("summary".to_string(), Value::Array(summary));
+    object.remove("content");
+    true
 }
 
 #[cfg(test)]
@@ -343,6 +465,14 @@ mod tests {
                 })
             })
         })
+    }
+
+    fn sse_data(block: &str) -> Value {
+        let data = block
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("sse data");
+        serde_json::from_str(data).unwrap()
     }
 
     #[test]
@@ -473,14 +603,120 @@ mod tests {
         );
         let rewritten = rewrite_deepseek_native_sse_block(block, &restore);
         let text = String::from_utf8(rewritten.to_vec()).unwrap();
-        let data = text
-            .lines()
-            .find_map(|line| line.strip_prefix("data: "))
-            .expect("sse data");
-        let event: Value = serde_json::from_str(data).unwrap();
+        let event = sse_data(&text);
         assert_eq!(event["type"], "custom_tool_call");
         assert_eq!(event["name"], "exec");
         assert_eq!(event["input"], "ls");
+    }
+
+    #[test]
+    fn deepseek_restores_reasoning_summary_as_content_for_upstream() {
+        let mut body = json!({
+            "input": [{
+                "type": "reasoning",
+                "id": "reasoning_1",
+                "summary": [{
+                    "type": "summary_text",
+                    "text": "Inspect the request"
+                }],
+                "content": []
+            }]
+        });
+        apply_deepseek_responses_request_compat(&mut body);
+        assert_eq!(body["input"][0]["id"], "reasoning_1");
+        assert_eq!(
+            body["input"][0]["content"],
+            json!([{ "type": "reasoning_text", "text": "Inspect the request" }])
+        );
+        assert_eq!(body["input"][0]["summary"], json!([]));
+    }
+
+    #[test]
+    fn deepseek_preserves_existing_reasoning_content() {
+        let mut body = json!({
+            "input": [{
+                "type": "reasoning",
+                "summary": [{
+                    "type": "summary_text",
+                    "text": "do not replace"
+                }],
+                "content": [{
+                    "type": "reasoning_text",
+                    "text": "raw chain of thought"
+                }]
+            }]
+        });
+        apply_deepseek_responses_request_compat(&mut body);
+        assert_eq!(
+            body["input"][0]["content"],
+            json!([{ "type": "reasoning_text", "text": "raw chain of thought" }])
+        );
+        assert_eq!(
+            body["input"][0]["summary"],
+            json!([{ "type": "summary_text", "text": "do not replace" }])
+        );
+    }
+
+    #[test]
+    fn deepseek_rewrites_reasoning_delta_to_summary_sse() {
+        let block = concat!(
+            "event: response.reasoning_text.delta\n",
+            r#"data: {"type":"response.reasoning_text.delta","item_id":"reasoning_1","delta":"step","content_index":0}"#,
+            "\n\n"
+        );
+        let rewritten = rewrite_deepseek_native_sse_block(block, &DeepSeekRestoreMap::default());
+        let text = String::from_utf8(rewritten.to_vec()).unwrap();
+        assert!(text.starts_with("event: response.reasoning_summary_text.delta\n"));
+        let event = sse_data(&text);
+        assert_eq!(event["type"], "response.reasoning_summary_text.delta");
+        assert_eq!(event["delta"], "step");
+        assert_eq!(event["summary_index"], 0);
+        assert!(event.get("content_index").is_none());
+    }
+
+    #[test]
+    fn deepseek_rewrites_reasoning_item_content_to_summary_json() {
+        let value = json!({
+            "output": [{
+                "type": "reasoning",
+                "id": "reasoning_1",
+                "summary": [],
+                "content": [{
+                    "type": "reasoning_text",
+                    "text": "Inspect the request"
+                }]
+            }]
+        });
+        let rewritten = rewrite_deepseek_native_json_bytes(
+            &serde_json::to_vec(&value).unwrap(),
+            &DeepSeekRestoreMap::default(),
+        );
+        let value: Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(
+            value["output"][0]["summary"],
+            json!([{ "type": "summary_text", "text": "Inspect the request" }])
+        );
+        assert!(value["output"][0].get("content").is_none());
+    }
+
+    #[test]
+    fn deepseek_rewrites_reasoning_and_exec_in_same_sse_response() {
+        let mut restore = DeepSeekRestoreMap::default();
+        restore.custom_tool_names.insert("exec".to_string());
+        let block = concat!(
+            "event: response.completed\n",
+            r#"data: {"type":"response.completed","response":{"output":[{"type":"reasoning","id":"reasoning_1","summary":[],"content":[{"type":"reasoning_text","text":"Inspect"}]},{"type":"function_call","name":"exec","call_id":"call_1","arguments":"{\"input\":\"ls\"}"}]}}"#,
+            "\n\n"
+        );
+        let rewritten = rewrite_deepseek_native_sse_block(block, &restore);
+        let event = sse_data(&String::from_utf8(rewritten.to_vec()).unwrap());
+        assert_eq!(
+            event["response"]["output"][0]["summary"],
+            json!([{ "type": "summary_text", "text": "Inspect" }])
+        );
+        assert!(event["response"]["output"][0].get("content").is_none());
+        assert_eq!(event["response"]["output"][1]["type"], "custom_tool_call");
+        assert_eq!(event["response"]["output"][1]["input"], "ls");
     }
 
     #[test]
