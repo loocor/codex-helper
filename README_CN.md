@@ -11,7 +11,7 @@ Codex Helper 是一个面向 Codex desktop 的轻量本地增强启动器。
 - **远程端口转发**：检测并转发 Codex SSH 会话中的 web 端口，让远端 dev server 可以在本地打开。
 - **Helper Settings**：从菜单栏打开独立设置窗口配置 Helper，界面尽量贴近 Codex。
 - **用量限制浮层隐藏**：可选隐藏 *You're out of Codex and Work usage* 卡片。这只影响界面显示，不会重置或绕过账号额度。
-- **Provider 管理**：在 Official ChatGPT 登录、API Key（DeepSeek、Kimi、MiniMax、DashScope 或自定义）、GitHub Copilot 和 xAI Grok 之间切换。Helper 会写入 `~/.codex/config.toml` 以及接近原生的模型 Catalog。Copilot 与 Grok 使用设备码 OAuth，令牌保存在 `~/.codex-helper/oauth/`。
+- **Provider 管理**：在 Official ChatGPT 登录、API Key（DeepSeek、Kimi、MiniMax、DashScope、智谱 GLM 或自定义）、GitHub Copilot 和 xAI Grok 之间切换。Helper 会写入 `~/.codex/config.toml` 以及接近原生的模型 Catalog。Copilot 与 Grok 使用设备码 OAuth，令牌保存在 `~/.codex-helper/oauth/`。
 - **本机 Provider 代理**：非 Official 流量走 `127.0.0.1:3721`（`/v1/responses` 与 `/v1/chat/completions`）。Helper 负责注入上游密钥、清洗 ChatGPT 桌面端工具载荷，并可为其他 Agent 发放本地 Endpoint Key。
 
 ## 特点

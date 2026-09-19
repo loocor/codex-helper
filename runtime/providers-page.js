@@ -56,6 +56,13 @@ const PROVIDER_PRESETS = {
     model: "qwen3-coder-plus",
     usagePageUrl: "https://bailian.console.aliyun.com",
   },
+  bigmodel: {
+    name: "Zhipu GLM",
+    baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
+    wireApi: "responses",
+    model: "glm-5.3",
+    usagePageUrl: "https://bigmodel.cn/coding-plan/personal/usage",
+  },
 };
 
 const MASKED_API_KEY = "********";
@@ -1002,6 +1009,7 @@ function detectPreset(provider) {
   if (url.includes("api.moonshot.cn") || url.includes("kimi")) return "kimi";
   if (url.includes("minimaxi.com") || url.includes("minimax.io")) return "minimax";
   if (url.includes("dashscope.aliyuncs.com") || url.includes("bailian.console.aliyun.com")) return "dashscope";
+  if (url.includes("bigmodel.cn")) return "bigmodel";
   return "custom";
 }
 
@@ -1055,6 +1063,7 @@ function openProviderDialog(mode, provider) {
             <option value="kimi">Kimi</option>
             <option value="minimax">MiniMax</option>
             <option value="dashscope">DashScope</option>
+            <option value="bigmodel">Zhipu GLM</option>
           </select>`,
           { apiOnly: true, attr: "data-codex-helper-provider-preset-label" },
         )}
