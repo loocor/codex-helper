@@ -511,6 +511,15 @@ pub fn provider_is_deepseek(provider: &Provider) -> bool {
     haystack.contains("deepseek")
 }
 
+pub fn provider_is_bigmodel(provider: &Provider) -> bool {
+    let haystack = format!(
+        "{} {} {} {}",
+        provider.id, provider.name, provider.base_url, provider.compat
+    )
+    .to_ascii_lowercase();
+    haystack.contains("bigmodel") || haystack.contains("zhipu")
+}
+
 /// DeepSeek `/v1/responses` accepts custom tools but only `apply_patch`.
 /// Other named custom tools (especially Codex `exec`) are rewritten to functions.
 pub fn provider_needs_deepseek_responses_sanitize(provider: &Provider) -> bool {
@@ -1166,6 +1175,28 @@ mod tests {
             ..Provider::default()
         };
         assert!(!provider_needs_deepseek_responses_sanitize(&provider));
+    }
+
+    #[test]
+    fn bigmodel_detection_matches_host_and_zhipu_names() {
+        let coding = Provider {
+            id: "glm".to_string(),
+            base_url: "https://open.bigmodel.cn/api/coding/paas/v4".to_string(),
+            ..Provider::default()
+        };
+        assert!(provider_is_bigmodel(&coding));
+        let zhipu = Provider {
+            id: "glm".to_string(),
+            name: "Zhipu GLM".to_string(),
+            base_url: "https://api.example.com/v4".to_string(),
+            ..Provider::default()
+        };
+        assert!(provider_is_bigmodel(&zhipu));
+        let other = Provider {
+            base_url: "https://api.example.com/v1".to_string(),
+            ..Provider::default()
+        };
+        assert!(!provider_is_bigmodel(&other));
     }
 
     #[test]

@@ -17,7 +17,8 @@ use serde_json::{json, Value};
 use crate::codex_live::{auth_has_oauth_login, default_codex_home, read_auth};
 use crate::provider_oauth::{oauth_bearer_token, oauth_is_signed_in, OAuthKind};
 use crate::providers::{
-    provider_device_oauth_kind, provider_is_deepseek, read_store, Provider, ProviderStore,
+    provider_device_oauth_kind, provider_is_bigmodel, provider_is_deepseek, read_store, Provider,
+    ProviderStore,
 };
 
 const CHATGPT_USAGE_URL: &str = "https://chatgpt.com/";
@@ -28,6 +29,8 @@ const COPILOT_USAGE_URL: &str = "https://github.com/settings/copilot";
 const DEEPSEEK_USAGE_URL: &str = "https://platform.deepseek.com/usage";
 const MOONSHOT_USAGE_URL: &str = "https://platform.moonshot.cn/console";
 const OPENROUTER_USAGE_URL: &str = "https://openrouter.ai/activity";
+const BIGMODEL_USAGE_PAGE_URL: &str = "https://bigmodel.cn/coding-plan/personal/usage";
+const BIGMODEL_USAGE_API: &str = "https://open.bigmodel.cn/api/monitor/usage/quota/limit";
 const GROK_BILLING_ENDPOINT: &str =
     "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig";
 
@@ -54,6 +57,9 @@ fn inferred_usage_page_url(provider: &Provider) -> Option<&'static str> {
     }
     if host.contains("deepseek") {
         return Some(DEEPSEEK_USAGE_URL);
+    }
+    if host.contains("bigmodel") {
+        return Some(BIGMODEL_USAGE_PAGE_URL);
     }
     if host.contains("moonshot") || host.contains("kimi") {
         return Some(MOONSHOT_USAGE_URL);
@@ -157,6 +163,7 @@ pub async fn query_provider_usage(state_root: &Path, provider_id: &str) -> Value
     }
 }
 
+#[derive(Debug)]
 struct LiveUsage {
     used_percent: Option<f64>,
     resets_at: Option<String>,
@@ -180,6 +187,9 @@ async fn query_live_usage(
     }
     if provider_is_deepseek(provider) {
         return query_deepseek_usage(provider).await.map(Some);
+    }
+    if provider_is_bigmodel(provider) {
+        return query_bigmodel_usage(provider).await.map(Some);
     }
     Ok(None)
 }
@@ -481,6 +491,148 @@ fn format_deepseek_balance(info: &DeepSeekBalanceInfo) -> Option<String> {
         text.push(')');
     }
     Some(text)
+}
+
+async fn query_bigmodel_usage(provider: &Provider) -> Result<LiveUsage, String> {
+    let api_key = provider.api_key.trim();
+    if api_key.is_empty() {
+        return Err("BigModel API key is required".to_string());
+    }
+    let client = http_client().map_err(|error| error.to_string())?;
+    let response = client
+        .get(BIGMODEL_USAGE_API)
+        .header("Authorization", api_key)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|error| format!("BigModel usage query failed: {error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Failed to read BigModel usage response: {error}"))?;
+    if !status.is_success() {
+        return Err(format!("BigModel usage query failed (HTTP {status}): {body}"));
+    }
+    let parsed: BigModelUsageResponse = serde_json::from_str(&body)
+        .map_err(|error| format!("BigModel usage response was not valid JSON: {error}"))?;
+    live_usage_from_bigmodel(parsed)
+}
+
+#[derive(Debug, Deserialize)]
+struct BigModelUsageResponse {
+    code: Option<i64>,
+    msg: Option<String>,
+    success: Option<bool>,
+    data: Option<BigModelUsageData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BigModelUsageData {
+    #[allow(dead_code)]
+    level: Option<String>,
+    limits: Option<Vec<BigModelUsageLimit>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BigModelUsageLimit {
+    #[serde(rename = "type")]
+    limit_type: Option<String>,
+    percentage: Option<f64>,
+    next_reset_time: Option<Value>,
+}
+
+fn bigmodel_rejection_message(body: &BigModelUsageResponse) -> String {
+    let message = body
+        .msg
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (body.code, message) {
+        (Some(code), Some(message)) => format!("BigModel usage query failed (code {code}): {message}"),
+        (Some(code), None) => format!("BigModel usage query failed (code {code})"),
+        (None, Some(message)) => format!("BigModel usage query failed: {message}"),
+        (None, None) => "BigModel usage query failed".to_string(),
+    }
+}
+
+fn bigmodel_reset_secs(value: &Option<Value>) -> Option<i64> {
+    match value.as_ref()? {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_f64().map(|value| value as i64))
+            .map(normalize_epoch_secs),
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if let Ok(number) = trimmed.parse::<i64>() {
+                return Some(normalize_epoch_secs(number));
+            }
+            chrono::DateTime::parse_from_rfc3339(trimmed)
+                .ok()
+                .map(|dt| dt.timestamp())
+        }
+        _ => None,
+    }
+}
+
+fn normalize_epoch_secs(secs: i64) -> i64 {
+    if secs > 1_000_000_000_000 {
+        secs / 1000
+    } else {
+        secs
+    }
+}
+
+fn live_usage_from_bigmodel(body: BigModelUsageResponse) -> Result<LiveUsage, String> {
+    if body.success == Some(false) {
+        return Err(bigmodel_rejection_message(&body));
+    }
+    if let Some(code) = body.code {
+        if code != 200 {
+            return Err(bigmodel_rejection_message(&body));
+        }
+    }
+    let limits = body
+        .data
+        .ok_or_else(|| "BigModel usage response had no data".to_string())?
+        .limits
+        .unwrap_or_default();
+    let mut token_limits: Vec<&BigModelUsageLimit> = limits
+        .iter()
+        .filter(|limit| {
+            limit
+                .limit_type
+                .as_deref()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("TOKENS_LIMIT"))
+        })
+        .collect();
+    if token_limits.is_empty() {
+        return Err("BigModel usage response had no token quota".to_string());
+    }
+    token_limits.sort_by_key(|limit| bigmodel_reset_secs(&limit.next_reset_time).unwrap_or(i64::MAX));
+    let five_hour = token_limits[0];
+    let used_percent = five_hour
+        .percentage
+        .ok_or_else(|| "BigModel usage response had no quota percentage".to_string())?;
+    let weekly = token_limits.get(1).and_then(|limit| limit.percentage);
+    let resets_at = bigmodel_reset_secs(&five_hour.next_reset_time).and_then(unix_ts_to_rfc3339);
+    Ok(LiveUsage {
+        summary: bigmodel_usage_summary(used_percent, weekly, resets_at.as_deref()),
+        used_percent: Some(used_percent.clamp(0.0, 100.0)),
+        resets_at,
+    })
+}
+
+fn bigmodel_usage_summary(used_percent: f64, weekly: Option<f64>, resets_at: Option<&str>) -> String {
+    let mut text = format!("{:.0}% used (5h)", used_percent.clamp(0.0, 100.0));
+    if let Some(weekly) = weekly {
+        text.push_str(&format!(" · {:.0}% used (week)", weekly.clamp(0.0, 100.0)));
+    }
+    if let Some(label) = resets_at.and_then(reset_label) {
+        text.push_str(" · ");
+        text.push_str(&label);
+    }
+    text
 }
 
 fn http_client() -> anyhow::Result<reqwest::Client> {
@@ -798,6 +950,11 @@ mod tests {
             Some(MOONSHOT_USAGE_URL)
         );
         assert_eq!(
+            usage_page_url(&provider("glm", "", "https://open.bigmodel.cn/api/coding/paas/v4"))
+                .as_deref(),
+            Some(BIGMODEL_USAGE_PAGE_URL)
+        );
+        assert_eq!(
             usage_page_url(&provider("custom", "", "https://api.example.com/v1")),
             None
         );
@@ -948,5 +1105,107 @@ mod tests {
         })
         .expect("usage");
         assert_eq!(live.summary, "USD 0.00 remaining (unavailable)");
+    }
+
+    fn bigmodel_limit(
+        limit_type: &str,
+        percentage: f64,
+        next_reset_time: Option<Value>,
+    ) -> BigModelUsageLimit {
+        BigModelUsageLimit {
+            limit_type: Some(limit_type.to_string()),
+            percentage: Some(percentage),
+            next_reset_time,
+        }
+    }
+
+    #[test]
+    fn bigmodel_token_limits_pick_5h_window_and_weekly_summary() {
+        let live = live_usage_from_bigmodel(BigModelUsageResponse {
+            code: Some(200),
+            msg: Some("ok".to_string()),
+            success: Some(true),
+            data: Some(BigModelUsageData {
+                level: Some("pro".to_string()),
+                limits: Some(vec![
+                    bigmodel_limit("TIME_LIMIT", 7.0, None),
+                    bigmodel_limit(
+                        "TOKENS_LIMIT",
+                        53.0,
+                        Some(json!("2026-09-21T08:00:00Z")),
+                    ),
+                    bigmodel_limit(
+                        "TOKENS_LIMIT",
+                        44.0,
+                        Some(json!("2026-09-19T18:00:00Z")),
+                    ),
+                ]),
+            }),
+        })
+        .expect("usage");
+        assert_eq!(live.used_percent, Some(44.0));
+        assert_eq!(
+            live.resets_at.as_deref(),
+            Some("2026-09-19T18:00:00+00:00")
+        );
+        assert!(
+            live.summary.contains("44% used (5h)"),
+            "{}",
+            live.summary
+        );
+        assert!(
+            live.summary.contains("53% used (week)"),
+            "{}",
+            live.summary
+        );
+    }
+
+    #[test]
+    fn bigmodel_epoch_millis_reset_time_is_normalized() {
+        let live = live_usage_from_bigmodel(BigModelUsageResponse {
+            code: Some(200),
+            msg: None,
+            success: Some(true),
+            data: Some(BigModelUsageData {
+                level: None,
+                limits: Some(vec![bigmodel_limit(
+                    "TOKENS_LIMIT",
+                    12.5,
+                    Some(json!(1_800_000_000_000i64)),
+                )]),
+            }),
+        })
+        .expect("usage");
+        assert_eq!(live.used_percent, Some(12.5));
+        assert_eq!(live.resets_at.as_deref(), Some("2027-01-15T08:00:00+00:00"));
+        assert!(live.summary.contains("resets in"), "{}", live.summary);
+    }
+
+    #[test]
+    fn bigmodel_rejected_response_surfaces_message() {
+        let error = live_usage_from_bigmodel(BigModelUsageResponse {
+            code: Some(401),
+            msg: Some("令牌已过期或验证不正确".to_string()),
+            success: Some(false),
+            data: None,
+        })
+        .expect_err("rejected");
+        assert!(error.contains("code 401"), "{}", error);
+        assert!(error.contains("令牌已过期或验证不正确"), "{}", error);
+    }
+
+    #[test]
+    fn bigmodel_missing_token_quota_is_an_error() {
+        let error = live_usage_from_bigmodel(BigModelUsageResponse {
+            code: Some(200),
+            msg: None,
+            success: Some(true),
+            data: Some(BigModelUsageData {
+                level: None,
+                limits: Some(vec![bigmodel_limit("TIME_LIMIT", 7.0, None)]),
+            }),
+        })
+        .expect_err("no token quota");
+        assert!(error.contains("no token quota"), "{}", error);
     }
 }
