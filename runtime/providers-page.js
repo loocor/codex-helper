@@ -30,24 +30,24 @@ const PROVIDER_PRESETS = {
   custom: { name: "", baseUrl: "", wireApi: "responses", model: "", usagePageUrl: "" },
   deepseek: {
     name: "DeepSeek",
-    baseUrl: "https://api.deepseek.com/v1",
-    wireApi: "chat",
-    model: "deepseek-chat",
+    baseUrl: "https://api.deepseek.com",
+    wireApi: "responses",
+    model: "deepseek-v4-flash",
     usagePageUrl: "https://platform.deepseek.com/usage",
   },
   kimi: {
     name: "Kimi",
     baseUrl: "https://api.moonshot.cn/v1",
-    wireApi: "chat",
-    model: "kimi-k2.5",
+    wireApi: "responses",
+    model: "kimi-k3",
     usagePageUrl: "https://platform.moonshot.cn/console",
   },
   minimax: {
     name: "MiniMax",
-    baseUrl: "https://api.minimaxi.com/v1",
+    baseUrl: "https://api.minimax.cn/v1",
     wireApi: "responses",
     model: "MiniMax-M3",
-    usagePageUrl: "https://platform.minimaxi.com",
+    usagePageUrl: "https://platform.minimax.cn",
   },
   dashscope: {
     name: "DashScope",
@@ -1007,7 +1007,7 @@ function detectPreset(provider) {
   const url = String(provider?.baseUrl || "").toLowerCase();
   if (url.includes("api.deepseek.com")) return "deepseek";
   if (url.includes("api.moonshot.cn") || url.includes("kimi")) return "kimi";
-  if (url.includes("minimaxi.com") || url.includes("minimax.io")) return "minimax";
+  if (url.includes("minimaxi.com") || url.includes("minimax.io") || url.includes("minimax.cn")) return "minimax";
   if (url.includes("dashscope.aliyuncs.com") || url.includes("bailian.console.aliyun.com")) return "dashscope";
   if (url.includes("bigmodel.cn")) return "bigmodel";
   return "custom";

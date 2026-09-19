@@ -169,14 +169,14 @@ test("settings page exposes provider management", () => {
   expect(settingsSource).toContain("Kimi");
   expect(settingsSource).toContain("Usage URL");
   expect(settingsSource).toContain('data-codex-helper-provider-field="usagePageUrl"');
-  expect(settingsSource).toContain("https://api.deepseek.com/v1");
+  expect(settingsSource).toContain("https://api.deepseek.com");
   expect(settingsSource).toContain("https://platform.deepseek.com/usage");
   expect(settingsSource).toContain("https://api.moonshot.cn/v1");
   expect(settingsSource).toContain("https://platform.moonshot.cn/console");
   expect(settingsSource).toContain("MiniMax");
   expect(settingsSource).toContain("DashScope");
-  expect(settingsSource).toContain("https://api.minimaxi.com/v1");
-  expect(settingsSource).toContain("https://platform.minimaxi.com");
+  expect(settingsSource).toContain("https://api.minimax.cn/v1");
+  expect(settingsSource).toContain("https://platform.minimax.cn");
   expect(settingsSource).toContain("https://dashscope.aliyuncs.com/compatible-mode/v1");
   expect(settingsSource).toContain("https://bailian.console.aliyun.com");
   expect(settingsSource).toContain("MiniMax-M3");

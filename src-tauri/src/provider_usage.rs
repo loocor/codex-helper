@@ -1071,6 +1071,10 @@ mod tests {
             "https://api.deepseek.com/user/balance"
         );
         assert_eq!(
+            deepseek_balance_url("https://api.deepseek.com").unwrap(),
+            "https://api.deepseek.com/user/balance"
+        );
+        assert_eq!(
             deepseek_balance_url("http://127.0.0.1:9000/v1").unwrap(),
             "http://127.0.0.1:9000/user/balance"
         );
