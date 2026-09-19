@@ -221,7 +221,7 @@ function renderProviders(result) {
       list.appendChild(createProviderListRow(provider, provider.id === providerActiveId));
     }
   }
-  void refreshActiveProviderUsage();
+  void refreshProviderUsages();
 }
 
 function createProviderListRow(provider, active) {
@@ -541,43 +541,53 @@ function setProviderUsagePie(node, { percent, tooltip, checking = false }) {
   node.setAttribute("aria-busy", checking ? "true" : "false");
 }
 
-async function refreshActiveProviderUsage() {
-  if (!providerActiveId) return;
-  const nodes = helperSettingsRoots()
-    .map((root) =>
-      root.querySelector(
-        `[data-codex-helper-provider-id="${CSS.escape(providerActiveId)}"] [data-codex-helper-provider-usage]`,
-      ),
-    )
-    .filter((node) => node instanceof HTMLElement);
-  if (nodes.length === 0) return;
-  for (const node of nodes) {
-    setProviderUsagePie(node, {
-      percent: null,
-      tooltip: "Checking usage…",
-      checking: true,
-    });
+async function refreshProviderUsages() {
+  const nodesById = new Map();
+  for (const provider of providerCache) {
+    const nodes = helperSettingsRoots()
+      .map((root) =>
+        root.querySelector(
+          `[data-codex-helper-provider-id="${CSS.escape(provider.id)}"] [data-codex-helper-provider-usage]`,
+        ),
+      )
+      .filter((node) => node instanceof HTMLElement);
+    if (nodes.length > 0) nodesById.set(provider.id, nodes);
   }
-  const result = await bridge("/providers/usage", { id: providerActiveId });
-  for (const node of nodes) {
-    const clickable = node.getAttribute(helperCommandAttribute) === "open-provider-usage";
-    if (result?.status === "failed") {
-      logProviderEvent("providers.usage_failed", {
-        id: providerActiveId,
-        message: result.message,
-      });
+  if (nodesById.size === 0) return;
+  for (const nodes of nodesById.values()) {
+    for (const node of nodes) {
       setProviderUsagePie(node, {
         percent: null,
-        tooltip: result.message || "Usage query failed",
+        tooltip: "Checking usage…",
+        checking: true,
       });
-      continue;
     }
-    const percent = usagePercentFromResult(result);
-    const tooltip =
-      result?.summary ||
-      (clickable ? "Open usage page" : "Usage unavailable");
-    setProviderUsagePie(node, { percent, tooltip });
   }
+  await Promise.all(
+    [...nodesById.keys()].map(async (id) => {
+      const result = await bridge("/providers/usage", { id });
+      for (const node of nodesById.get(id) || []) {
+        const clickable =
+          node.getAttribute(helperCommandAttribute) === "open-provider-usage";
+        if (result?.status === "failed") {
+          logProviderEvent("providers.usage_failed", {
+            id,
+            message: result.message,
+          });
+          setProviderUsagePie(node, {
+            percent: null,
+            tooltip: result.message || "Usage query failed",
+          });
+          continue;
+        }
+        const percent = usagePercentFromResult(result);
+        const tooltip =
+          result?.summary ||
+          (clickable ? "Open usage page" : "Usage unavailable");
+        setProviderUsagePie(node, { percent, tooltip });
+      }
+    }),
+  );
 }
 
 function providerFormBackButton() {
