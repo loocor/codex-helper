@@ -552,7 +552,24 @@ struct BigModelUsageLimit {
     limit_type: Option<String>,
     percentage: Option<f64>,
     unit: Option<i64>,
+    current_value: Option<f64>,
+    usage: Option<f64>,
     next_reset_time: Option<Value>,
+}
+
+impl BigModelUsageLimit {
+    fn percentage(&self) -> f64 {
+        self.percentage.unwrap_or(0.0)
+    }
+
+    /// Official usage page shows consumed credits over the window total
+    /// (`currentValue` / `usage`).
+    fn credits(&self) -> Option<(f64, f64)> {
+        match (self.current_value, self.usage) {
+            (Some(current), Some(total)) if total > 0.0 => Some((current, total)),
+            _ => None,
+        }
+    }
 }
 
 enum BigModelWindow {
@@ -680,24 +697,64 @@ fn live_usage_from_bigmodel(body: BigModelUsageResponse) -> Result<LiveUsage, St
     }
     let (five_hour, five_hour_reset) = five_hour
         .ok_or_else(|| "BigModel usage response had no 5-hour quota".to_string())?;
-    let used_percent = five_hour.percentage.unwrap_or(0.0);
-    let weekly = weekly.and_then(|(limit, _)| limit.percentage);
+    let used_percent = five_hour.percentage();
+    let weekly = weekly.map(|(limit, _)| (limit.percentage(), limit.credits()));
     let resets_at = five_hour_reset.and_then(unix_ts_to_rfc3339);
     Ok(LiveUsage {
-        summary: bigmodel_usage_summary(used_percent, weekly, resets_at.as_deref()),
+        summary: bigmodel_usage_summary(
+            (used_percent, five_hour.credits()),
+            resets_at.as_deref(),
+            weekly,
+        ),
         used_percent: Some(used_percent.clamp(0.0, 100.0)),
         resets_at,
     })
 }
 
-fn bigmodel_usage_summary(used_percent: f64, weekly: Option<f64>, resets_at: Option<&str>) -> String {
-    let mut text = format!("{:.0}% used (5h)", used_percent.clamp(0.0, 100.0));
-    if let Some(weekly) = weekly {
-        text.push_str(&format!(" · {:.0}% used (week)", weekly.clamp(0.0, 100.0)));
+fn format_credits(current: f64, total: f64) -> String {
+    fn count(value: f64) -> String {
+        if value.fract() == 0.0 && value.abs() < 1e15 {
+            let n = value as i64;
+            let digits = n.abs().to_string();
+            let mut out = String::new();
+            for (index, ch) in digits.chars().enumerate() {
+                if index > 0 && (digits.len() - index) % 3 == 0 {
+                    out.push(',');
+                }
+                out.push(ch);
+            }
+            if n < 0 {
+                format!("-{out}")
+            } else {
+                out
+            }
+        } else {
+            format!("{value}")
+        }
+    }
+    format!("{}/{} credits", count(current), count(total))
+}
+
+fn bigmodel_usage_summary(
+    five_hour: (f64, Option<(f64, f64)>),
+    resets_at: Option<&str>,
+    weekly: Option<(f64, Option<(f64, f64)>)>,
+) -> String {
+    let mut text = format!("{:.0}% used (5h)", five_hour.0.clamp(0.0, 100.0));
+    if let Some((current, total)) = five_hour.1 {
+        text.push_str(" · ");
+        text.push_str(&format_credits(current, total));
     }
     if let Some(label) = resets_at.and_then(reset_label) {
         text.push_str(" · ");
         text.push_str(&label);
+    }
+    if let Some((percent, credits)) = weekly {
+        text.push_str(&format!(" · {:.0}% used (week)", percent.clamp(0.0, 100.0)));
+        if let Some((current, total)) = credits {
+            text.push_str(" · ");
+            text.push_str(&format_credits(current, total));
+        }
     }
     text
 }
@@ -799,22 +856,18 @@ fn live_usage_from_minimax(body: MiniMaxRemainsResponse) -> Result<LiveUsage, St
     } else {
         None
     };
-    let summary = minimax_usage_summary(
-        five_hour,
-        weekly,
+    let summary = bigmodel_usage_summary(
+        (five_hour, None),
         resets_at
             .as_deref()
             .or(weekly_resets.as_deref()),
+        weekly.map(|percent| (percent, None)),
     );
     Ok(LiveUsage {
         summary,
         used_percent: Some(five_hour.clamp(0.0, 100.0)),
         resets_at,
     })
-}
-
-fn minimax_usage_summary(used_percent: f64, weekly: Option<f64>, resets_at: Option<&str>) -> String {
-    bigmodel_usage_summary(used_percent, weekly, resets_at)
 }
 
 fn http_client() -> anyhow::Result<reqwest::Client> {
@@ -1306,6 +1359,8 @@ mod tests {
             limit_type: Some(limit_type.to_string()),
             percentage: Some(percentage),
             unit: None,
+            current_value: None,
+            usage: None,
             next_reset_time,
         }
     }
@@ -1320,8 +1375,53 @@ mod tests {
             limit_type: Some(limit_type.to_string()),
             percentage: Some(percentage),
             unit: Some(unit),
+            current_value: None,
+            usage: None,
             next_reset_time,
         }
+    }
+
+    #[test]
+    fn bigmodel_summary_includes_credits_like_the_usage_page() {
+        let live = live_usage_from_bigmodel(BigModelUsageResponse {
+            code: Some(200),
+            msg: Some("Operation successful".to_string()),
+            success: Some(true),
+            data: Some(BigModelUsageData {
+                level: Some("pro".to_string()),
+                limits: Some(vec![
+                    BigModelUsageLimit {
+                        limit_type: Some("CREDIT_LIMIT".to_string()),
+                        percentage: Some(11.0),
+                        unit: Some(3),
+                        current_value: Some(1354.0),
+                        usage: Some(12000.0),
+                        next_reset_time: Some(json!(1_789_943_340_000i64)),
+                    },
+                    BigModelUsageLimit {
+                        limit_type: Some("CREDIT_LIMIT".to_string()),
+                        percentage: Some(31.0),
+                        unit: Some(6),
+                        current_value: Some(19173.0),
+                        usage: Some(60000.0),
+                        next_reset_time: Some(json!(1_790_411_880_000i64)),
+                    },
+                ]),
+            }),
+        })
+        .expect("usage");
+        assert_eq!(live.used_percent, Some(11.0));
+        assert!(
+            live.summary.contains("11% used (5h) · 1,354/12,000 credits"),
+            "{}",
+            live.summary
+        );
+        assert!(
+            live.summary
+                .contains("31% used (week) · 19,173/60,000 credits"),
+            "{}",
+            live.summary
+        );
     }
 
     #[test]
