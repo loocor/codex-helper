@@ -1199,7 +1199,7 @@ mod tests {
     fn bigmodel_detection_matches_host_and_zhipu_names() {
         let coding = Provider {
             id: "glm".to_string(),
-            base_url: "https://open.bigmodel.cn/api/coding/paas/v4".to_string(),
+            base_url: "https://open.bigmodel.cn/api/v1".to_string(),
             ..Provider::default()
         };
         assert!(provider_is_bigmodel(&coding));

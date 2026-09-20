@@ -58,7 +58,7 @@ const PROVIDER_PRESETS = {
   },
   bigmodel: {
     name: "Zhipu GLM",
-    baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
+    baseUrl: "https://open.bigmodel.cn/api/v1",
     wireApi: "responses",
     model: "glm-5.3",
     usagePageUrl: "https://bigmodel.cn/coding-plan/personal/usage",

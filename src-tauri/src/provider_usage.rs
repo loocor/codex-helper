@@ -1459,8 +1459,7 @@ mod tests {
             Some(MOONSHOT_USAGE_URL)
         );
         assert_eq!(
-            usage_page_url(&provider("glm", "", "https://open.bigmodel.cn/api/coding/paas/v4"))
-                .as_deref(),
+            usage_page_url(&provider("glm", "", "https://open.bigmodel.cn/api/v1")).as_deref(),
             Some(BIGMODEL_USAGE_PAGE_URL)
         );
         assert_eq!(
