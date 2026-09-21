@@ -541,7 +541,9 @@ async fn query_bigmodel_usage(provider: &Provider) -> Result<LiveUsage, String> 
         .await
         .map_err(|error| format!("Failed to read BigModel usage response: {error}"))?;
     if !status.is_success() {
-        return Err(format!("BigModel usage query failed (HTTP {status}): {body}"));
+        return Err(format!(
+            "BigModel usage query failed (HTTP {status}): {body}"
+        ));
     }
     let parsed: BigModelUsageResponse = serde_json::from_str(&body)
         .map_err(|error| format!("BigModel usage response was not valid JSON: {error}"))?;
@@ -618,7 +620,9 @@ fn bigmodel_rejection_message(body: &BigModelUsageResponse) -> String {
         .map(str::trim)
         .filter(|value| !value.is_empty());
     match (body.code, message) {
-        (Some(code), Some(message)) => format!("BigModel usage query failed (code {code}): {message}"),
+        (Some(code), Some(message)) => {
+            format!("BigModel usage query failed (code {code}): {message}")
+        }
         (Some(code), None) => format!("BigModel usage query failed (code {code})"),
         (None, Some(message)) => format!("BigModel usage query failed: {message}"),
         (None, None) => "BigModel usage query failed".to_string(),
@@ -669,15 +673,12 @@ fn live_usage_from_bigmodel(body: BigModelUsageResponse) -> Result<LiveUsage, St
     let mut five_hour: Option<(&BigModelUsageLimit, Option<i64>)> = None;
     let mut weekly: Option<(&BigModelUsageLimit, Option<i64>)> = None;
     let mut unclassified: Vec<(&BigModelUsageLimit, Option<i64>)> = Vec::new();
-    for limit in limits
-        .iter()
-        .filter(|limit| {
-            limit
-                .limit_type
-                .as_deref()
-                .is_some_and(is_bigmodel_token_quota)
-        })
-    {
+    for limit in limits.iter().filter(|limit| {
+        limit
+            .limit_type
+            .as_deref()
+            .is_some_and(is_bigmodel_token_quota)
+    }) {
         let entry = (limit, bigmodel_reset_secs(&limit.next_reset_time));
         match BigModelWindow::from_limit(limit) {
             Some(BigModelWindow::FiveHour) if five_hour.is_none() => five_hour = Some(entry),
@@ -712,8 +713,8 @@ fn live_usage_from_bigmodel(body: BigModelUsageResponse) -> Result<LiveUsage, St
             "BigModel usage response had no token quota (limit types: {observed})"
         ));
     }
-    let (five_hour, five_hour_reset) = five_hour
-        .ok_or_else(|| "BigModel usage response had no 5-hour quota".to_string())?;
+    let (five_hour, five_hour_reset) =
+        five_hour.ok_or_else(|| "BigModel usage response had no 5-hour quota".to_string())?;
     let used_percent = five_hour.percentage();
     let weekly = weekly.map(|(limit, _)| (limit.percentage(), limit.credits()));
     let resets_at = five_hour_reset.and_then(unix_ts_to_rfc3339);
@@ -783,11 +784,8 @@ async fn query_minimax_usage(provider: &Provider) -> Result<LiveUsage, String> {
     }
     // International accounts live on minimax.io; the CN platform answers on
     // minimaxi.com (and minimax.cn). Anything else falls back to the CN host.
-    let haystack = format!(
-        "{} {} {}",
-        provider.id, provider.name, provider.base_url
-    )
-    .to_ascii_lowercase();
+    let haystack =
+        format!("{} {} {}", provider.id, provider.name, provider.base_url).to_ascii_lowercase();
     let url = if haystack.contains("minimax.io") {
         MINIMAX_USAGE_API_INTL
     } else {
@@ -807,7 +805,9 @@ async fn query_minimax_usage(provider: &Provider) -> Result<LiveUsage, String> {
         .await
         .map_err(|error| format!("Failed to read MiniMax usage response: {error}"))?;
     if !status.is_success() {
-        return Err(format!("MiniMax usage query failed (HTTP {status}): {body}"));
+        return Err(format!(
+            "MiniMax usage query failed (HTTP {status}): {body}"
+        ));
     }
     let parsed: MiniMaxRemainsResponse = serde_json::from_str(&body)
         .map_err(|error| format!("MiniMax usage response was not valid JSON: {error}"))?;
@@ -846,7 +846,9 @@ fn live_usage_from_minimax(body: MiniMaxRemainsResponse) -> Result<LiveUsage, St
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .unwrap_or("unknown error");
-            return Err(format!("MiniMax usage query failed (code {code}): {message}"));
+            return Err(format!(
+                "MiniMax usage query failed (code {code}): {message}"
+            ));
         }
     }
     let item = body
@@ -855,10 +857,7 @@ fn live_usage_from_minimax(body: MiniMaxRemainsResponse) -> Result<LiveUsage, St
         .into_iter()
         .find(|item| item.model_name.as_deref() == Some("general"))
         .ok_or_else(|| "MiniMax usage response had no coding plan quota".to_string())?;
-    let five_hour = 100.0
-        - item
-            .current_interval_remaining_percent
-            .unwrap_or(0.0);
+    let five_hour = 100.0 - item.current_interval_remaining_percent.unwrap_or(0.0);
     let resets_at = bigmodel_reset_secs(&item.end_time).and_then(unix_ts_to_rfc3339);
     // Weekly status 1 means the plan has a weekly bucket; other values (such
     // as 3) mark plans without one, where the percent is pinned at 100.
@@ -875,9 +874,7 @@ fn live_usage_from_minimax(body: MiniMaxRemainsResponse) -> Result<LiveUsage, St
     };
     let summary = bigmodel_usage_summary(
         (five_hour, None),
-        resets_at
-            .as_deref()
-            .or(weekly_resets.as_deref()),
+        resets_at.as_deref().or(weekly_resets.as_deref()),
         weekly.map(|percent| (percent, None)),
     );
     Ok(LiveUsage {
@@ -895,11 +892,8 @@ async fn query_kimi_usage(provider: &Provider) -> Result<LiveUsage, String> {
     // Kimi For Coding subscription keys (api.kimi.com/coding) have rolling
     // usage windows; pay-as-you-go platform keys (api.moonshot.cn) only
     // expose the account balance.
-    let haystack = format!(
-        "{} {} {}",
-        provider.id, provider.name, provider.base_url
-    )
-    .to_ascii_lowercase();
+    let haystack =
+        format!("{} {} {}", provider.id, provider.name, provider.base_url).to_ascii_lowercase();
     if haystack.contains("api.kimi.com/coding") {
         query_kimi_coding_usage(api_key).await
     } else {
@@ -944,9 +938,7 @@ async fn query_kimi_platform_balance(api_key: &str) -> Result<LiveUsage, String>
         .await
         .map_err(|error| format!("Failed to read Kimi balance response: {error}"))?;
     if !status.is_success() {
-        return Err(format!(
-            "Kimi balance query failed (HTTP {status}): {body}"
-        ));
+        return Err(format!("Kimi balance query failed (HTTP {status}): {body}"));
     }
     let parsed: KimiBalanceResponse = serde_json::from_str(&body)
         .map_err(|error| format!("Kimi balance response was not valid JSON: {error}"))?;
@@ -1685,7 +1677,8 @@ mod tests {
         .expect("usage");
         assert_eq!(live.used_percent, Some(11.0));
         assert!(
-            live.summary.contains("11% used (5h) · 1,354/12,000 credits"),
+            live.summary
+                .contains("11% used (5h) · 1,354/12,000 credits"),
             "{}",
             live.summary
         );
@@ -1709,8 +1702,18 @@ mod tests {
                     bigmodel_limit("TIME_LIMIT", 7.0, None),
                     // Near week end the weekly window can reset before the
                     // rolling one; unit=3 must still win the 5h slot.
-                    bigmodel_limit_with_unit("TOKENS_LIMIT", 53.0, 6, Some(json!(1_791_000_000_000i64))),
-                    bigmodel_limit_with_unit("TOKENS_LIMIT", 44.0, 3, Some(json!(1_791_500_000_000i64))),
+                    bigmodel_limit_with_unit(
+                        "TOKENS_LIMIT",
+                        53.0,
+                        6,
+                        Some(json!(1_791_000_000_000i64)),
+                    ),
+                    bigmodel_limit_with_unit(
+                        "TOKENS_LIMIT",
+                        44.0,
+                        3,
+                        Some(json!(1_791_500_000_000i64)),
+                    ),
                 ]),
             }),
         })
@@ -1840,8 +1843,8 @@ mod tests {
 
     #[test]
     fn minimax_remaining_percent_becomes_used_summary() {
-        let live = live_usage_from_minimax(minimax_remains(88.0, Some(1), Some(80.0)))
-            .expect("usage");
+        let live =
+            live_usage_from_minimax(minimax_remains(88.0, Some(1), Some(80.0))).expect("usage");
         assert_eq!(live.used_percent, Some(12.0));
         assert!(live.summary.contains("12% used (5h)"), "{}", live.summary);
         assert!(live.summary.contains("20% used (week)"), "{}", live.summary);
@@ -1849,8 +1852,8 @@ mod tests {
 
     #[test]
     fn minimax_inactive_weekly_bucket_is_skipped() {
-        let live = live_usage_from_minimax(minimax_remains(50.0, Some(3), Some(100.0)))
-            .expect("usage");
+        let live =
+            live_usage_from_minimax(minimax_remains(50.0, Some(3), Some(100.0))).expect("usage");
         assert_eq!(live.used_percent, Some(50.0));
         assert!(!live.summary.contains("(week)"), "{}", live.summary);
     }
@@ -1888,8 +1891,8 @@ mod tests {
 
     #[test]
     fn kimi_missing_limits_is_an_error() {
-        let error = live_usage_from_kimi(KimiUsageResponse { limits: None })
-            .expect_err("no limits");
+        let error =
+            live_usage_from_kimi(KimiUsageResponse { limits: None }).expect_err("no limits");
         assert!(error.contains("no quota details"), "{}", error);
     }
 
@@ -1907,10 +1910,7 @@ mod tests {
             }),
         });
         assert_eq!(live.used_percent, Some(60.0));
-        assert_eq!(
-            live.summary,
-            "60% used (premium) · pro · resets 2026-10-01"
-        );
+        assert_eq!(live.summary, "60% used (premium) · pro · resets 2026-10-01");
     }
 
     #[test]
