@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use toml_edit::{value, DocumentMut};
 
 use crate::codex_live::set_secret_file_permissions;
-use crate::providers::{CatalogModel, Provider};
+use crate::providers::{provider_effort_aliases, CatalogModel, Provider};
 
 pub const HELPER_CATALOG_FILENAME: &str = "codex-helper-model-catalog.json";
 
@@ -53,6 +53,7 @@ fn is_helper_catalog_pointer(path: &str) -> bool {
 }
 
 fn build_provider_catalog(provider: &Provider) -> anyhow::Result<Value> {
+    let effort_aliases = provider_effort_aliases(provider);
     let mut models = Vec::new();
     let mut seen = HashSet::new();
     if !provider.catalog_models.is_empty() {
@@ -61,7 +62,13 @@ fn build_provider_catalog(provider: &Provider) -> anyhow::Result<Value> {
             if slug.is_empty() || !seen.insert(slug.to_string()) {
                 continue;
             }
-            models.push(native_catalog_entry(slug, index, Some(spec), false));
+            models.push(native_catalog_entry(
+                slug,
+                index,
+                Some(spec),
+                false,
+                effort_aliases,
+            ));
         }
     } else {
         let chat_safe = provider.wire_api.trim().eq_ignore_ascii_case("chat");
@@ -69,7 +76,13 @@ fn build_provider_catalog(provider: &Provider) -> anyhow::Result<Value> {
             if !seen.insert(slug.clone()) {
                 continue;
             }
-            models.push(native_catalog_entry(&slug, models.len(), None, chat_safe));
+            models.push(native_catalog_entry(
+                &slug,
+                models.len(),
+                None,
+                chat_safe,
+                effort_aliases,
+            ));
         }
     }
     if models.is_empty() {
@@ -112,6 +125,7 @@ fn native_catalog_entry(
     priority: usize,
     spec: Option<&CatalogModel>,
     chat_safe: bool,
+    effort_aliases: &[(&'static str, &'static str)],
 ) -> Value {
     let mut entry: Value = serde_json::from_str(include_str!(
         "../resources/codex_native_responses_template.json"
@@ -135,7 +149,7 @@ fn native_catalog_entry(
             object.insert("max_context_window".to_string(), json!(window));
         }
         if let Some(spec) = spec {
-            apply_reasoning_levels(object, spec);
+            apply_reasoning_levels(object, spec, effort_aliases);
         } else if chat_safe {
             clear_reasoning_levels(object);
         }
@@ -151,15 +165,32 @@ fn clear_reasoning_levels(entry: &mut serde_json::Map<String, Value>) {
     entry.insert("default_reasoning_level".to_string(), json!("none"));
 }
 
-fn apply_reasoning_levels(entry: &mut serde_json::Map<String, Value>, spec: &CatalogModel) {
+fn catalog_effort_level(level: &str, aliases: &[(&'static str, &'static str)]) -> String {
+    aliases
+        .iter()
+        .find(|(_, provider_level)| provider_level.eq_ignore_ascii_case(level))
+        .map(|(codex_level, _)| (*codex_level).to_string())
+        .unwrap_or_else(|| level.to_ascii_lowercase())
+}
+
+fn apply_reasoning_levels(
+    entry: &mut serde_json::Map<String, Value>,
+    spec: &CatalogModel,
+    effort_aliases: &[(&'static str, &'static str)],
+) {
     if spec.reasoning_levels.is_empty() {
         clear_reasoning_levels(entry);
         return;
     }
+    let configured: Vec<String> = spec
+        .reasoning_levels
+        .iter()
+        .map(|level| catalog_effort_level(level, effort_aliases))
+        .collect();
     let supported: Vec<Value> = REASONING_LEVEL_DESCRIPTIONS
         .iter()
         .filter(|(effort, _)| {
-            spec.reasoning_levels
+            configured
                 .iter()
                 .any(|level| level.eq_ignore_ascii_case(effort))
         })
@@ -169,7 +200,7 @@ fn apply_reasoning_levels(entry: &mut serde_json::Map<String, Value>, spec: &Cat
         clear_reasoning_levels(entry);
         return;
     }
-    let default = spec.default_reasoning_level.trim().to_ascii_lowercase();
+    let default = catalog_effort_level(spec.default_reasoning_level.trim(), effort_aliases);
     let default = supported
         .iter()
         .find_map(|entry| {
@@ -310,5 +341,35 @@ mod tests {
         assert_eq!(efforts, vec!["low", "medium", "high", "xhigh"]);
         assert_eq!(entry["default_reasoning_level"], "high");
         assert_eq!(catalog["models"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn bigmodel_catalog_maps_provider_max_to_codex_xhigh() {
+        let provider = Provider {
+            id: "bigmodel".to_string(),
+            name: "Z.AI".to_string(),
+            kind: ProviderKind::ApiKey,
+            model: "GLM-5.3-Flash".to_string(),
+            base_url: "https://open.bigmodel.cn/api/v1".to_string(),
+            wire_api: "responses".to_string(),
+            catalog_models: vec![crate::providers::CatalogModel {
+                display_name: "GLM-5.3-Flash".to_string(),
+                model: "GLM-5.3-Flash".to_string(),
+                context_window: None,
+                reasoning_levels: vec!["low".to_string(), "high".to_string(), "max".to_string()],
+                default_reasoning_level: "max".to_string(),
+            }],
+            ..Provider::default()
+        };
+        let catalog = build_provider_catalog(&provider).expect("catalog");
+        let entry = &catalog["models"][0];
+        let efforts: Vec<&str> = entry["supported_reasoning_levels"]
+            .as_array()
+            .expect("levels")
+            .iter()
+            .filter_map(|item| item.get("effort").and_then(Value::as_str))
+            .collect();
+        assert_eq!(efforts, vec!["low", "high", "xhigh"]);
+        assert_eq!(entry["default_reasoning_level"], "xhigh");
     }
 }

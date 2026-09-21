@@ -28,7 +28,8 @@ use crate::provider_oauth::{
     copilot_request_headers, oauth_bearer_token, oauth_kind_from_provider, OAuthKind,
 };
 use crate::providers::{
-    apply_provider_model_mappings, provider_allowed_models, provider_device_oauth_kind,
+    apply_provider_effort_aliases, apply_provider_model_mappings, provider_allowed_models,
+    provider_device_oauth_kind, provider_effort_aliases,
     provider_needs_deepseek_responses_sanitize, provider_needs_xai_compat, read_store,
     rewrite_unmatched_request_model, Provider, ProviderKind, ProviderStore,
 };
@@ -240,6 +241,7 @@ impl ProviderProxy {
             let mut json_body = serde_json::from_slice::<Value>(&body)
                 .context("Provider request is not valid JSON")?;
             apply_provider_model_mappings(&mut json_body, &provider.model_mappings);
+            apply_provider_effort_aliases(&mut json_body, provider_effort_aliases(&provider));
             rewrite_unmatched_request_model(
                 &mut json_body,
                 &provider.model,
@@ -1527,6 +1529,40 @@ mod tests {
             !body.contains("gpt-5.6-sol"),
             "unknown SKU should not reach upstream, got {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn bigmodel_proxy_rewrites_codex_effort_to_provider_level() {
+        let (mock_port, captured) = serve_mock_http("200 OK", b"{}").await;
+        let mut provider = test_api_provider("bigmodel", "GLM-5.3-Flash", mock_port);
+        provider.wire_api = "responses".to_string();
+        provider.template = "bigmodel".to_string();
+        let proxy = ProviderProxy::new();
+        proxy.set_store(ProviderStore {
+            active_id: "bigmodel".to_string(),
+            providers: vec![provider],
+        });
+        let port = proxy.bind_on(0).await.expect("proxy bind");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client");
+        let response = client
+            .post(format!("http://127.0.0.1:{port}/v1/responses"))
+            .json(&serde_json::json!({
+                "model": "GLM-5.3-Flash",
+                "input": "hi",
+                "reasoning": { "effort": "xhigh" }
+            }))
+            .send()
+            .await
+            .expect("proxy request");
+        assert_eq!(response.status(), 200);
+        let raw = captured.await.expect("capture join");
+        let text = String::from_utf8_lossy(&raw);
+        let body = text.split("\r\n\r\n").nth(1).unwrap_or(text.as_ref());
+        let upstream: serde_json::Value = serde_json::from_str(body).expect("upstream body");
+        assert_eq!(upstream["reasoning"]["effort"], "max");
     }
 
     #[test]

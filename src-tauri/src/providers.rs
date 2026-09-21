@@ -531,6 +531,53 @@ pub fn provider_is_bigmodel(provider: &Provider) -> bool {
     haystack.contains("bigmodel") || haystack.contains("zhipu")
 }
 
+/// Effort-level aliases for provider templates whose documented reasoning
+/// levels differ from Codex's catalog vocabulary. Each pair is
+/// (`codex_catalog_level`, `provider_level`).
+pub fn provider_effort_aliases(provider: &Provider) -> &'static [(&'static str, &'static str)] {
+    if provider.template.eq_ignore_ascii_case("bigmodel") || provider_is_bigmodel(provider) {
+        &[("xhigh", "max")]
+    } else {
+        &[]
+    }
+}
+
+pub fn apply_provider_effort_aliases(
+    body: &mut Value,
+    aliases: &[(&'static str, &'static str)],
+) -> bool {
+    if aliases.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+    if let Some(effort) = body
+        .get_mut("reasoning")
+        .and_then(|reasoning| reasoning.get_mut("effort"))
+    {
+        changed |= rewrite_effort_level(effort, aliases);
+    }
+    if let Some(effort) = body.get_mut("reasoning_effort") {
+        changed |= rewrite_effort_level(effort, aliases);
+    }
+    changed
+}
+
+fn rewrite_effort_level(effort: &mut Value, aliases: &[(&'static str, &'static str)]) -> bool {
+    let value = match effort.as_str() {
+        Some(value) => value,
+        None => return false,
+    };
+    let Some(level) = aliases
+        .iter()
+        .find(|(codex_level, _)| codex_level.eq_ignore_ascii_case(value))
+        .map(|(_, provider_level)| *provider_level)
+    else {
+        return false;
+    };
+    *effort = Value::String(level.to_string());
+    true
+}
+
 pub fn provider_is_minimax(provider: &Provider) -> bool {
     let haystack = format!(
         "{} {} {} {}",
@@ -1032,6 +1079,55 @@ mod tests {
 
         let partial = reorder_providers(dir.path(), &json!({ "ids": ["grok"] })).unwrap_err();
         assert!(partial.to_string().contains("once"));
+    }
+
+    #[test]
+    fn effort_aliases_follow_template_or_provider_host() {
+        let templated = Provider {
+            id: "glm".to_string(),
+            template: "bigmodel".to_string(),
+            base_url: "https://relay.example.com/v1".to_string(),
+            ..Provider::default()
+        };
+        assert_eq!(provider_effort_aliases(&templated), &[("xhigh", "max")]);
+
+        let detected = Provider {
+            id: "glm".to_string(),
+            base_url: "https://open.bigmodel.cn/api/v1".to_string(),
+            ..Provider::default()
+        };
+        assert_eq!(provider_effort_aliases(&detected), &[("xhigh", "max")]);
+
+        let other = Provider {
+            id: "kimi".to_string(),
+            base_url: "https://api.moonshot.cn/v1".to_string(),
+            ..Provider::default()
+        };
+        assert!(provider_effort_aliases(&other).is_empty());
+    }
+
+    #[test]
+    fn apply_provider_effort_aliases_rewrites_codex_levels_to_provider_levels() {
+        let aliases = &[("xhigh", "max")];
+        let mut body = json!({
+            "model": "GLM-5.3-Flash",
+            "reasoning": { "effort": "xhigh" },
+            "reasoning_effort": "xhigh"
+        });
+        assert!(apply_provider_effort_aliases(&mut body, aliases));
+        assert_eq!(body["reasoning"]["effort"], "max");
+        assert_eq!(body["reasoning_effort"], "max");
+
+        let mut provider_native = json!({ "reasoning": { "effort": "max" } });
+        assert!(!apply_provider_effort_aliases(
+            &mut provider_native,
+            aliases
+        ));
+        assert_eq!(provider_native["reasoning"]["effort"], "max");
+
+        let mut unrelated = json!({ "reasoning": { "effort": "xhigh" } });
+        assert!(!apply_provider_effort_aliases(&mut unrelated, &[]));
+        assert_eq!(unrelated["reasoning"]["effort"], "xhigh");
     }
 
     #[test]
