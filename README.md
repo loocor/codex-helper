@@ -12,6 +12,7 @@ It focuses on a small set of local and remote workflow gaps while keeping the Co
 - **Helper Settings**: configure Helper from a standalone window opened from the menu bar, with a UI that stays close to Codex.
 - **Usage-limit overlay hide**: optionally hide the *You're out of Codex and Work usage* card. This is visual only and does not reset or bypass account limits.
 - **Provider management**: switch ChatGPT desktop between Official ChatGPT login, API keys (DeepSeek, Kimi, MiniMax, DashScope, Zhipu GLM, or custom), GitHub Copilot, and xAI Grok. Helper writes `~/.codex/config.toml` and a native-style model catalog. Copilot and Grok OAuth use device-code flows and store tokens in `~/.codex-helper/oauth/`.
+- **SSH sync**: Helper Settings → Sync pushes `providers.json`, OAuth tokens, and the active provider to other Macs over SSH. A replica Helper applies the incoming active provider locally.
 - **Local provider proxy**: non-Official traffic goes through `127.0.0.1:3721` (`/v1/responses` and `/v1/chat/completions`). Helper injects the upstream key, sanitizes ChatGPT-desktop tool payloads, and can expose named local Endpoint keys for other agents.
 
 ## Characteristics
@@ -32,6 +33,7 @@ Codex Helper owns one state directory:
   providers.json
   endpoint.json
   oauth/
+  sync.json
   state.json
 ```
 
