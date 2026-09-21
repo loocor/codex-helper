@@ -1194,6 +1194,7 @@ mod tests {
                 models: Vec::new(),
                 catalog_models: Vec::new(),
                 usage_page_url: String::new(),
+                template: String::new(),
             }],
         });
         let port = proxy.bind_on(0).await.expect("proxy bind");
@@ -1266,6 +1267,7 @@ mod tests {
                 models: Vec::new(),
                 catalog_models: Vec::new(),
                 usage_page_url: String::new(),
+                template: String::new(),
             }],
         });
         let port = proxy.bind_on(0).await.expect("proxy bind");
@@ -1331,6 +1333,7 @@ mod tests {
                 models: Vec::new(),
                 catalog_models: Vec::new(),
                 usage_page_url: String::new(),
+                template: String::new(),
             }],
         });
         let port = proxy.bind_on(0).await.expect("proxy bind");
@@ -1428,6 +1431,7 @@ mod tests {
                 models: vec!["deepseek-chat".to_string()],
                 catalog_models: Vec::new(),
                 usage_page_url: String::new(),
+                template: String::new(),
             }],
         });
         let port = proxy.bind_on(0).await.expect("proxy bind");
@@ -1494,6 +1498,7 @@ mod tests {
                 models: Vec::new(),
                 catalog_models: Vec::new(),
                 usage_page_url: String::new(),
+                template: String::new(),
             }],
         });
         let port = proxy.bind_on(0).await.expect("proxy bind");
@@ -1589,6 +1594,7 @@ mod tests {
             models: Vec::new(),
             catalog_models: Vec::new(),
             usage_page_url: String::new(),
+            template: String::new(),
         }
     }
 

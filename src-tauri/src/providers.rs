@@ -78,6 +78,7 @@ pub struct Provider {
     pub wire_api: String,
     pub api_key: String,
     pub compat: String,
+    pub template: String,
     pub model_mappings: Vec<ModelMapping>,
     pub models: Vec<String>,
     pub catalog_models: Vec<CatalogModel>,
@@ -99,6 +100,7 @@ impl Default for Provider {
             models: Vec::new(),
             catalog_models: Vec::new(),
             usage_page_url: String::new(),
+            template: String::new(),
         }
     }
 }
@@ -131,6 +133,7 @@ impl Default for ProviderStore {
                 models: Vec::new(),
                 catalog_models: Vec::new(),
                 usage_page_url: String::new(),
+                template: String::new(),
             }],
         }
     }
@@ -383,6 +386,13 @@ pub fn upsert_provider(
     } else {
         parse_models(payload, &existing_models)?
     };
+    let template = payload
+        .get("template")
+        .or_else(|| payload.get("preset"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let mut provider = Provider {
         id: id.clone(),
         name: name.to_string(),
@@ -426,6 +436,7 @@ pub fn upsert_provider(
         models,
         catalog_models,
         usage_page_url: parse_usage_page_url(payload)?,
+        template,
     };
     if let Some(kind) = device_oauth {
         provider.compat = kind.compat_name().to_string();
@@ -1023,6 +1034,28 @@ mod tests {
         assert!(partial.to_string().contains("once"));
     }
 
+    #[test]
+    fn upsert_provider_persists_template_from_preset() {
+        let dir = tempdir().unwrap();
+        upsert_provider(
+            dir.path(),
+            &json!({
+                "name": "Z.AI",
+                "preset": "bigmodel",
+                "baseUrl": "https://open.bigmodel.cn/api/v1",
+                "model": "GLM-5.3"
+            }),
+        )
+        .unwrap();
+        let store = read_store(dir.path()).unwrap();
+        let provider = store
+            .providers
+            .iter()
+            .find(|provider| provider.id == "z-ai")
+            .unwrap();
+        assert_eq!(provider.template, "bigmodel");
+    }
+
     fn sample_api_provider(id: &str, name: &str) -> Provider {
         Provider {
             id: id.to_string(),
@@ -1037,6 +1070,7 @@ mod tests {
             models: Vec::new(),
             catalog_models: Vec::new(),
             usage_page_url: String::new(),
+            template: String::new(),
         }
     }
 
@@ -1086,6 +1120,7 @@ mod tests {
                         models: Vec::new(),
                         catalog_models: Vec::new(),
                         usage_page_url: String::new(),
+                        template: String::new(),
                     },
                 ],
             },
@@ -1241,6 +1276,7 @@ mod tests {
                         models: Vec::new(),
                         catalog_models: Vec::new(),
                         usage_page_url: String::new(),
+                        template: String::new(),
                     },
                 ],
             },
@@ -1287,6 +1323,7 @@ mod tests {
                         models: Vec::new(),
                         catalog_models: Vec::new(),
                         usage_page_url: String::new(),
+                        template: String::new(),
                     },
                 ],
             },
@@ -1349,6 +1386,7 @@ mod tests {
                         models: Vec::new(),
                         catalog_models: Vec::new(),
                         usage_page_url: String::new(),
+                        template: String::new(),
                     },
                 ],
             },
@@ -1635,6 +1673,7 @@ mod tests {
                         models: Vec::new(),
                         catalog_models: Vec::new(),
                         usage_page_url: String::new(),
+                        template: String::new(),
                     },
                 ],
             },

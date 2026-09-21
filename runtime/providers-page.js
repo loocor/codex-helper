@@ -673,6 +673,7 @@ function providerDialogPayload() {
     model: dialogFieldValue("model"),
     apiKey: dialogFieldValue("apiKey"),
     preset: dialogFieldValue("preset") || "custom",
+    template: dialogFieldValue("preset") || "custom",
     compat: authMode === "apiKey" ? "" : authMode,
     modelMappings: existingProviderMappings(),
     catalogModels,
@@ -1177,13 +1178,13 @@ function openProviderDialog(mode, provider) {
   const fields = {
     name: draft?.name || provider?.name || "",
     authMode,
-    preset: draft?.preset || detectPreset(provider),
+    preset: draft?.preset || provider?.template || detectPreset(provider),
     baseUrl: isDeviceOauthMode(authMode)
       ? oauthDefaults.baseUrl
       : draft?.baseUrl || provider?.baseUrl || "",
     usagePageUrl: defaultUsagePageUrl({
       authMode,
-      preset: draft?.preset || detectPreset(provider),
+      preset: draft?.preset || provider?.template || detectPreset(provider),
       stored: draft?.usagePageUrl || provider?.usagePageUrl || "",
     }),
     wireApi: isDeviceOauthMode(authMode)
