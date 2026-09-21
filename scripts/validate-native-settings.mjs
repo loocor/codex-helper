@@ -21,6 +21,7 @@ const settingsAppSource = readFileSync(
 const expectedPages = [
   { id: "general", label: "General", icon: "sliders-horizontal" },
   { id: "providers", label: "Providers", icon: "plug" },
+  { id: "sync", label: "Sync", icon: "refresh-cw" },
   { id: "endpoint", label: "Endpoint", icon: "radio" },
   { id: "logs", label: "Logs", icon: "scroll-text" },
   { id: "about", label: "About", icon: "info" },
@@ -42,10 +43,10 @@ if (nativeSettingsSource.includes("function findCodexSettingsSidebar(")) {
 if (nativeSettingsSource.includes("function installNativeHelperSettingsGroup(")) {
   failures.push("Helper settings still inject a Codex Settings group");
 }
-if (labels !== "General|Providers|Endpoint|Logs|About") {
+if (labels !== "General|Providers|Sync|Endpoint|Logs|About") {
   failures.push(`unexpected Helper labels: ${labels}`);
 }
-if (iconNames !== "sliders-horizontal|plug|radio|scroll-text|info") {
+if (iconNames !== "sliders-horizontal|plug|refresh-cw|radio|scroll-text|info") {
   failures.push(`unexpected Helper icon names: ${iconNames}`);
 }
 for (const pageId of pageIds) {

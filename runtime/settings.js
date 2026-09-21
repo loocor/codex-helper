@@ -44,6 +44,9 @@ async function refreshHelperPage() {
   if (helperNativeSettingsActivePage === "endpoint") {
     requests.push(bridge("/endpoint/get"));
   }
+  if (helperNativeSettingsActivePage === "sync") {
+    requests.push(bridge("/sync/get"));
+  }
   const [backend, scripts, settings, providers, extra] = await Promise.all(requests);
   setHelperText(
     "[data-codex-helper-backend]",
@@ -58,6 +61,9 @@ async function refreshHelperPage() {
   }
   if (helperNativeSettingsActivePage === "endpoint") {
     renderEndpoint(extra);
+  }
+  if (helperNativeSettingsActivePage === "sync") {
+    renderSync(extra);
   }
   if (helperNativeSettingsActivePage === "about") {
     await refreshHelperUpdateStatus();
@@ -979,6 +985,10 @@ async function handleHelperCommand(command, source) {
       throw new Error("Provider settings are only available in Helper Settings");
     }
     await handleProviderCommand(command, source);
+    return;
+  }
+  if (command.startsWith("sync-")) {
+    await handleSyncCommand(command, source);
     return;
   }
   if (command.startsWith("endpoint-")) {

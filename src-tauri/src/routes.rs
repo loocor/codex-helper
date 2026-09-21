@@ -27,6 +27,7 @@ use crate::providers::{
 use crate::settings::{read_settings, update_settings};
 use crate::settings_window::{settings_page_id, OpenSettings, SETTINGS_WINDOW_TARGET_ID};
 use crate::state_dir::StateDir;
+use crate::sync;
 use crate::zed::{
     fallback_open_request_response, resolve_ssh_target_for_host_id, resolve_ssh_target_response,
 };
@@ -252,6 +253,77 @@ pub async fn handle_bridge_request(ctx: BridgeContext, request: BridgeRequest) -
             } else {
                 let response = providers_secret_response(&ctx.state_dir.root, &payload);
                 log_provider_event(&ctx.logger, "providers.secret", &response);
+                response
+            }
+        }
+        "/sync/get" => {
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                sync::list_response(&ctx.state_dir.root)
+            }
+        }
+        "/sync/set" => {
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                sync_store_response(
+                    &ctx.state_dir.root,
+                    sync::update_settings(&ctx.state_dir.root, &payload),
+                )
+            }
+        }
+        "/sync/peers/save" => {
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                sync_store_response(
+                    &ctx.state_dir.root,
+                    sync::upsert_peer(&ctx.state_dir.root, &payload),
+                )
+            }
+        }
+        "/sync/peers/delete" => {
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                sync_store_response(
+                    &ctx.state_dir.root,
+                    sync::delete_peer(&ctx.state_dir.root, &payload),
+                )
+            }
+        }
+        "/sync/test" => {
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                let response = match sync::test_peer(&ctx.state_dir.root, &payload) {
+                    Ok(_) => sync::list_response(&ctx.state_dir.root),
+                    Err(error) => {
+                        let mut response = sync::list_response(&ctx.state_dir.root);
+                        response["status"] = json!("failed");
+                        response["message"] = json!(error.to_string());
+                        response
+                    }
+                };
+                log_provider_event(&ctx.logger, "sync.tested", &response);
+                response
+            }
+        }
+        "/sync/now" => {
+            if let Some(response) = settings_only_action(&caller) {
+                response
+            } else {
+                let response = match sync::push_now(&ctx.state_dir.root, &payload) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let mut response = sync::list_response(&ctx.state_dir.root);
+                        response["status"] = json!("failed");
+                        response["message"] = json!(error.to_string());
+                        response
+                    }
+                };
+                log_provider_event(&ctx.logger, "sync.pushed", &response);
                 response
             }
         }
@@ -607,7 +679,7 @@ fn providers_save_response(state_root: &std::path::Path, payload: &Value) -> Val
             }
             let mut response = provider_store_response(store);
             response["savedId"] = json!(saved_id);
-            response
+            attach_auto_sync(state_root, response)
         }
         Err(error) => json!({ "status": "failed", "message": error.to_string() }),
     }
@@ -620,7 +692,7 @@ fn providers_delete_response(state_root: &std::path::Path, payload: &Value) -> V
         .unwrap_or("")
         .trim();
     match delete_provider(state_root, id, &default_codex_home()) {
-        Ok(store) => provider_store_response(store),
+        Ok(store) => attach_auto_sync(state_root, provider_store_response(store)),
         Err(error) => json!({ "status": "failed", "message": error.to_string() }),
     }
 }
@@ -660,7 +732,7 @@ fn project_named_provider(
             if let Some(saved_id) = saved_id {
                 response["savedId"] = json!(saved_id);
             }
-            attach_refresh(response, refresh)
+            attach_auto_sync(state_root, attach_refresh(response, refresh))
         }
         Err(error) => json!({ "status": "failed", "message": error.to_string() }),
     }
@@ -669,6 +741,26 @@ fn project_named_provider(
 fn attach_refresh(mut response: Value, refresh: LiveRefresh) -> Value {
     response["refresh"] = json!(refresh.as_str());
     response
+}
+
+fn attach_auto_sync(state_root: &std::path::Path, mut response: Value) -> Value {
+    if response.get("status").and_then(Value::as_str) != Some("ok") {
+        return response;
+    }
+    if let Some(sync) = sync::auto_push(state_root) {
+        response["sync"] = sync;
+    }
+    response
+}
+
+fn sync_store_response(
+    state_root: &std::path::Path,
+    result: anyhow::Result<sync::SyncStore>,
+) -> Value {
+    match result {
+        Ok(_) => sync::list_response(state_root),
+        Err(error) => json!({ "status": "failed", "message": error.to_string() }),
+    }
 }
 
 fn parse_oauth_kind(payload: &Value) -> Result<OAuthKind, String> {
@@ -725,7 +817,7 @@ async fn providers_oauth_poll_response(state_root: &std::path::Path, payload: &V
         return json!({ "status": "failed", "message": "OAuth device code is required" });
     }
     match poll_oauth(state_root, kind, device_code).await {
-        Ok(value) => value,
+        Ok(value) => attach_auto_sync(state_root, value),
         Err(error) => json!({ "status": "failed", "message": error.to_string() }),
     }
 }

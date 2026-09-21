@@ -37,9 +37,9 @@ test("native settings validator creates the screenshot output directory", () => 
 });
 
 test("native settings validator follows current Helper settings pages", () => {
-	expect(source).toContain('labels !== "General|Providers|Endpoint|Logs|About"');
+	expect(source).toContain('labels !== "General|Providers|Sync|Endpoint|Logs|About"');
 	expect(source).toContain(
-		'iconNames !== "sliders-horizontal|plug|radio|scroll-text|info"',
+		'iconNames !== "sliders-horizontal|plug|refresh-cw|radio|scroll-text|info"',
 	);
 	expect(source).toContain("function startHelperSettingsApp(");
 	expect(source).not.toContain("Deleted Sessions");

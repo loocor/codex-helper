@@ -1,6 +1,8 @@
 // Constants and mutable runtime state
 const helperCommandAttribute = "data-codex-helper-command";
 const helperToggleAttribute = "data-codex-helper-setting-toggle";
+const helperSyncToggleAttribute = "data-codex-helper-sync-toggle";
+const helperSyncFieldAttribute = "data-codex-helper-sync-field";
 const helperNumberAttribute = "data-codex-helper-setting-number";
 const helperToastAttribute = "data-codex-helper-toast";
 const helperSettingsSectionAttribute = "data-codex-helper-settings-section";

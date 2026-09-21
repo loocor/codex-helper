@@ -131,6 +131,25 @@ test("settings updates refresh port forwarding panel visibility", () => {
   expect(source).toContain("if (featureSettings.portForwardingEnabled) schedulePortScan();");
 });
 
+test("settings page exposes SSH provider sync", () => {
+  expect(settingsSource).toContain('id: "sync"');
+  expect(settingsSource).toContain('label: "Sync"');
+  expect(settingsSource).toContain('bridge("/sync/get")');
+  expect(settingsSource).toContain('bridge("/sync/set"');
+  expect(settingsSource).toContain('bridge("/sync/now"');
+  expect(settingsSource).toContain('bridge("/sync/test"');
+  expect(settingsSource).toContain('bridge("/sync/peers/save"');
+  expect(settingsSource).toContain("function nativeSettingsSyncPageContent(");
+  expect(settingsSource).toContain("function openSyncPeerDialog(");
+  expect(settingsSource).toContain("Auto-sync");
+  expect(settingsSource).toContain("Add peer");
+  expect(settingsSource).toContain("Edit peer");
+  expect(settingsSource).toContain("Identity file");
+  expect(settingsSource).toContain('value="password"');
+  expect(settingsSource).toContain("data-codex-helper-sync-peer-dialog");
+  expect(settingsSource).not.toContain("data-codex-helper-sync-peer-form");
+});
+
 test("settings page exposes provider management", () => {
   expect(settingsSource).toContain('id: "providers"');
   expect(settingsSource).toContain('label: "Providers"');

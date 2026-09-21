@@ -86,12 +86,14 @@ function helperSettingsShellCss() {
       min-height: 0;
       overflow: auto;
     }
-    .helper-settings-content:has([data-codex-helper-provider-dialog]) {
+    .helper-settings-content:has([data-codex-helper-provider-dialog]),
+    .helper-settings-content:has([data-codex-helper-sync-peer-dialog]) {
       overflow: hidden;
       display: flex;
       flex-direction: column;
     }
-    .helper-settings-content:has([data-codex-helper-provider-dialog]) > [data-codex-helper-provider-dialog] {
+    .helper-settings-content:has([data-codex-helper-provider-dialog]) > [data-codex-helper-provider-dialog],
+    .helper-settings-content:has([data-codex-helper-sync-peer-dialog]) > [data-codex-helper-sync-peer-dialog] {
       flex: 1 1 auto;
       min-height: 0;
     }
@@ -100,7 +102,8 @@ function helperSettingsShellCss() {
       min-height: 100%;
       padding: 52px 32px 32px;
     }
-    [data-codex-helper-provider-dialog] {
+    [data-codex-helper-provider-dialog],
+    [data-codex-helper-sync-peer-dialog] {
       padding: 0;
     }
     .helper-settings-page-inner,
@@ -358,6 +361,29 @@ function onHelperSettingsChange(event) {
     loadHelperLogs(true).catch(helperLogQueryError);
     return;
   }
+  if (target instanceof HTMLSelectElement && target.hasAttribute(helperSyncFieldAttribute)) {
+    handleSyncField(target).catch((error) => {
+      setHelperText(
+        "[data-codex-helper-sync-status]",
+        error?.message || String(error),
+      );
+    });
+    return;
+  }
+  if (
+    target instanceof HTMLInputElement &&
+    target.hasAttribute(helperSyncToggleAttribute)
+  ) {
+    handleSyncToggle(target).catch((error) => {
+      target.checked = !target.checked;
+      target.disabled = false;
+      setHelperText(
+        "[data-codex-helper-sync-status]",
+        error?.message || String(error),
+      );
+    });
+    return;
+  }
   if (!(target instanceof HTMLInputElement)) return;
   if (target.hasAttribute(helperNumberAttribute)) {
     event.preventDefault();
@@ -406,6 +432,20 @@ function onHelperSettingsKeydown(event) {
   if (helperNativeSettingsRoot?.getAttribute("data-codex-helper-log-view") === "detail") {
     event.preventDefault();
     closeHelperLogDetail();
+    return;
+  }
+  if (syncPeerDialogRoot?.isConnected) {
+    event.preventDefault();
+    handleSyncCommand("sync-peer-cancel").catch((error) => {
+      setHelperText(
+        "[data-codex-helper-sync-status]",
+        error?.message || String(error),
+      );
+      logDiagnostic("settings_command_failed", {
+        command: "sync-peer-cancel",
+        error: error?.message || String(error),
+      });
+    });
     return;
   }
   if (!providerDialogRoot?.isConnected) return;

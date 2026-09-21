@@ -160,6 +160,98 @@ function installHelperStyles() {
       [${helperNativeSettingsPageAttribute}] .codex-helper-text-input {
         width: min(220px, 42vw);
       }
+      [${helperNativeSettingsPageAttribute}="sync"] .codex-helper-sync-peer-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        cursor: pointer;
+      }
+      [${helperNativeSettingsPageAttribute}="sync"] .codex-helper-sync-peer-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-shrink: 0;
+      }
+      [data-codex-helper-sync-peer-dialog] {
+        height: 100%;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      [data-codex-helper-sync-peer-dialog] > .helper-settings-page-inner {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: auto;
+        padding: 52px 32px 24px;
+      }
+      [data-codex-helper-sync-peer-dialog] .codex-helper-provider-dialog-body {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      [data-codex-helper-sync-peer-dialog] .codex-helper-provider-field-row {
+        display: grid;
+        grid-template-columns: 132px minmax(0, 1fr);
+        align-items: center;
+        column-gap: 16px;
+        min-height: 32px;
+      }
+      [data-codex-helper-sync-peer-dialog] .codex-helper-provider-field-row[hidden] {
+        display: none !important;
+      }
+      [data-codex-helper-sync-peer-dialog] .codex-helper-provider-field-label {
+        font-size: 13px;
+        line-height: 32px;
+        color: color-mix(in srgb, CanvasText 78%, transparent);
+        white-space: nowrap;
+      }
+      [data-codex-helper-sync-peer-dialog] .codex-helper-provider-field-row > input,
+      [data-codex-helper-sync-peer-dialog] .codex-helper-provider-field-row > select {
+        min-width: 0;
+        width: 100%;
+      }
+      [data-codex-helper-sync-peer-dialog] input,
+      [data-codex-helper-sync-peer-dialog] select {
+        height: 32px;
+        width: 100%;
+        box-sizing: border-box;
+        border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+        border-radius: 8px;
+        padding: 0 9px;
+        background: color-mix(in srgb, Canvas 96%, currentColor 4%);
+        color: CanvasText;
+        font: inherit;
+        font-size: 13px;
+      }
+      [data-codex-helper-sync-peer-dialog] .codex-helper-provider-dialog-error {
+        min-height: 16px;
+        font-size: 12px;
+        color: rgb(196, 55, 55);
+      }
+      [data-codex-helper-sync-peer-dialog] .codex-helper-provider-dialog-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: 0 0 auto;
+        padding: 10px 32px;
+        border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+        background: Canvas;
+      }
+      [data-codex-helper-sync-peer-dialog] .codex-helper-provider-dialog-spacer {
+        flex: 1 1 auto;
+      }
+      [data-codex-helper-sync-peer-dialog] .codex-helper-provider-dialog-actions button {
+        border: 0;
+        border-radius: 8px;
+        padding: 7px 10px;
+        background: color-mix(in srgb, currentColor 8%, transparent);
+        color: inherit;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 400;
+        cursor: pointer;
+      }
       [${helperNativeSettingsPageAttribute}] .codex-helper-endpoint-models {
         display: flex;
         flex-wrap: wrap;

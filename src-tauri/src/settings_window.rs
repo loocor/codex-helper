@@ -11,6 +11,7 @@ pub type OpenSettings = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 pub fn settings_page_id(page: &str) -> &'static str {
     match page.trim() {
         "providers" => "providers",
+        "sync" => "sync",
         "endpoint" => "endpoint",
         "logs" => "logs",
         "about" => "about",

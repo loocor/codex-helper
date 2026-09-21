@@ -12,11 +12,13 @@ use crate::settings_window::{
     open_settings_callback, request_show_settings_window, SETTINGS_WINDOW_TARGET_ID,
 };
 use crate::state_dir::StateDir;
+use crate::sync::{replica_poll_interval, replica_tick, ReplicaWatch};
 use serde_json::{json, Value};
 use tauri::Manager;
 use tauri_plugin_dialog::{
     DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
 };
+use tokio::time::sleep;
 
 struct HelperState {
     state_dir: StateDir,
@@ -324,6 +326,35 @@ pub fn run() {
             if let Err(error) = tauri::async_runtime::block_on(proxy.bind_and_serve()) {
                 eprintln!("provider proxy failed: {error}");
             }
+            {
+                let root = state_dir.root.clone();
+                let controller = controller.clone();
+                let port_manager = port_manager.clone();
+                let proxy_url = proxy.base_url().unwrap_or_default();
+                tauri::async_runtime::spawn(async move {
+                    let mut watch = ReplicaWatch::default();
+                    loop {
+                        sleep(replica_poll_interval()).await;
+                        match replica_tick(&root, &mut watch, &proxy_url) {
+                            Ok(Some(change)) if change.restart_desktop => {
+                                if controller.has_connected_codex_instance().await {
+                                    if let Err(error) =
+                                        controller.restart_chatgpt(port_manager.clone()).await
+                                    {
+                                        eprintln!(
+                                            "failed to restart ChatGPT after replica sync: {error}"
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                eprintln!("replica sync apply failed: {error}");
+                            }
+                        }
+                    }
+                });
+            }
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = startup_controller
                     .initial_launch(startup_port_manager.clone())
@@ -450,11 +481,20 @@ fn activate_provider_from_tray(
             .unwrap_or("Failed to switch provider");
         anyhow::bail!("{message}");
     }
-    Ok(Some(provider_switch_message(
+    let mut message = provider_switch_message(
         "Activated",
         &name,
         response.get("refresh").and_then(Value::as_str),
-    )))
+    );
+    if let Some(sync) = response.get("sync") {
+        if sync.get("status").and_then(Value::as_str) == Some("ok") {
+            message.push_str(" Synced to peers.");
+        } else if let Some(detail) = sync.get("message").and_then(Value::as_str) {
+            message.push_str(" Peer sync failed: ");
+            message.push_str(detail);
+        }
+    }
+    Ok(Some(message))
 }
 
 fn show_provider_switch_message(app: &tauri::AppHandle, message: &str, failed: bool) {

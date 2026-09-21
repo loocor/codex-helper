@@ -24,6 +24,7 @@ mod runtime;
 mod settings;
 mod settings_window;
 pub mod state_dir;
+mod sync;
 mod updater;
 mod xai_sanitize;
 mod xai_view_image;

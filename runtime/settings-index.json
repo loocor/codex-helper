@@ -4,6 +4,7 @@
   "styles.js",
   "settings.js",
   "providers-page.js",
+  "sync-page.js",
   "endpoint-page.js",
   "native-settings.js",
   "settings-app.js"

@@ -16,6 +16,13 @@ function nativeHelperSettingsPageDefinitions() {
         "Switch ChatGPT desktop between the official login, API keys, GitHub Copilot, and xAI Grok. Helper writes ~/.codex/config.toml and keeps serving without a Helper restart.",
     },
     {
+      id: "sync",
+      label: "Sync",
+      standardIconName: "refresh-cw",
+      description:
+        "Push providers and the active provider to other Macs over SSH. The replica applies incoming files without opening its Settings window.",
+    },
+    {
       id: "endpoint",
       label: "Endpoint",
       standardIconName: "radio",
@@ -136,6 +143,7 @@ function nativeSettingsPageHeader(pageId) {
 function renderNativeHelperSettingsPage(host, pageId) {
   if (!(host instanceof HTMLElement)) return null;
   closeProviderDialog();
+  closeSyncPeerDialog();
   host.replaceChildren();
   const page = document.createElement("section");
   page.setAttribute(helperNativeSettingsPageAttribute, pageId);
@@ -389,6 +397,9 @@ function nativeSettingsPageContent(pageId) {
   }
   if (pageId === "providers") {
     return nativeSettingsProvidersPageContent();
+  }
+  if (pageId === "sync") {
+    return nativeSettingsSyncPageContent();
   }
   return `
     ${nativeSettingsGroupSection("Integrations", `

@@ -1640,8 +1640,15 @@ async function handleProviderCommand(command, source) {
       return;
     }
     renderProviders(result);
+    const syncSuffix = result.sync
+      ? result.sync.status === "ok"
+        ? " Synced to peers."
+        : result.sync.message
+          ? ` Peer sync failed: ${result.sync.message}`
+          : ""
+      : "";
     setProviderStatus(
-      providerLiveRefreshMessage("Activated", providerById(id)?.name || id, result.refresh),
+      `${providerLiveRefreshMessage("Activated", providerById(id)?.name || id, result.refresh)}${syncSuffix}`,
     );
     logProviderEvent("providers.activated", {
       id,
