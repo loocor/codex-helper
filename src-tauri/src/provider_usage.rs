@@ -172,7 +172,8 @@ pub async fn query_provider_usage(state_root: &Path, provider_id: &str) -> Value
             "status": "failed",
             "providerId": id,
             "pageUrl": page_url,
-            "message": error,
+            "message": error.message,
+            "detail": error.detail,
         }),
     }
 }
@@ -184,32 +185,71 @@ struct LiveUsage {
     summary: String,
 }
 
+#[derive(Debug)]
+struct UsageFailure {
+    message: String,
+    detail: String,
+}
+
+impl UsageFailure {
+    fn new(message: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            detail: detail.into(),
+        }
+    }
+}
+
+impl From<String> for UsageFailure {
+    fn from(message: String) -> Self {
+        Self {
+            detail: message.clone(),
+            message,
+        }
+    }
+}
+
 async fn query_live_usage(
     state_root: &Path,
     provider: &Provider,
-) -> Result<Option<LiveUsage>, String> {
+) -> Result<Option<LiveUsage>, UsageFailure> {
     if provider.id == "official" {
-        return query_chatgpt_usage().await;
+        return query_chatgpt_usage().await.map_err(UsageFailure::from);
     }
     if let Some(OAuthKind::Xai) = provider_device_oauth_kind(provider) {
         if oauth_is_signed_in(state_root, OAuthKind::Xai) {
             let token = oauth_bearer_token(state_root, OAuthKind::Xai)
                 .await
-                .map_err(|error| error.to_string())?;
-            return query_xai_usage(&token).await.map(Some);
+                .map_err(|error| UsageFailure::from(error.to_string()))?;
+            return query_xai_usage(&token)
+                .await
+                .map(Some)
+                .map_err(UsageFailure::from);
         }
     }
     if provider_is_deepseek(provider) {
-        return query_deepseek_usage(provider).await.map(Some);
+        return query_deepseek_usage(provider)
+            .await
+            .map(Some)
+            .map_err(UsageFailure::from);
     }
     if provider_is_bigmodel(provider) {
-        return query_bigmodel_usage(provider).await.map(Some);
+        return query_bigmodel_usage(provider)
+            .await
+            .map(Some)
+            .map_err(UsageFailure::from);
     }
     if provider_is_minimax(provider) {
-        return query_minimax_usage(provider).await.map(Some);
+        return query_minimax_usage(provider)
+            .await
+            .map(Some)
+            .map_err(UsageFailure::from);
     }
     if provider_is_kimi(provider) {
-        return query_kimi_usage(provider).await.map(Some);
+        return query_kimi_usage(provider)
+            .await
+            .map(Some)
+            .map_err(UsageFailure::from);
     }
     if provider_is_mimo(provider) {
         return query_mimo_usage(provider).await.map(Some);
@@ -218,8 +258,11 @@ async fn query_live_usage(
         if oauth_is_signed_in(state_root, OAuthKind::GithubCopilot) {
             let token = copilot_github_token(state_root)
                 .await
-                .map_err(|error| error.to_string())?;
-            return query_copilot_usage(&token).await.map(Some);
+                .map_err(|error| UsageFailure::from(error.to_string()))?;
+            return query_copilot_usage(&token)
+                .await
+                .map(Some)
+                .map_err(UsageFailure::from);
         }
     }
     Ok(None)
@@ -1032,13 +1075,13 @@ fn live_usage_from_kimi_balance(body: KimiBalanceResponse) -> Result<LiveUsage, 
 }
 
 // Xiaomi MiMo Platform authenticates console APIs with the browser session
-// cookie instead of the provider API key, so queries reuse the cookie jar of
-// a local Chromium-family browser.
+// cookie instead of the provider API key. Auto reads a local browser profile.
+// Manual uses only the pasted header and does not fall back.
 const MIMO_API_BASE: &str = "https://platform.xiaomimimo.com/api/v1";
 
-async fn query_mimo_usage(_provider: &Provider) -> Result<LiveUsage, String> {
-    let cookie_header = crate::browser_cookie::fetch_mimo_cookie_header()?;
-    let client = http_client().map_err(|error| error.to_string())?;
+async fn query_mimo_usage(provider: &Provider) -> Result<LiveUsage, UsageFailure> {
+    let cookie_header = mimo_cookie_header(provider)?;
+    let client = http_client().map_err(|error| UsageFailure::from(error.to_string()))?;
 
     // A MiMo account may use pay-as-you-go balance, a Token Plan
     // subscription, or both, so each source is queried independently and a
@@ -1048,7 +1091,114 @@ async fn query_mimo_usage(_provider: &Provider) -> Result<LiveUsage, String> {
     let usage = mimo_get::<MimoPlanUsageData>(&client, &cookie_header, "/tokenPlan/usage").await;
     let detail = mimo_get::<MimoPlanDetailData>(&client, &cookie_header, "/tokenPlan/detail").await;
 
-    live_usage_from_mimo(balance, usage, detail)
+    live_usage_from_mimo(balance, usage, detail).map_err(mimo_query_failure)
+}
+
+fn mimo_query_failure(detail: String) -> UsageFailure {
+    let signed_out = detail.to_ascii_lowercase().contains("not signed in");
+    let message = if signed_out {
+        "MiMo console session is not signed in. Open the balance page or paste a fresh Cookie header."
+    } else {
+        "MiMo usage query failed."
+    };
+    UsageFailure::new(message, detail)
+}
+
+fn mimo_cookie_header(provider: &Provider) -> Result<Vec<u8>, UsageFailure> {
+    if provider.usage_cookie_source == "manual" {
+        return manual_mimo_cookie_header(&provider.usage_cookie_header);
+    }
+    auto_mimo_cookie_header()
+}
+
+fn manual_mimo_cookie_header(raw: &str) -> Result<Vec<u8>, UsageFailure> {
+    if raw.trim().is_empty() {
+        return Err(UsageFailure::new(
+            "Paste a MiMo Cookie header, or switch Cookie source to Auto.",
+            "manual cookie header is empty",
+        ));
+    }
+    let cookies = crate::browser_cookie::parse_cookie_header(raw)
+        .map_err(|error| UsageFailure::new(error.clone(), error))?;
+    require_mimo_session(&cookies)?;
+    crate::browser_cookie::cookie_header_bytes(&cookies)
+        .map_err(|error| UsageFailure::new(error.clone(), error))
+}
+
+fn auto_mimo_cookie_header() -> Result<Vec<u8>, UsageFailure> {
+    use crate::browser_cookie::{cookie_header_bytes, read_browser_cookie_batches, CookieQuery};
+    let batches = read_browser_cookie_batches(&CookieQuery {
+        domain_suffix: "xiaomimimo.com",
+        diagnostic_needles: &["xiaomi", "mimo"],
+    });
+    let mut details = Vec::new();
+    let mut saw_decrypt_fail = false;
+    let mut saw_permission = false;
+    let mut saw_readable = false;
+    for batch in &batches {
+        let label = if batch.profile.is_empty() {
+            batch.browser.to_string()
+        } else {
+            format!("{} {}", batch.browser, batch.profile)
+        };
+        if require_mimo_session(&batch.cookies).is_ok() {
+            return cookie_header_bytes(&batch.cookies)
+                .map_err(|error| UsageFailure::new(error.clone(), error));
+        }
+        if batch
+            .undecryptable
+            .iter()
+            .any(|name| name == "api-platform_serviceToken")
+        {
+            saw_decrypt_fail = true;
+        }
+        if batch.note.contains("Keychain rejected") || batch.note.contains("macOS blocked access") {
+            saw_permission = true;
+        }
+        if batch.note.contains("cookies stored") {
+            saw_readable = true;
+        }
+        if !batch.note.is_empty() || !batch.undecryptable.is_empty() {
+            let mut note = batch.note.clone();
+            if note.is_empty() {
+                note = format!(
+                    "missing {}",
+                    missing_mimo_names(&batch.cookies).join(" and ")
+                );
+            }
+            details.push(format!("{label}: {note}"));
+        }
+    }
+    let message = if saw_decrypt_fail {
+        "Found a MiMo session cookie but could not decrypt it. Paste a Cookie header in the provider settings."
+    } else if saw_permission && !saw_readable {
+        "Could not read browser cookies. Grant Keychain or Full Disk Access, or paste a Cookie header in the provider settings."
+    } else {
+        "No MiMo console session found. Open the balance page in Safari, Chrome, Firefox, or Edge, or paste a Cookie header in the provider settings."
+    };
+    Err(UsageFailure::new(message, details.join("; ")))
+}
+
+fn require_mimo_session(
+    cookies: &[crate::browser_cookie::ImportedCookie],
+) -> Result<(), UsageFailure> {
+    let missing = missing_mimo_names(cookies);
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let message = format!("MiMo Cookie header is missing {}.", missing.join(" and "));
+    Err(UsageFailure::new(message.clone(), message))
+}
+
+fn missing_mimo_names(cookies: &[crate::browser_cookie::ImportedCookie]) -> Vec<&'static str> {
+    ["api-platform_serviceToken", "userId"]
+        .into_iter()
+        .filter(|name| {
+            !cookies
+                .iter()
+                .any(|cookie| cookie.name == *name && !cookie.value.is_empty())
+        })
+        .collect()
 }
 
 async fn mimo_get<T: serde::de::DeserializeOwned>(
@@ -1082,7 +1232,7 @@ async fn mimo_get<T: serde::de::DeserializeOwned>(
         .map_err(|error| format!("Failed to read MiMo usage response: {error}"))?;
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
         return Err(format!(
-            "MiMo usage query failed (HTTP {status}): browser cookies are not signed in to platform.xiaomimimo.com; sign in and retry"
+            "MiMo usage query failed (HTTP {status}): the console session is not signed in. Open the balance page or paste a fresh Cookie header"
         ));
     }
     if !status.is_success() {
@@ -1094,7 +1244,7 @@ async fn mimo_get<T: serde::de::DeserializeOwned>(
         Some(0) | Some(200) | None => {}
         Some(401) => {
             return Err(
-                "MiMo usage query failed (code 401): browser cookies are not signed in to platform.xiaomimimo.com; sign in and retry"
+                "MiMo usage query failed (code 401): the console session is not signed in. Open the balance page or paste a fresh Cookie header"
                     .to_string(),
             )
         }
@@ -2214,7 +2364,11 @@ mod tests {
         assert_eq!(live.used_percent, Some(37.5));
         assert!(live.summary.contains("plan Lite"), "{}", live.summary);
         assert!(live.summary.contains("37.5% used"), "{}", live.summary);
-        assert!(live.summary.contains("(3.8M/10.0M tokens)"), "{}", live.summary);
+        assert!(
+            live.summary.contains("(3.8M/10.0M tokens)"),
+            "{}",
+            live.summary
+        );
         assert_eq!(live.resets_at.as_deref(), Some("2026-10-01T00:00:00Z"));
     }
 
@@ -2249,6 +2403,51 @@ mod tests {
     }
 
     #[test]
+    fn manual_mimo_cookie_does_not_fall_back_or_echo_secret() {
+        let secret = "session-token-should-not-leak";
+        let provider = Provider {
+            usage_cookie_source: "manual".to_string(),
+            ..Provider::default()
+        };
+        let empty = mimo_cookie_header(&provider).unwrap_err();
+        assert!(empty.message.contains("Paste a MiMo Cookie header"));
+        assert!(!empty.message.contains("No MiMo console session"));
+
+        let missing =
+            manual_mimo_cookie_header(&format!("userId=42; api-platform_ph={secret}")).unwrap_err();
+        assert!(
+            missing.message.contains("api-platform_serviceToken"),
+            "{}",
+            missing.message
+        );
+        assert!(!missing.message.contains(secret), "{}", missing.message);
+        assert!(!missing.detail.contains(secret), "{}", missing.detail);
+
+        let header = manual_mimo_cookie_header(&format!(
+            "Cookie: api-platform_serviceToken={secret}; userId=42"
+        ))
+        .unwrap();
+        assert!(header
+            .windows(secret.len())
+            .any(|window| window == secret.as_bytes()));
+    }
+
+    #[test]
+    fn mimo_query_failure_keeps_diagnostics_out_of_the_ui_message() {
+        let failure = mimo_query_failure(
+            "MiMo usage query failed. balance: HTTP 500 body; token plan: HTTP 500 body"
+                .to_string(),
+        );
+        assert_eq!(failure.message, "MiMo usage query failed.");
+        assert!(failure.detail.contains("HTTP 500 body"));
+        let signed_out = mimo_query_failure(
+            "MiMo usage query failed (HTTP 401): the console session is not signed in".to_string(),
+        );
+        assert!(signed_out.message.contains("not signed in"));
+        assert!(!signed_out.message.contains("HTTP 401"));
+    }
+
+    #[test]
     fn mimo_compensation_only_usage_has_no_percent() {
         let usage = MimoPlanUsageData {
             usage: Some(MimoPlanUsage {
@@ -2271,7 +2470,11 @@ mod tests {
         )
         .expect("usage");
         assert_eq!(live.used_percent, None);
-        assert!(live.summary.contains("plan usage not available"), "{}", live.summary);
+        assert!(
+            live.summary.contains("plan usage not available"),
+            "{}",
+            live.summary
+        );
     }
 
     #[test]

@@ -85,6 +85,12 @@ pub struct Provider {
     /// When set, catalog display names are prefixed with this provider's name.
     pub prefix_model_names: bool,
     pub usage_page_url: String,
+    /// `auto` reads a local browser session. `manual` uses
+    /// `usage_cookie_header`. Empty means auto so older stores keep working.
+    pub usage_cookie_source: String,
+    /// Pasted Cookie header for a provider console that has no usage API.
+    /// Masked in public responses and never logged.
+    pub usage_cookie_header: String,
 }
 
 impl Default for Provider {
@@ -103,6 +109,8 @@ impl Default for Provider {
             catalog_models: Vec::new(),
             prefix_model_names: false,
             usage_page_url: String::new(),
+            usage_cookie_source: String::new(),
+            usage_cookie_header: String::new(),
             template: String::new(),
         }
     }
@@ -141,6 +149,8 @@ impl Default for ProviderStore {
                 catalog_models: Vec::new(),
                 prefix_model_names: false,
                 usage_page_url: String::new(),
+                usage_cookie_source: String::new(),
+                usage_cookie_header: String::new(),
                 template: String::new(),
             }],
         }
@@ -373,6 +383,9 @@ pub fn public_store(store: &ProviderStore) -> ProviderStore {
         if !provider.api_key.is_empty() {
             provider.api_key = MASKED_API_KEY.to_string();
         }
+        if !provider.usage_cookie_header.is_empty() {
+            provider.usage_cookie_header = MASKED_API_KEY.to_string();
+        }
     }
     public
 }
@@ -512,6 +525,22 @@ pub fn upsert_provider(
     } else {
         incoming_key
     };
+    let usage_cookie_source = parse_usage_cookie_source(payload)?;
+    let incoming_cookie = payload
+        .get("usageCookieHeader")
+        .or_else(|| payload.get("usage_cookie_header"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let existing_cookie = existing
+        .map(|provider| provider.usage_cookie_header.clone())
+        .unwrap_or_default();
+    let usage_cookie_header = if incoming_cookie.is_empty() || incoming_cookie == MASKED_API_KEY {
+        existing_cookie
+    } else {
+        incoming_cookie
+    };
     let model_mappings = parse_model_mappings(payload)?;
     let existing_models = existing
         .map(|provider| provider.models.clone())
@@ -587,6 +616,8 @@ pub fn upsert_provider(
         catalog_models,
         prefix_model_names,
         usage_page_url: parse_usage_page_url(payload)?,
+        usage_cookie_source,
+        usage_cookie_header,
         template,
     };
     if let Some(kind) = device_oauth {
@@ -605,6 +636,9 @@ pub fn upsert_provider(
     if provider_device_oauth_kind(&provider).is_none() && provider.model.trim().is_empty() {
         anyhow::bail!("Provider model is required");
     }
+    if provider_is_mimo(&provider) && provider.usage_cookie_source == "manual" {
+        validate_mimo_cookie_header(&provider.usage_cookie_header)?;
+    }
     if let Some(existing) = store.providers.iter_mut().find(|item| item.id == id) {
         *existing = provider;
     } else {
@@ -612,6 +646,41 @@ pub fn upsert_provider(
     }
     write_store(state_root, &store)?;
     Ok((store, id))
+}
+
+fn parse_usage_cookie_source(payload: &Value) -> anyhow::Result<String> {
+    let raw = payload
+        .get("usageCookieSource")
+        .or_else(|| payload.get("usage_cookie_source"))
+        .and_then(Value::as_str)
+        .unwrap_or("auto")
+        .trim();
+    match raw {
+        "" | "auto" => Ok("auto".to_string()),
+        "manual" => Ok("manual".to_string()),
+        _ => anyhow::bail!("Cookie source must be auto or manual"),
+    }
+}
+
+fn validate_mimo_cookie_header(raw: &str) -> anyhow::Result<()> {
+    if raw.trim().is_empty() {
+        anyhow::bail!("Paste a MiMo Cookie header, or switch Cookie source to Auto.");
+    }
+    let cookies =
+        crate::browser_cookie::parse_cookie_header(raw).map_err(|error| anyhow::anyhow!(error))?;
+    let mut missing = Vec::new();
+    for name in ["api-platform_serviceToken", "userId"] {
+        let present = cookies
+            .iter()
+            .any(|cookie| cookie.name == name && !cookie.value.is_empty());
+        if !present {
+            missing.push(name);
+        }
+    }
+    if !missing.is_empty() {
+        anyhow::bail!("MiMo Cookie header is missing {}.", missing.join(" and "));
+    }
+    Ok(())
 }
 
 fn parse_usage_page_url(payload: &Value) -> anyhow::Result<String> {
@@ -1407,6 +1476,8 @@ mod tests {
             prefix_model_names: false,
             usage_page_url: String::new(),
             template: String::new(),
+            usage_cookie_source: String::new(),
+            usage_cookie_header: String::new(),
         }
     }
 
@@ -1459,6 +1530,8 @@ mod tests {
                         prefix_model_names: false,
                         usage_page_url: String::new(),
                         template: String::new(),
+                        usage_cookie_source: String::new(),
+                        usage_cookie_header: String::new(),
                     },
                 ],
             },
@@ -1617,6 +1690,8 @@ mod tests {
                         prefix_model_names: false,
                         usage_page_url: String::new(),
                         template: String::new(),
+                        usage_cookie_source: String::new(),
+                        usage_cookie_header: String::new(),
                     },
                 ],
             },
@@ -1666,6 +1741,8 @@ mod tests {
                         prefix_model_names: false,
                         usage_page_url: String::new(),
                         template: String::new(),
+                        usage_cookie_source: String::new(),
+                        usage_cookie_header: String::new(),
                     },
                 ],
             },
@@ -1731,6 +1808,8 @@ mod tests {
                         prefix_model_names: false,
                         usage_page_url: String::new(),
                         template: String::new(),
+                        usage_cookie_source: String::new(),
+                        usage_cookie_header: String::new(),
                     },
                 ],
             },
@@ -1915,6 +1994,120 @@ mod tests {
         assert!(error.to_string().contains("http or https"));
     }
 
+    #[test]
+    fn upsert_manual_mimo_cookie_rejects_missing_name_and_masks_saved_header() {
+        let temp = tempdir().expect("temp");
+        let root = temp.path().join(".codex-helper");
+        let secret = "session-token-should-not-leak";
+        let error = upsert_provider(
+            &root,
+            &json!({
+                "name": "MiMo",
+                "baseUrl": "https://api.xiaomimimo.com/v1",
+                "model": "mimo-v2.6-pro",
+                "apiKey": "tp-test",
+                "template": "mimo",
+                "usageCookieSource": "manual",
+                "usageCookieHeader": format!("userId=42; api-platform_ph={secret}")
+            }),
+        )
+        .expect_err("missing service token");
+        let message = error.to_string();
+        assert!(message.contains("api-platform_serviceToken"), "{message}");
+        assert!(!message.contains(secret), "{message}");
+        assert!(read_store(&root)
+            .expect("store")
+            .providers
+            .iter()
+            .all(|provider| !provider.usage_cookie_header.contains(secret)));
+
+        let (store, saved_id) = upsert_provider(
+            &root,
+            &json!({
+                "name": "MiMo",
+                "baseUrl": "https://api.xiaomimimo.com/v1",
+                "model": "mimo-v2.6-pro",
+                "apiKey": "tp-test",
+                "template": "mimo",
+                "usageCookieSource": "manual",
+                "usageCookieHeader": format!("Cookie: api-platform_serviceToken={secret}; userId=42")
+            }),
+        )
+        .expect("save");
+        assert_eq!(saved_id, "mimo");
+        let provider = store
+            .providers
+            .iter()
+            .find(|item| item.id == "mimo")
+            .unwrap();
+        assert_eq!(provider.usage_cookie_source, "manual");
+        assert!(provider.usage_cookie_header.contains(secret));
+        let public = public_store(&store);
+        let masked = public
+            .providers
+            .iter()
+            .find(|item| item.id == "mimo")
+            .unwrap();
+        assert_eq!(masked.usage_cookie_header, MASKED_API_KEY);
+        assert!(!masked.usage_cookie_header.contains(secret));
+
+        let (store, _) = upsert_provider(
+            &root,
+            &json!({
+                "id": "mimo",
+                "name": "MiMo",
+                "baseUrl": "https://api.xiaomimimo.com/v1",
+                "model": "mimo-v2.6-pro",
+                "apiKey": "********",
+                "template": "mimo",
+                "usageCookieSource": "manual",
+                "usageCookieHeader": "********"
+            }),
+        )
+        .expect("masked save");
+        let provider = store
+            .providers
+            .iter()
+            .find(|item| item.id == "mimo")
+            .unwrap();
+        assert!(provider.usage_cookie_header.contains(secret));
+        assert_eq!(provider.api_key, "tp-test");
+
+        let (store, _) = upsert_provider(
+            &root,
+            &json!({
+                "id": "mimo",
+                "name": "MiMo",
+                "baseUrl": "https://api.xiaomimimo.com/v1",
+                "model": "mimo-v2.6-pro",
+                "template": "mimo"
+            }),
+        )
+        .expect("missing source defaults to auto");
+        let provider = store
+            .providers
+            .iter()
+            .find(|item| item.id == "mimo")
+            .unwrap();
+        assert_eq!(provider.usage_cookie_source, "auto");
+        assert!(provider.usage_cookie_header.contains(secret));
+
+        let error = upsert_provider(
+            &root,
+            &json!({
+                "id": "mimo",
+                "name": "MiMo",
+                "baseUrl": "https://api.xiaomimimo.com/v1",
+                "model": "mimo-v2.6-pro",
+                "template": "mimo",
+                "usageCookieSource": "chrome"
+            }),
+        )
+        .expect_err("unknown source");
+        assert!(error.to_string().contains("auto or manual"));
+        assert!(!error.to_string().contains(secret));
+    }
+
     #[cfg(unix)]
     #[test]
     fn write_store_sets_secret_file_permissions() {
@@ -2021,6 +2214,8 @@ mod tests {
                         prefix_model_names: false,
                         usage_page_url: String::new(),
                         template: String::new(),
+                        usage_cookie_source: String::new(),
+                        usage_cookie_header: String::new(),
                     },
                 ],
             },

@@ -206,6 +206,8 @@ test("settings page exposes provider management", () => {
   expect(settingsSource).toContain("Kimi");
   expect(settingsSource).toContain("Usage URL");
   expect(settingsSource).toContain('data-codex-helper-provider-field="usagePageUrl"');
+  expect(settingsSource).toContain('data-codex-helper-provider-field="usageCookieSource"');
+  expect(settingsSource).toContain("api-platform_serviceToken");
   expect(settingsSource).toContain("https://api.deepseek.com");
   expect(settingsSource).toContain("https://platform.deepseek.com/usage");
   expect(settingsSource).toContain("https://api.moonshot.cn/v1");

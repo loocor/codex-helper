@@ -699,6 +699,8 @@ function providerDialogPayload() {
     authMode,
     baseUrl: isDeviceOauthMode(authMode) ? defaults.baseUrl : dialogFieldValue("baseUrl") || defaults.baseUrl,
     usagePageUrl: dialogFieldValue("usagePageUrl"),
+    usageCookieSource: isMimoDialog() ? dialogFieldValue("usageCookieSource") || "auto" : "auto",
+    usageCookieHeader: isMimoDialog() ? dialogFieldValue("usageCookieHeader") : "",
     wireApi: isDeviceOauthMode(authMode)
       ? defaults.wireApi
       : dialogFieldValue("wireApi") || defaults.wireApi || "responses",
@@ -1144,6 +1146,22 @@ function openProviderDialog(mode, provider) {
           </span>`,
         )}
         ${providerFieldRow(
+          "Cookie source",
+          `<select data-codex-helper-provider-field="usageCookieSource">
+            <option value="auto">Auto</option>
+            <option value="manual">Manual</option>
+          </select>`,
+          { attr: "data-codex-helper-provider-cookie-source", hidden: true },
+        )}
+        ${providerFieldRow(
+          "Cookie header",
+          `<span class="codex-helper-provider-secret-row">
+            <input data-codex-helper-provider-field="usageCookieHeader" type="password" placeholder="${MASKED_API_KEY}" autocomplete="off" spellcheck="false">
+          </span>`,
+          { attr: "data-codex-helper-provider-cookie-header", hidden: true },
+        )}
+        <p class="codex-helper-provider-auth-hint" data-codex-helper-provider-cookie-hint hidden>Auto reads Safari, Chrome, Firefox, and Edge. Manual: open the balance page, copy the Cookie header from the /api/v1/balance request. It must include api-platform_serviceToken and userId.</p>
+        ${providerFieldRow(
           "API key",
           `<span class="codex-helper-provider-secret-row">
             <input data-codex-helper-provider-field="apiKey" type="password" placeholder="${MASKED_API_KEY}" autocomplete="off">
@@ -1236,6 +1254,8 @@ function openProviderDialog(mode, provider) {
       : draft?.wireApi || provider?.wireApi || "responses",
     model: draft?.model || provider?.model || "",
     apiKey: draft?.apiKey || provider?.apiKey || "",
+    usageCookieSource: draft?.usageCookieSource || provider?.usageCookieSource || "auto",
+    usageCookieHeader: draft?.usageCookieHeader || provider?.usageCookieHeader || "",
   };
   for (const [name, value] of Object.entries(fields)) {
     const node = dialogField(name);
@@ -1265,6 +1285,9 @@ function openProviderDialog(mode, provider) {
     if (field === "preset") {
       applyPresetFields();
       persistProviderDraft();
+    }
+    if (field === "preset" || field === "baseUrl" || field === "usageCookieSource") {
+      syncMimoCookieFields();
     }
     persistProviderDraft();
   });
@@ -1430,6 +1453,26 @@ function updateProviderAuthHint(options = {}) {
     base.value = defaults.baseUrl;
   }
   syncUsageUrlOpenButton();
+  syncMimoCookieFields();
+}
+
+function isMimoDialog() {
+  const preset = dialogFieldValue("preset");
+  if (preset === "mimo" || preset === "mimo-plan") return true;
+  return dialogFieldValue("baseUrl").toLowerCase().includes("xiaomimimo.com");
+}
+
+function syncMimoCookieFields() {
+  const visible = isMimoDialog();
+  const source = dialogField("usageCookieSource");
+  if (source && source.value !== "manual" && source.value !== "auto") source.value = "auto";
+  const manual = source?.value === "manual";
+  const sourceRow = providerDialogRoot?.querySelector("[data-codex-helper-provider-cookie-source]");
+  const header = providerDialogRoot?.querySelector("[data-codex-helper-provider-cookie-header]");
+  const hint = providerDialogRoot?.querySelector("[data-codex-helper-provider-cookie-hint]");
+  if (sourceRow) sourceRow.hidden = !visible;
+  if (header) header.hidden = !visible || !manual;
+  if (hint) hint.hidden = !visible;
 }
 
 function updateOauthAction(signedIn, login = "") {

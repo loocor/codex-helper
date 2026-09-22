@@ -1450,6 +1450,8 @@ mod tests {
                 prefix_model_names: false,
                 usage_page_url: String::new(),
                 template: String::new(),
+                usage_cookie_source: String::new(),
+                usage_cookie_header: String::new(),
             }],
         });
         let port = proxy.bind_on(0).await.expect("proxy bind");
@@ -1525,6 +1527,8 @@ mod tests {
                 prefix_model_names: false,
                 usage_page_url: String::new(),
                 template: String::new(),
+                usage_cookie_source: String::new(),
+                usage_cookie_header: String::new(),
             }],
         });
         let port = proxy.bind_on(0).await.expect("proxy bind");
@@ -1593,6 +1597,8 @@ mod tests {
                 prefix_model_names: false,
                 usage_page_url: String::new(),
                 template: String::new(),
+                usage_cookie_source: String::new(),
+                usage_cookie_header: String::new(),
             }],
         });
         let port = proxy.bind_on(0).await.expect("proxy bind");
@@ -1693,6 +1699,8 @@ mod tests {
                 prefix_model_names: false,
                 usage_page_url: String::new(),
                 template: String::new(),
+                usage_cookie_source: String::new(),
+                usage_cookie_header: String::new(),
             }],
         });
         let port = proxy.bind_on(0).await.expect("proxy bind");
@@ -1762,6 +1770,8 @@ mod tests {
                 prefix_model_names: false,
                 usage_page_url: String::new(),
                 template: String::new(),
+                usage_cookie_source: String::new(),
+                usage_cookie_header: String::new(),
             }],
         });
         let port = proxy.bind_on(0).await.expect("proxy bind");
@@ -1894,6 +1904,8 @@ mod tests {
             prefix_model_names: false,
             usage_page_url: String::new(),
             template: String::new(),
+            usage_cookie_source: String::new(),
+            usage_cookie_header: String::new(),
         }
     }
 
@@ -2274,6 +2286,8 @@ mod tests {
             prefix_model_names: false,
             usage_page_url: String::new(),
             template: String::new(),
+            usage_cookie_source: String::new(),
+            usage_cookie_header: String::new(),
         }
     }
 

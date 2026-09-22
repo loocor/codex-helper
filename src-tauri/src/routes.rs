@@ -456,10 +456,56 @@ fn bridge_request_diagnostic(path: &str, caller: &BridgeCaller, response: &Value
     diagnostic.insert("caller".to_string(), json!(caller));
     if let Some(message) = response.get("message").and_then(Value::as_str) {
         if !message.is_empty() {
-            diagnostic.insert("message".to_string(), json!(message));
+            diagnostic.insert("message".to_string(), json!(redact_cookie_values(message)));
+        }
+    }
+    if let Some(detail) = response.get("detail").and_then(Value::as_str) {
+        if !detail.is_empty()
+            && detail
+                != response
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+        {
+            diagnostic.insert("detail".to_string(), json!(redact_cookie_values(detail)));
         }
     }
     Value::Object(diagnostic)
+}
+
+fn redact_cookie_values(value: &str) -> String {
+    const NAMES: &[&str] = &[
+        "api-platform_serviceToken",
+        "api-platform_ph",
+        "api-platform_slh",
+        "passToken",
+        "userId",
+    ];
+    let mut output = value.to_string();
+    for name in NAMES {
+        let needle = format!("{name}=");
+        let mut search_from = 0;
+        while let Some(relative) = output[search_from..].find(&needle) {
+            let value_start = search_from + relative + needle.len();
+            let value_end = output[value_start..]
+                .find(|ch: char| ch == ';' || ch.is_whitespace())
+                .map(|index| value_start + index)
+                .unwrap_or(output.len());
+            if value_end == value_start {
+                search_from = value_start;
+                if search_from >= output.len() {
+                    break;
+                }
+                continue;
+            }
+            output.replace_range(value_start..value_end, "********");
+            search_from = value_start + "********".len();
+            if search_from >= output.len() {
+                break;
+            }
+        }
+    }
+    output
 }
 
 fn user_script_inventory(state_dir: &StateDir) -> anyhow::Result<Vec<String>> {
@@ -974,8 +1020,14 @@ fn log_provider_event(logger: &crate::logging::DiagnosticLogger, event: &str, re
     {
         detail.insert("id".to_string(), id.clone());
     }
-    if let Some(message) = response.get("message") {
-        detail.insert("message".to_string(), message.clone());
+    if let Some(message) = response.get("message").and_then(Value::as_str) {
+        detail.insert("message".to_string(), json!(redact_cookie_values(message)));
+    }
+    if let Some(diagnostic) = response.get("detail").and_then(Value::as_str) {
+        detail.insert(
+            "detail".to_string(),
+            json!(redact_cookie_values(diagnostic)),
+        );
     }
     let _ = logger.append(event, Value::Object(detail));
 }
@@ -1386,6 +1438,28 @@ mod tests {
         );
         assert_eq!(failed["status"], "failed");
         assert_eq!(failed["message"], "Provider base URL is required");
+
+        let secret = "session-token-should-not-leak";
+        let usage = bridge_request_diagnostic(
+            "/providers/usage",
+            &caller,
+            &json!({
+                "status": "failed",
+                "message": "MiMo usage query failed.",
+                "detail": format!("Chrome Default: api-platform_serviceToken={secret}; userId=42")
+            }),
+        );
+        let serialized = usage.to_string();
+        assert!(!serialized.contains(secret), "{serialized}");
+        assert_eq!(usage["message"], "MiMo usage query failed.");
+        assert!(usage["detail"]
+            .as_str()
+            .unwrap()
+            .contains("api-platform_serviceToken=********"));
+        assert!(usage["detail"]
+            .as_str()
+            .unwrap()
+            .contains("userId=********"));
     }
 
     #[test]

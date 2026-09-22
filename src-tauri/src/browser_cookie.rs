@@ -1,21 +1,9 @@
-//! Reads cookies from local Chromium-family browsers (Chrome, Edge, Arc) on
-//! macOS so MiMo usage queries can authenticate exactly like the web console.
+//! Reads cookies from local browsers on macOS.
 //!
-//! Flow per browser profile:
-//! 1. Copy the profile's SQLite `Cookies` database (plus WAL/SHM) to a
-//!    temporary directory to avoid lock contention with the running browser.
-//! 2. Read `host_key` / `name` / `encrypted_value` rows for
-//!    `xiaomimimo.com` hosts. `host_key` is required: Chrome cookie DB
-//!    version >= 24 prefixes the plaintext with `SHA256(host_key)`.
-//! 3. Fetch the browser's "Safe Storage" secret from the macOS Keychain and
-//!    derive the AES-128 key (PBKDF2-HMAC-SHA1, salt `saltysalt`, 1003
-//!    iterations; a 32-char hex secret is used directly as the raw key).
-//! 4. Decrypt `v10`/`v11` cookies (AES-128-CBC, IV = 16 spaces, PKCS7),
-//!    drop the host hash only when it matches that row's `host_key`, and
-//!    assemble a `Cookie:` header value.
-//!
-//! Every failure path produces an explicit error; nothing falls back
-//! silently.
+//! The reader returns domain cookies and a per-profile note. It does not
+//! decide which names make a provider session. Callers assemble headers and
+//! choose the user-facing error. Undecryptable Chromium cookies are skipped
+//! so one bad row does not reject the browser.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,149 +12,710 @@ use aes::Aes128;
 use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
 use sha2::{Digest, Sha256};
 
-const MIMO_COOKIE_HOST: &str = "xiaomimimo.com";
-const PLATFORM_SESSION_COOKIE: &str = "api-platform_serviceToken";
-const PLATFORM_CONSOLE_URL: &str = "https://platform.xiaomimimo.com/#/console/balance";
 const KEY_LEN: usize = 16;
 const HOST_HASH_LEN: usize = 32;
 /// Microseconds between 1601-01-01 (Chrome cookie epoch) and Unix epoch.
 const CHROME_EPOCH_UNIX_MICROS: i64 = 11_644_473_600 * 1_000_000;
+/// Seconds between 1970-01-01 and 2001-01-01 (Safari cookie epoch).
+const SAFARI_EPOCH_UNIX_SECONDS: f64 = 978_307_200.0;
 const IV: [u8; 16] = [0x20; 16];
 
 type Aes128CbcDec = cbc::Decryptor<Aes128>;
 
-struct BrowserSpec {
-    /// Human-readable name used in error messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedCookie {
+    pub name: String,
+    pub value: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserCookieBatch {
+    pub browser: &'static str,
+    pub profile: String,
+    pub cookies: Vec<ImportedCookie>,
+    pub note: String,
+    pub undecryptable: Vec<String>,
+}
+
+pub struct CookieQuery<'a> {
+    pub domain_suffix: &'a str,
+    pub diagnostic_needles: &'a [&'a str],
+}
+
+struct ChromiumBrowser {
     name: &'static str,
-    /// Directory under `~/Library/Application Support` that holds the
-    /// Chromium user-data dir (profile directories live directly inside).
     app_support_dir: &'static str,
-    /// macOS Keychain generic-password service for the Safe Storage secret.
-    keychain_service: &'static str,
+    keychain_services: &'static [&'static str],
 }
 
-const BROWSERS: &[BrowserSpec] = &[
-    BrowserSpec {
-        name: "Chrome",
-        app_support_dir: "Google/Chrome",
-        keychain_service: "Chrome Safe Storage",
-    },
-    BrowserSpec {
-        name: "Microsoft Edge",
-        app_support_dir: "Microsoft Edge",
-        keychain_service: "Microsoft Edge Safe Storage",
-    },
-    BrowserSpec {
-        name: "Arc",
-        app_support_dir: "Arc/User Data",
-        keychain_service: "Arc Safe Storage",
-    },
-];
+/// Safari, Chrome, Chrome Beta, Chrome Canary, Firefox, Edge, then Arc.
+/// A missing browser is a note, not a failure of the browsers that follow.
+pub fn read_browser_cookie_batches(query: &CookieQuery<'_>) -> Vec<BrowserCookieBatch> {
+    let Some(home) = dirs::home_dir() else {
+        return vec![BrowserCookieBatch {
+            browser: "browser",
+            profile: String::new(),
+            cookies: Vec::new(),
+            note: "Could not locate the home directory".to_string(),
+            undecryptable: Vec::new(),
+        }];
+    };
+    let support = home.join("Library/Application Support");
+    let mut batches = Vec::new();
+    batches.extend(read_safari(&home, query));
+    batches.extend(read_chromium(
+        &ChromiumBrowser {
+            name: "Chrome",
+            app_support_dir: "Google/Chrome",
+            keychain_services: &["Chrome Safe Storage"],
+        },
+        &support,
+        query,
+    ));
+    batches.extend(read_chromium(
+        &ChromiumBrowser {
+            name: "Chrome Beta",
+            app_support_dir: "Google/Chrome Beta",
+            keychain_services: &["Chrome Safe Storage", "Chrome Beta Safe Storage"],
+        },
+        &support,
+        query,
+    ));
+    batches.extend(read_chromium(
+        &ChromiumBrowser {
+            name: "Chrome Canary",
+            app_support_dir: "Google/Chrome Canary",
+            keychain_services: &["Chrome Safe Storage", "Chrome Canary Safe Storage"],
+        },
+        &support,
+        query,
+    ));
+    batches.extend(read_firefox(&support, query));
+    batches.extend(read_chromium(
+        &ChromiumBrowser {
+            name: "Microsoft Edge",
+            app_support_dir: "Microsoft Edge",
+            keychain_services: &["Microsoft Edge Safe Storage"],
+        },
+        &support,
+        query,
+    ));
+    batches.extend(read_chromium(
+        &ChromiumBrowser {
+            name: "Arc",
+            app_support_dir: "Arc/User Data",
+            keychain_services: &["Arc Safe Storage"],
+        },
+        &support,
+        query,
+    ));
+    batches
+}
 
-/// Returns a `name=value; name2=value2` Cookie header value (raw bytes so
-/// non-ASCII cookie values survive verbatim) containing every decrypted
-/// `xiaomimimo.com` cookie found in Chrome, Edge, or Arc.
-pub fn fetch_mimo_cookie_header() -> Result<Vec<u8>, String> {
-    let user_dirs = user_application_support_dir()?;
-
-    let mut failures: Vec<String> = Vec::new();
-    for browser in BROWSERS {
-        match collect_browser_cookies(browser, &user_dirs) {
-            Ok(header) if !header.is_empty() => return Ok(header),
-            Ok(_) => failures.push(format!(
-                "{}: no {} cookies found",
-                browser.name, MIMO_COOKIE_HOST
-            )),
-            Err(error) => failures.push(format!("{}: {}", browser.name, error)),
+pub fn parse_cookie_header(raw: &str) -> Result<Vec<ImportedCookie>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Cookie header is empty".to_string());
+    }
+    let body = trimmed
+        .strip_prefix("Cookie:")
+        .or_else(|| trimmed.strip_prefix("cookie:"))
+        .unwrap_or(trimmed)
+        .trim();
+    if body.is_empty() {
+        return Err("Cookie header is empty".to_string());
+    }
+    let mut cookies: Vec<ImportedCookie> = Vec::new();
+    for part in body.split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
         }
-    }
-    Err(format_mimo_cookie_failure(&failures.join("; ")))
-}
-
-fn format_mimo_cookie_failure(attempts: &str) -> String {
-    if attempts.contains("Full Disk Access")
-        || attempts.contains("Keychain rejected")
-        || attempts.contains("Keychain item")
-    {
-        return format!("Could not read browser cookies. {attempts}");
-    }
-    if attempts.contains("could not decrypt") {
-        return format!("MiMo console cookie decryption failed. {attempts}");
-    }
-    format!(
-        "Could not read a MiMo console session ({PLATFORM_SESSION_COOKIE}) from Chrome, Edge, or Arc. Open {PLATFORM_CONSOLE_URL} and wait until the balance page loads /api/v1/balance, then retry. Opening https://mimo.org is not enough, and account.xiaomi.com cookies are not used. Attempts: {attempts}"
-    )
-}
-
-fn user_application_support_dir() -> Result<PathBuf, String> {
-    dirs::home_dir()
-        .map(|home| home.join("Library/Application Support"))
-        .filter(|dir| dir.is_dir())
-        .ok_or_else(|| "Could not locate ~/Library/Application Support".to_string())
-}
-
-fn collect_browser_cookies(browser: &BrowserSpec, user_dirs: &Path) -> Result<Vec<u8>, String> {
-    let user_data_dir = user_dirs.join(browser.app_support_dir);
-    if !user_data_dir.is_dir() {
-        return Err(format!(
-            "browser profile directory not found at {}",
-            user_data_dir.display()
-        ));
-    }
-
-    let mut db_paths = find_cookie_databases(&user_data_dir)?;
-    if db_paths.is_empty() {
-        return Err(format!(
-            "no Cookies database found under {} (is the browser installed and signed in?)",
-            user_data_dir.display()
-        ));
-    }
-    db_paths.sort();
-
-    let key = keychain_secret(browser.keychain_service)?;
-
-    let mut failures: Vec<String> = Vec::new();
-    let mut pairs: Vec<(String, Vec<u8>)> = Vec::new();
-    for db_path in db_paths {
-        match collect_profile_cookies(&db_path, &key) {
-            Ok(mut profile_pairs) => pairs.append(&mut profile_pairs),
-            Err(error) => failures.push(format!("{}: {}", db_path.display(), error)),
-        }
-    }
-
-    if pairs.is_empty() {
-        let detail = if failures.is_empty() {
-            "no cookies matched".to_string()
-        } else {
-            failures.join("; ")
+        let Some((name, value)) = part.split_once('=') else {
+            return Err("Cookie header has an entry without a name".to_string());
         };
-        return Err(browser_cookie_failure(browser.name, &detail));
+        let name = name.trim();
+        if name.is_empty() || name.eq_ignore_ascii_case("cookie") {
+            return Err("Cookie header has an entry without a name".to_string());
+        }
+        let value = value.trim().as_bytes();
+        if value.is_empty() || !is_valid_cookie_value(value) {
+            return Err(format!(
+                "cookie \"{name}\" is empty or contains invalid control bytes"
+            ));
+        }
+        if let Some(existing) = cookies.iter_mut().find(|cookie| cookie.name == name) {
+            existing.value = value.to_vec();
+        } else {
+            cookies.push(ImportedCookie {
+                name: name.to_string(),
+                value: value.to_vec(),
+            });
+        }
     }
+    if cookies.is_empty() {
+        return Err("Cookie header is empty".to_string());
+    }
+    Ok(cookies)
+}
 
-    pairs.sort_by(|a, b| a.0.cmp(&b.0));
-    pairs.dedup_by(|a, b| a.0 == b.0);
-    let mut header: Vec<u8> = Vec::new();
-    for (name, value) in pairs {
+pub fn cookie_header_bytes(cookies: &[ImportedCookie]) -> Result<Vec<u8>, String> {
+    if cookies.is_empty() {
+        return Err("Cookie header is empty".to_string());
+    }
+    let mut header = Vec::new();
+    for cookie in cookies {
+        if cookie.name.is_empty()
+            || cookie.value.is_empty()
+            || !is_valid_cookie_value(&cookie.value)
+        {
+            return Err(format!(
+                "cookie \"{}\" is empty or contains invalid control bytes",
+                cookie.name
+            ));
+        }
         if !header.is_empty() {
             header.extend_from_slice(b"; ");
         }
-        header.extend_from_slice(name.as_bytes());
+        header.extend_from_slice(cookie.name.as_bytes());
         header.push(b'=');
-        header.extend_from_slice(&value);
+        header.extend_from_slice(&cookie.value);
     }
     Ok(header)
 }
 
-/// Finds every profile-level Cookies database (modern profiles store it under
-/// `Network/`, older ones directly in the profile directory).
+fn read_safari(home: &Path, query: &CookieQuery<'_>) -> Vec<BrowserCookieBatch> {
+    let mut files = Vec::new();
+    let mut blocked = Vec::new();
+    for relative in [
+        "Library/Cookies/Cookies.binarycookies",
+        "Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies",
+    ] {
+        let path = home.join(relative);
+        match path.metadata() {
+            Ok(metadata) if metadata.is_file() => files.push(path),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                blocked.push(path);
+            }
+            Err(_) => {}
+        }
+    }
+    for root in [
+        home.join("Library/Containers/com.apple.Safari/Data/Library/WebKit/WebsiteDataStore"),
+        home.join("Library/WebKit/WebsiteDataStore"),
+    ] {
+        collect_named_files(
+            &root,
+            "Cookies.binarycookies",
+            5,
+            32,
+            &mut files,
+            &mut blocked,
+        );
+    }
+    if files.is_empty() && blocked.is_empty() {
+        return vec![note_batch("Safari", "", "no cookie file")];
+    }
+    let mut batches = Vec::new();
+    for path in blocked {
+        batches.push(note_batch(
+            "Safari",
+            &profile_label(&path),
+            &format!("macOS blocked access to {}", path.display()),
+        ));
+    }
+    let now = unix_time_seconds();
+    for path in files {
+        let profile = profile_label(&path);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                batches.push(note_batch(
+                    "Safari",
+                    &profile,
+                    &format!("macOS blocked access to {}", path.display()),
+                ));
+                continue;
+            }
+            Err(error) => {
+                batches.push(note_batch(
+                    "Safari",
+                    &profile,
+                    &format!("failed to read cookie file: {error}"),
+                ));
+                continue;
+            }
+        };
+        match parse_safari_cookies(&bytes, query, now) {
+            Ok(read) => batches.push(batch_from_read("Safari", profile, read)),
+            Err(error) => batches.push(note_batch("Safari", &profile, &error)),
+        }
+    }
+    batches
+}
+
+fn read_firefox(support: &Path, query: &CookieQuery<'_>) -> Vec<BrowserCookieBatch> {
+    let root = support.join("Firefox");
+    if !root.exists() {
+        return vec![note_batch("Firefox", "", "not installed")];
+    }
+    let databases = firefox_cookie_databases(&root);
+    if databases.is_empty() {
+        return vec![note_batch("Firefox", "", "no cookie database")];
+    }
+    databases
+        .into_iter()
+        .map(|path| {
+            let profile = path
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("profile")
+                .to_string();
+            match read_firefox_database(&path, query) {
+                Ok(read) => batch_from_read("Firefox", profile, read),
+                Err(error) => note_batch("Firefox", &profile, &error),
+            }
+        })
+        .collect()
+}
+
+fn read_chromium(
+    browser: &ChromiumBrowser,
+    support: &Path,
+    query: &CookieQuery<'_>,
+) -> Vec<BrowserCookieBatch> {
+    let user_data = support.join(browser.app_support_dir);
+    if !user_data.is_dir() {
+        return vec![note_batch(browser.name, "", "not installed")];
+    }
+    let databases = match find_cookie_databases(&user_data) {
+        Ok(databases) if !databases.is_empty() => databases,
+        Ok(_) => return vec![note_batch(browser.name, "", "no cookie database")],
+        Err(error) => return vec![note_batch(browser.name, "", &error)],
+    };
+    let secret = match keychain_secret(browser.keychain_services) {
+        Ok(secret) => secret,
+        Err(error) => return vec![note_batch(browser.name, "", &error)],
+    };
+    let keys = candidate_keys(&secret);
+    databases
+        .into_iter()
+        .map(|path| {
+            let profile = chromium_profile_label(&path);
+            match read_chromium_database(&path, &keys, query) {
+                Ok(read) => batch_from_read(browser.name, profile, read),
+                Err(error) => note_batch(browser.name, &profile, &error),
+            }
+        })
+        .collect()
+}
+
+struct ProfileRead {
+    cookies: Vec<ImportedCookie>,
+    note: String,
+    undecryptable: Vec<String>,
+}
+
+fn batch_from_read(
+    browser: &'static str,
+    profile: String,
+    read: ProfileRead,
+) -> BrowserCookieBatch {
+    BrowserCookieBatch {
+        browser,
+        profile,
+        cookies: read.cookies,
+        note: read.note,
+        undecryptable: read.undecryptable,
+    }
+}
+
+fn note_batch(browser: &'static str, profile: &str, note: &str) -> BrowserCookieBatch {
+    BrowserCookieBatch {
+        browser,
+        profile: profile.to_string(),
+        cookies: Vec::new(),
+        note: note.to_string(),
+        undecryptable: Vec::new(),
+    }
+}
+
+fn read_chromium_database(
+    db_path: &Path,
+    keys: &[[u8; KEY_LEN]],
+    query: &CookieQuery<'_>,
+) -> Result<ProfileRead, String> {
+    let temp = tempfile::Builder::new()
+        .prefix("codex-helper-cookies-")
+        .tempdir()
+        .map_err(|error| format!("failed to create temp dir: {error}"))?;
+    let copy_path = temp.path().join("Cookies");
+    copy_database(db_path, &copy_path)?;
+    let connection = rusqlite::Connection::open_with_flags(
+        &copy_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|error| format!("failed to open cookies db: {error}"))?;
+    let db_version = cookie_db_version(&connection);
+    let mut statement = connection
+        .prepare(
+            "SELECT host_key, name, encrypted_value, expires_utc, is_persistent
+             FROM cookies",
+        )
+        .map_err(|error| format!("failed to query cookies db: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(|error| format!("failed to query cookies db: {error}"))?;
+    let now = unix_time_micros();
+    let mut cookies = Vec::new();
+    let mut undecryptable = Vec::new();
+    let mut matched = false;
+    for row in rows {
+        let (host, name, encrypted, expires_utc, is_persistent) =
+            row.map_err(|error| format!("failed to read cookie row: {error}"))?;
+        if name.is_empty() || !host_matches(&host, query.domain_suffix) {
+            continue;
+        }
+        matched = true;
+        if cookie_is_expired_at(is_persistent, expires_utc, now) {
+            continue;
+        }
+        if encrypted.is_empty() {
+            undecryptable.push(name);
+            continue;
+        }
+        match decrypt_cookie_value(&encrypted, &host, db_version, keys) {
+            Ok(value) => cookies.push(ImportedCookie { name, value }),
+            Err(_) => undecryptable.push(name),
+        }
+    }
+    let note = if matched {
+        if undecryptable.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "skipped undecryptable cookies: {}",
+                undecryptable.join(", ")
+            )
+        }
+    } else {
+        diagnose_cookie_db(&connection, "host_key", query).unwrap_or_else(|error| error)
+    };
+    Ok(ProfileRead {
+        cookies,
+        note,
+        undecryptable,
+    })
+}
+
+fn read_firefox_database(db_path: &Path, query: &CookieQuery<'_>) -> Result<ProfileRead, String> {
+    let temp = tempfile::Builder::new()
+        .prefix("codex-helper-cookies-")
+        .tempdir()
+        .map_err(|error| format!("failed to create temp dir: {error}"))?;
+    let copy_path = temp.path().join("cookies.sqlite");
+    copy_database(db_path, &copy_path)?;
+    let connection = rusqlite::Connection::open_with_flags(
+        &copy_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|error| format!("failed to open cookies db: {error}"))?;
+    let has_origin = sqlite_column_exists(&connection, "moz_cookies", "originAttributes");
+    let sql = if has_origin {
+        "SELECT host, name, value, expiry, originAttributes FROM moz_cookies"
+    } else {
+        "SELECT host, name, value, expiry, '' FROM moz_cookies"
+    };
+    let mut statement = connection
+        .prepare(sql)
+        .map_err(|error| format!("failed to query cookies db: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(|error| format!("failed to query cookies db: {error}"))?;
+    let now = unix_time_seconds();
+    let mut cookies = Vec::new();
+    let mut matched = false;
+    for row in rows {
+        let (host, name, value, expiry, origin) =
+            row.map_err(|error| format!("failed to read cookie row: {error}"))?;
+        if name.is_empty() || !host_matches(&host, query.domain_suffix) {
+            continue;
+        }
+        matched = true;
+        if origin.contains("partitionKey") {
+            continue;
+        }
+        if expiry > 0 && expiry < now {
+            continue;
+        }
+        let value = value.into_bytes();
+        if value.is_empty() || !is_valid_cookie_value(&value) {
+            continue;
+        }
+        cookies.push(ImportedCookie { name, value });
+    }
+    let note = if matched {
+        String::new()
+    } else {
+        diagnose_cookie_db(&connection, "host", query).unwrap_or_else(|error| error)
+    };
+    Ok(ProfileRead {
+        cookies,
+        note,
+        undecryptable: Vec::new(),
+    })
+}
+
+fn parse_safari_cookies(
+    bytes: &[u8],
+    query: &CookieQuery<'_>,
+    now_unix: i64,
+) -> Result<ProfileRead, String> {
+    let records = parse_binary_cookies(bytes)?;
+    let mut cookies = Vec::new();
+    let mut related = Vec::new();
+    let mut total = 0i64;
+    for record in records {
+        total += 1;
+        if host_is_related(&record.host, query.diagnostic_needles)
+            && !related.iter().any(|host: &String| host == &record.host)
+        {
+            related.push(record.host.clone());
+        }
+        if !host_matches(&record.host, query.domain_suffix) {
+            continue;
+        }
+        if safari_cookie_expired(record.expires, now_unix) {
+            continue;
+        }
+        if record.name.is_empty()
+            || record.value.is_empty()
+            || !is_valid_cookie_value(record.value.as_bytes())
+        {
+            continue;
+        }
+        cookies.push(ImportedCookie {
+            name: record.name,
+            value: record.value.into_bytes(),
+        });
+    }
+    let note = if cookies.is_empty() {
+        diagnosis_text(total, &related, query.domain_suffix)
+    } else {
+        String::new()
+    };
+    Ok(ProfileRead {
+        cookies,
+        note,
+        undecryptable: Vec::new(),
+    })
+}
+
+struct SafariCookie {
+    host: String,
+    name: String,
+    value: String,
+    expires: f64,
+}
+
+fn parse_binary_cookies(bytes: &[u8]) -> Result<Vec<SafariCookie>, String> {
+    if bytes.len() < 8 || &bytes[..4] != b"cook" {
+        return Err("Safari cookie file is not a binarycookies file".to_string());
+    }
+    let page_count = read_u32_be(bytes, 4)? as usize;
+    let sizes_end = 8 + page_count
+        .checked_mul(4)
+        .ok_or("Safari cookie file is invalid")?;
+    if page_count > 10_000 || sizes_end > bytes.len() {
+        return Err("Safari cookie file is invalid".to_string());
+    }
+    let mut offset = sizes_end;
+    let mut records = Vec::new();
+    for index in 0..page_count {
+        let size = read_u32_be(bytes, 8 + index * 4)? as usize;
+        if size < 8
+            || offset
+                .checked_add(size)
+                .map(|end| end > bytes.len())
+                .unwrap_or(true)
+        {
+            return Err("Safari cookie file is invalid".to_string());
+        }
+        records.extend(parse_safari_page(&bytes[offset..offset + size])?);
+        offset += size;
+    }
+    Ok(records)
+}
+
+fn parse_safari_page(page: &[u8]) -> Result<Vec<SafariCookie>, String> {
+    if page.len() < 8 {
+        return Err("Safari cookie file is invalid".to_string());
+    }
+    let count = read_u32_le(page, 4)? as usize;
+    if count > 100_000 || 8 + count * 4 > page.len() {
+        return Err("Safari cookie file is invalid".to_string());
+    }
+    let mut records = Vec::new();
+    for index in 0..count {
+        let cookie_offset = read_u32_le(page, 8 + index * 4)? as usize;
+        if let Some(record) = parse_safari_record(page, cookie_offset) {
+            records.push(record);
+        }
+    }
+    Ok(records)
+}
+
+fn parse_safari_record(page: &[u8], offset: usize) -> Option<SafariCookie> {
+    if offset.checked_add(56)? > page.len() {
+        return None;
+    }
+    let size = read_u32_le(page, offset).ok()? as usize;
+    if size < 56 || offset.checked_add(size)? > page.len() {
+        return None;
+    }
+    let limit = offset + size;
+    let host = read_c_string(
+        page,
+        offset,
+        read_u32_le(page, offset + 16).ok()? as usize,
+        limit,
+    )?;
+    let name = read_c_string(
+        page,
+        offset,
+        read_u32_le(page, offset + 20).ok()? as usize,
+        limit,
+    )?;
+    let value = read_c_string(
+        page,
+        offset,
+        read_u32_le(page, offset + 28).ok()? as usize,
+        limit,
+    )?;
+    let expires = read_f64_le(page, offset + 40).ok()?;
+    if host.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some(SafariCookie {
+        host,
+        name,
+        value,
+        expires,
+    })
+}
+
+fn read_c_string(bytes: &[u8], base: usize, relative: usize, limit: usize) -> Option<String> {
+    let start = base.checked_add(relative)?;
+    if start >= limit || limit > bytes.len() {
+        return None;
+    }
+    let end = bytes[start..limit]
+        .iter()
+        .position(|byte| *byte == 0)
+        .map(|index| start + index)
+        .unwrap_or(limit);
+    if end <= start {
+        return None;
+    }
+    String::from_utf8(bytes[start..end].to_vec()).ok()
+}
+
+fn read_u32_be(bytes: &[u8], offset: usize) -> Result<u32, String> {
+    let slice = bytes
+        .get(offset..offset + 4)
+        .ok_or("Safari cookie file is invalid")?;
+    Ok(u32::from_be_bytes(slice.try_into().unwrap()))
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, String> {
+    let slice = bytes
+        .get(offset..offset + 4)
+        .ok_or("Safari cookie file is invalid")?;
+    Ok(u32::from_le_bytes(slice.try_into().unwrap()))
+}
+
+fn read_f64_le(bytes: &[u8], offset: usize) -> Result<f64, String> {
+    let slice = bytes
+        .get(offset..offset + 8)
+        .ok_or("Safari cookie file is invalid")?;
+    Ok(f64::from_le_bytes(slice.try_into().unwrap()))
+}
+
+fn firefox_cookie_databases(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root.join("Profiles")) {
+        for entry in entries.flatten() {
+            let path = entry.path().join("cookies.sqlite");
+            if path.is_file() {
+                found.push(path);
+            }
+        }
+    }
+    if let Ok(text) = std::fs::read_to_string(root.join("profiles.ini")) {
+        let mut relative = true;
+        let mut path: Option<String> = None;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with('[') {
+                if let Some(profile_path) = path.take() {
+                    push_firefox_profile(&mut found, root, &profile_path, relative);
+                }
+                relative = true;
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("IsRelative=") {
+                relative = value.trim() != "0";
+            } else if let Some(value) = line.strip_prefix("Path=") {
+                path = Some(value.trim().to_string());
+            }
+        }
+        if let Some(profile_path) = path {
+            push_firefox_profile(&mut found, root, &profile_path, relative);
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+fn push_firefox_profile(found: &mut Vec<PathBuf>, root: &Path, profile_path: &str, relative: bool) {
+    if profile_path.is_empty() {
+        return;
+    }
+    let profile = if relative {
+        root.join(profile_path)
+    } else {
+        PathBuf::from(profile_path)
+    };
+    let database = profile.join("cookies.sqlite");
+    if database.is_file() {
+        found.push(database);
+    }
+}
+
 fn find_cookie_databases(user_data_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let mut found = Vec::new();
     let entries = std::fs::read_dir(user_data_dir).map_err(|error| {
         if error.kind() == std::io::ErrorKind::PermissionDenied {
-            format!(
-                "macOS blocked access to {} (grant CodexHelper Full Disk Access in System Settings, Privacy & Security, Full Disk Access, then retry)",
-                user_data_dir.display()
-            )
+            format!("macOS blocked access to {}", user_data_dir.display())
         } else {
             format!("failed to list {}: {error}", user_data_dir.display())
         }
@@ -182,28 +731,100 @@ fn find_cookie_databases(user_data_dir: &Path) -> Result<Vec<PathBuf>, String> {
             }
         }
     }
+    found.sort();
     Ok(found)
 }
 
-fn keychain_secret(service: &str) -> Result<Vec<u8>, String> {
+fn collect_named_files(
+    root: &Path,
+    name: &str,
+    depth: usize,
+    limit: usize,
+    found: &mut Vec<PathBuf>,
+    blocked: &mut Vec<PathBuf>,
+) {
+    if depth == 0 || found.len() >= limit || !root.exists() {
+        return;
+    }
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            blocked.push(root.to_path_buf());
+            return;
+        }
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        if found.len() >= limit {
+            return;
+        }
+        let path = entry.path();
+        if path.file_name().and_then(|item| item.to_str()) == Some(name) && path.is_file() {
+            if !found.contains(&path) {
+                found.push(path);
+            }
+            continue;
+        }
+        if path.is_dir() && !path.is_symlink() {
+            collect_named_files(&path, name, depth - 1, limit, found, blocked);
+        }
+    }
+}
+
+fn copy_database(source: &Path, destination: &Path) -> Result<(), String> {
+    std::fs::copy(source, destination).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            format!("macOS blocked access to {}", source.display())
+        } else {
+            format!("failed to copy cookies db: {error}")
+        }
+    })?;
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = PathBuf::from(format!("{}{suffix}", source.display()));
+        if sidecar.is_file() {
+            let _ = std::fs::copy(
+                &sidecar,
+                destination.with_file_name(format!(
+                    "{}{suffix}",
+                    destination
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("Cookies")
+                )),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn keychain_secret(services: &[&str]) -> Result<Vec<u8>, String> {
+    let mut last = String::from("Keychain item not found");
+    for service in services {
+        match keychain_secret_one(service) {
+            Ok(secret) => return Ok(secret),
+            Err(error) if error.contains("not found") => last = error,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last)
+}
+
+fn keychain_secret_one(service: &str) -> Result<Vec<u8>, String> {
     let output = Command::new("/usr/bin/security")
         .args(["find-generic-password", "-s", service, "-w"])
         .output()
-        .map_err(|error| format!("failed to run `security find-generic-password`: {error}"))?;
+        .map_err(|error| format!("failed to run security find-generic-password: {error}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if stderr.contains("could not be found") || stderr.contains("SecKeychainSearch") {
-            return Err(format!(
-                "Keychain item \"{service}\" not found; open {} and sign in once to create it",
-                MIMO_COOKIE_HOST
-            ));
+            return Err(format!("Keychain item \"{service}\" not found"));
         }
         return Err(format!(
-            "Keychain rejected access to \"{service}\" ({}). Approve the macOS Keychain prompt and retry",
+            "Keychain rejected access to \"{service}\"{}",
             if stderr.is_empty() {
-                "access denied"
+                String::new()
             } else {
-                &stderr
+                format!(" ({stderr})")
             }
         ));
     }
@@ -214,15 +835,11 @@ fn keychain_secret(service: &str) -> Result<Vec<u8>, String> {
     Ok(secret.into_bytes())
 }
 
-/// Derives candidate AES-128 keys for a Chromium Safe Storage secret.
 fn candidate_keys(secret: &[u8]) -> Vec<[u8; KEY_LEN]> {
     let mut keys = Vec::new();
-    // PBKDF2-HMAC-SHA1 with the well-known "saltysalt" salt is the standard
-    // Chromium-on-macOS derivation.
     let mut pbkdf2_key = [0u8; KEY_LEN];
     pbkdf2::pbkdf2_hmac::<sha1::Sha1>(secret, b"saltysalt", 1003, &mut pbkdf2_key);
     keys.push(pbkdf2_key);
-    // Newer builds store a 32-hex-char secret whose bytes are the raw key.
     if secret.len() == KEY_LEN * 2 && secret.iter().all(u8::is_ascii_hexdigit) {
         if let Ok(raw) = hex_decode(secret) {
             let mut key = [0u8; KEY_LEN];
@@ -243,117 +860,6 @@ fn hex_decode(input: &[u8]) -> Result<Vec<u8>, String> {
         .collect()
 }
 
-fn collect_profile_cookies(
-    db_path: &Path,
-    keychain_secret: &[u8],
-) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let temp = tempfile::Builder::new()
-        .prefix("codex-helper-cookies-")
-        .tempdir()
-        .map_err(|error| format!("failed to create temp dir: {error}"))?;
-    let copy_path = temp.path().join("Cookies");
-    std::fs::copy(db_path, &copy_path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::PermissionDenied {
-            format!(
-                "macOS blocked access to {} (grant CodexHelper Full Disk Access in System Settings, Privacy & Security, Full Disk Access, then retry)",
-                db_path.display()
-            )
-        } else {
-            format!("failed to copy cookies db: {error}")
-        }
-    })?;
-    // Copy WAL/SHM sidecars so the snapshot includes recent writes.
-    for suffix in ["-wal", "-shm"] {
-        let source = PathBuf::from(format!("{}{suffix}", db_path.display()));
-        if source.is_file() {
-            let _ = std::fs::copy(&source, temp.path().join(format!("Cookies{suffix}")));
-        }
-    }
-
-    let connection = rusqlite::Connection::open_with_flags(
-        &copy_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(|error| format!("failed to open cookies db: {error}"))?;
-
-    let db_version = cookie_db_version(&connection);
-    let mut statement = connection
-        .prepare(
-            "SELECT host_key, name, encrypted_value, expires_utc, is_persistent
-             FROM cookies WHERE host_key LIKE ?1",
-        )
-        .map_err(|error| format!("failed to query cookies db: {error}"))?;
-    let pattern = format!("%{MIMO_COOKIE_HOST}%");
-    let rows = statement
-        .query_map([pattern], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-            ))
-        })
-        .map_err(|error| format!("failed to query cookies db: {error}"))?;
-
-    let keys = candidate_keys(keychain_secret);
-    let now_unix_micros = unix_time_micros();
-    let mut pairs = Vec::new();
-    let mut matched_names = Vec::new();
-    let mut decrypt_errors = Vec::new();
-    let mut saw_expired_session = false;
-    for row in rows {
-        let (host_key, name, encrypted, expires_utc, is_persistent) =
-            row.map_err(|error| format!("failed to read cookie row: {error}"))?;
-        if name.is_empty() {
-            continue;
-        }
-        matched_names.push(name.clone());
-        if cookie_is_expired_at(is_persistent, expires_utc, now_unix_micros) {
-            if name == PLATFORM_SESSION_COOKIE {
-                saw_expired_session = true;
-            }
-            continue;
-        }
-        if encrypted.is_empty() {
-            decrypt_errors.push(format!(
-                "cookie \"{name}\" on {host_key} has an empty encrypted value"
-            ));
-            continue;
-        }
-        match decrypt_cookie_value(&encrypted, &host_key, db_version, &keys) {
-            Ok(value) => pairs.push((name, value)),
-            Err(error) => decrypt_errors.push(format!(
-                "failed to decrypt cookie \"{name}\" on {host_key}: {error}"
-            )),
-        }
-    }
-    if pairs
-        .iter()
-        .any(|(name, _)| name == PLATFORM_SESSION_COOKIE)
-    {
-        // Optional cookies such as api-platform_ph must not hide a decrypted
-        // session token. Their failures are omitted once the session exists.
-        return Ok(pairs);
-    }
-    let session_decrypt_error = decrypt_errors
-        .iter()
-        .find(|error| error.contains(PLATFORM_SESSION_COOKIE));
-    if let Some(error) = session_decrypt_error {
-        return Err(format!(
-            "Found {PLATFORM_SESSION_COOKIE} but could not decrypt it: {error}. Full Disk Access is not the problem"
-        ));
-    }
-    let diagnosis = diagnose_cookie_db(&connection)
-        .unwrap_or_else(|error| format!("diagnosis unavailable: {error}"));
-    Err(missing_platform_session_error(
-        &diagnosis,
-        &matched_names,
-        saw_expired_session,
-        &decrypt_errors,
-    ))
-}
-
 fn cookie_db_version(connection: &rusqlite::Connection) -> Option<i64> {
     connection
         .query_row(
@@ -364,10 +870,81 @@ fn cookie_db_version(connection: &rusqlite::Connection) -> Option<i64> {
         .ok()
 }
 
+fn sqlite_column_exists(connection: &rusqlite::Connection, table: &str, column: &str) -> bool {
+    let sql = format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1");
+    connection.query_row(&sql, [column], |_| Ok(())).is_ok()
+}
+
+fn diagnose_cookie_db(
+    connection: &rusqlite::Connection,
+    host_column: &str,
+    query: &CookieQuery<'_>,
+) -> Result<String, String> {
+    let total: i64 = connection
+        .query_row("SELECT COUNT(*) FROM cookies", [], |row| row.get(0))
+        .or_else(|_| connection.query_row("SELECT COUNT(*) FROM moz_cookies", [], |row| row.get(0)))
+        .map_err(|error| format!("failed to count cookies: {error}"))?;
+    let sql = format!(
+        "SELECT DISTINCT {host_column} FROM {} ORDER BY {host_column}",
+        if host_column == "host" {
+            "moz_cookies"
+        } else {
+            "cookies"
+        }
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| format!("failed to list related hosts: {error}"))?;
+    let hosts = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("failed to list related hosts: {error}"))?
+        .filter_map(Result::ok)
+        .filter(|host| host_is_related(host, query.diagnostic_needles))
+        .collect::<Vec<_>>();
+    Ok(diagnosis_text(total, &hosts, query.domain_suffix))
+}
+
+fn diagnosis_text(total: i64, hosts: &[String], suffix: &str) -> String {
+    if hosts.is_empty() {
+        format!("{total} cookies stored, none for {suffix}")
+    } else {
+        format!(
+            "{total} cookies stored, related hosts: {}",
+            hosts
+                .iter()
+                .take(12)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+fn host_matches(host: &str, suffix: &str) -> bool {
+    let host = host.trim_start_matches('.').to_ascii_lowercase();
+    let suffix = suffix.trim_start_matches('.').to_ascii_lowercase();
+    !suffix.is_empty() && (host == suffix || host.ends_with(&format!(".{suffix}")))
+}
+
+fn host_is_related(host: &str, needles: &[&str]) -> bool {
+    let host = host.to_ascii_lowercase();
+    needles.iter().any(|needle| {
+        let needle = needle.trim().to_ascii_lowercase();
+        !needle.is_empty() && host.contains(&needle)
+    })
+}
+
 fn unix_time_micros() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_micros()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+fn unix_time_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }
 
@@ -378,78 +955,35 @@ fn cookie_is_expired_at(is_persistent: i64, expires_utc: i64, now_unix_micros: i
     expires_utc < now_unix_micros.saturating_add(CHROME_EPOCH_UNIX_MICROS)
 }
 
-fn browser_cookie_failure(browser_name: &str, detail: &str) -> String {
-    if detail.contains(PLATFORM_SESSION_COOKIE) {
-        return detail.to_string();
-    }
-    format!(
-        "failed to read cookies ({detail}); sign in to {PLATFORM_CONSOLE_URL} in {browser_name} and approve Keychain access, then retry"
-    )
+fn safari_cookie_expired(expires: f64, now_unix: i64) -> bool {
+    expires > 0.0 && expires + SAFARI_EPOCH_UNIX_SECONDS < now_unix as f64
 }
 
-fn missing_platform_session_error(
-    diagnosis: &str,
-    matched_names: &[String],
-    expired_session: bool,
-    decrypt_errors: &[String],
-) -> String {
-    let matched = if matched_names.is_empty() {
-        format!("no {MIMO_COOKIE_HOST} rows")
-    } else {
-        format!(
-            "{MIMO_COOKIE_HOST} cookies present: {}",
-            matched_names.join(", ")
-        )
-    };
-    let mut message = if expired_session {
-        format!(
-            "{PLATFORM_SESSION_COOKIE} is in the browser cookie database but has expired. Open {PLATFORM_CONSOLE_URL} and wait until the balance page loads /api/v1/balance, then retry. It lasts about 24 hours. {matched}. {diagnosis}. Full Disk Access is not the problem"
-        )
-    } else {
-        format!(
-            "No MiMo console session ({PLATFORM_SESSION_COOKIE} on .platform.xiaomimimo.com). {matched}. {diagnosis}. Open {PLATFORM_CONSOLE_URL} and wait until the balance page loads /api/v1/balance, then retry. That cookie lasts about 24 hours and is missing after expiry or a browser restart. Opening https://mimo.org does not create it, and account.xiaomi.com cookies cannot be exchanged for it. Full Disk Access is not the problem"
-        )
-    };
-    if !decrypt_errors.is_empty() {
-        message.push_str(&format!(". Decrypt errors: {}", decrypt_errors.join("; ")));
+fn chromium_profile_label(path: &Path) -> String {
+    let mut cursor = path.parent();
+    if path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        == Some("Network")
+    {
+        cursor = path.parent().and_then(|parent| parent.parent());
     }
-    message
+    cursor
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("profile")
+        .to_string()
 }
 
-/// Summarizes the cookie database when no rows matched so the error message
-/// distinguishes an empty or stale database from cookies stored under a
-/// related Xiaomi SSO host. Only xiaomi/mimo host names are surfaced.
-fn diagnose_cookie_db(connection: &rusqlite::Connection) -> Result<String, String> {
-    let total: i64 = connection
-        .query_row("SELECT COUNT(*) FROM cookies", [], |row| row.get(0))
-        .map_err(|error| format!("failed to count cookies: {error}"))?;
-    let mut statement = connection
-        .prepare(
-            "SELECT DISTINCT host_key FROM cookies
-             WHERE host_key LIKE '%mimo%' OR host_key LIKE '%xiaomi%'
-             ORDER BY host_key",
-        )
-        .map_err(|error| format!("failed to list related hosts: {error}"))?;
-    let hosts = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|error| format!("failed to list related hosts: {error}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("failed to list related hosts: {error}"))?;
-    if hosts.is_empty() {
-        Ok(format!(
-            "{total} cookies stored, none for xiaomi/mimo hosts"
-        ))
-    } else {
-        Ok(format!(
-            "{total} cookies stored, related hosts: {}",
-            hosts.join(", ")
-        ))
-    }
+fn profile_label(path: &Path) -> String {
+    path.parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("profile")
+        .to_string()
 }
 
-/// Per the http crate, header values may be tab plus any byte in
-/// 0x20..=0x7e and the opaque range 0x80..=0xff; anything else (control
-/// bytes, DEL) means the decryption produced garbage.
 fn is_valid_cookie_value(value: &[u8]) -> bool {
     value
         .iter()
@@ -468,7 +1002,7 @@ fn decrypt_cookie_value(
     };
     if version != b"v10" && version != b"v11" {
         return Err(format!(
-            "unsupported cookie encryption version {} (re-sign in to the browser to refresh cookies)",
+            "unsupported cookie encryption version {}",
             String::from_utf8_lossy(&version)
         ));
     }
@@ -486,10 +1020,6 @@ fn decrypt_cookie_value(
     Err(last_error)
 }
 
-/// Chrome cookie DB version >= 24 prefixes plaintext with SHA256(host_key)
-/// before encryption. Remove that prefix only when it matches this row.
-/// A mismatch is rejected on version >= 24 and left unstripped otherwise,
-/// so an older database is not sliced unconditionally.
 fn cookie_plaintext(
     plain: &[u8],
     host_key: &str,
@@ -511,11 +1041,6 @@ fn cookie_plaintext(
     if db_version.is_some_and(|version| version >= 24) {
         return Err("decrypted cookie did not start with SHA256(host_key)".to_string());
     }
-    // A wrong key can still pass the PKCS7 check by chance and produce
-    // garbage bytes; such values would corrupt the Cookie header, so treat
-    // them as decryption failures. Values with high bytes (>= 0x80) are
-    // legitimate: some servers set UTF-8 cookie values, and Chromium sends
-    // them verbatim as opaque header bytes.
     if plain.is_empty() || !is_valid_cookie_value(plain) {
         return Err("decrypted value was empty or contained invalid control bytes".to_string());
     }
@@ -531,7 +1056,6 @@ mod tests {
         let secret = b"peanuts";
         let keys = candidate_keys(secret);
         assert!(!keys.is_empty());
-
         let hex_secret = b"0123456789abcdef0123456789abcdef";
         let keys = candidate_keys(hex_secret);
         assert_eq!(keys.len(), 2);
@@ -558,16 +1082,14 @@ mod tests {
     fn strips_verified_host_hash_prefix() {
         let keys = candidate_keys(b"peanuts");
         let host = ".platform.xiaomimimo.com";
-        let value = b"api-platform-session";
+        let value = b"session-token";
         let encrypted = encrypt_cookie(&keys[0], &with_host_hash(host, value));
         let decrypted = decrypt_cookie_value(&encrypted, host, Some(24), &keys).unwrap();
         assert_eq!(decrypted, value);
-        let without_version = decrypt_cookie_value(&encrypted, host, None, &keys).unwrap();
-        assert_eq!(without_version, value);
     }
 
     #[test]
-    fn keeps_legacy_cookie_without_host_hash() {
+    fn keeps_legacy_plaintext_without_hash() {
         let keys = candidate_keys(b"peanuts");
         let host = ".platform.xiaomimimo.com";
         let value = b"legacy-cookie-value-longer-than-thirty-two-bytes";
@@ -609,30 +1131,108 @@ mod tests {
     }
 
     #[test]
-    fn missing_session_message_does_not_blame_keychain() {
-        let message = missing_platform_session_error(
-            "1815 cookies stored, related hosts: .account.xiaomi.com, .mimo.org",
-            &[],
-            false,
-            &[],
-        );
-        assert!(message.contains(PLATFORM_SESSION_COOKIE), "{message}");
-        assert!(message.contains(PLATFORM_CONSOLE_URL), "{message}");
-        assert!(message.contains("mimo.org"), "{message}");
+    fn modern_profile_skips_bad_cookie_and_keeps_valid_session() {
+        let keys = candidate_keys(b"peanuts");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Cookies");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+                 INSERT INTO meta (key, value) VALUES ('version', '24');
+                 CREATE TABLE cookies (
+                   host_key TEXT, name TEXT, encrypted_value BLOB,
+                   expires_utc INTEGER, is_persistent INTEGER
+                 );",
+            )
+            .unwrap();
+        let host = ".platform.xiaomimimo.com";
+        let good = encrypt_cookie(&keys[0], &with_host_hash(host, b"session-token"));
+        let bad = encrypt_cookie(&keys[0], &with_host_hash("wrong.example", b"secret-value"));
+        connection
+            .execute(
+                "INSERT INTO cookies VALUES (?1, 'api-platform_serviceToken', ?2, 0, 0)",
+                rusqlite::params![host, good],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO cookies VALUES (?1, 'api-platform_ph', ?2, 0, 0)",
+                rusqlite::params![host, bad],
+            )
+            .unwrap();
+        drop(connection);
+        let read = read_chromium_database(
+            &path,
+            &keys,
+            &CookieQuery {
+                domain_suffix: "xiaomimimo.com",
+                diagnostic_needles: &["xiaomi", "mimo"],
+            },
+        )
+        .unwrap();
+        assert_eq!(read.cookies.len(), 1);
+        assert_eq!(read.cookies[0].name, "api-platform_serviceToken");
+        assert_eq!(read.cookies[0].value, b"session-token");
+        assert_eq!(read.undecryptable, vec!["api-platform_ph".to_string()]);
+        assert!(!read.note.contains("secret-value"), "{}", read.note);
+    }
+
+    #[test]
+    fn manual_header_parser_requires_named_values_and_hides_them() {
+        let cookies = parse_cookie_header(
+            "Cookie: api-platform_serviceToken=session-token; userId=42; api-platform_ph=optional",
+        )
+        .unwrap();
+        assert_eq!(cookies.len(), 3);
+        let header = cookie_header_bytes(&cookies).unwrap();
+        assert!(header
+            .windows(b"session-token".len())
+            .any(|window| window == b"session-token"));
+        let error = parse_cookie_header("Cookie: api-platform_serviceToken=").unwrap_err();
+        assert!(error.contains("api-platform_serviceToken"), "{error}");
+        assert!(!error.contains("session"), "{error}");
+    }
+
+    #[test]
+    fn safari_parser_reads_domain_cookie_and_skips_unrelated_values() {
+        let bytes = sample_binary_cookies(".platform.xiaomimimo.com", "userId", "42");
+        let read = parse_safari_cookies(
+            &bytes,
+            &CookieQuery {
+                domain_suffix: "xiaomimimo.com",
+                diagnostic_needles: &["xiaomi"],
+            },
+            1_700_000_000,
+        )
+        .unwrap();
+        assert_eq!(read.cookies.len(), 1);
+        assert_eq!(read.cookies[0].value, b"42");
+        let missed = parse_safari_cookies(
+            &bytes,
+            &CookieQuery {
+                domain_suffix: "example.com",
+                diagnostic_needles: &["xiaomi"],
+            },
+            1_700_000_000,
+        )
+        .unwrap();
+        assert!(missed.cookies.is_empty());
         assert!(
-            message.contains("Full Disk Access is not the problem"),
-            "{message}"
+            missed.note.contains(".platform.xiaomimimo.com"),
+            "{}",
+            missed.note
         );
-        assert!(!message.contains("Keychain"), "{message}");
-        let wrapped = browser_cookie_failure("Chrome", &message);
-        assert_eq!(wrapped, message);
-        let decrypt = format_mimo_cookie_failure(
-            "Chrome: Found api-platform_serviceToken but could not decrypt it",
-        );
-        assert!(
-            decrypt.starts_with("MiMo console cookie decryption failed"),
-            "{decrypt}"
-        );
+        assert!(!missed.note.contains("=42"), "{}", missed.note);
+    }
+
+    #[test]
+    fn host_match_rejects_lookalike_suffix() {
+        assert!(host_matches(".platform.xiaomimimo.com", "xiaomimimo.com"));
+        assert!(!host_matches(
+            "notxiaomimimo.com.evil.com",
+            "xiaomimimo.com"
+        ));
     }
 
     #[test]
@@ -661,45 +1261,33 @@ mod tests {
         plain
     }
 
-    #[test]
-    fn diagnosis_reports_related_hosts() {
-        let connection = rusqlite::Connection::open_in_memory().unwrap();
-        connection
-            .execute(
-                "CREATE TABLE cookies (host_key TEXT NOT NULL, name TEXT NOT NULL)",
-                [],
-            )
-            .unwrap();
-        for host in ["example.com", ".xiaomimimo.com", "platform.xiaomimimo.com"] {
-            connection
-                .execute(
-                    "INSERT INTO cookies (host_key, name) VALUES (?1, 'session')",
-                    [host],
-                )
-                .unwrap();
-        }
-        let diagnosis = diagnose_cookie_db(&connection).unwrap();
-        assert!(diagnosis.contains("3 cookies stored"), "{diagnosis}");
-        assert!(diagnosis.contains(".xiaomimimo.com"), "{diagnosis}");
-        assert!(!diagnosis.contains("example.com"), "{diagnosis}");
-    }
-
-    #[test]
-    fn diagnosis_reports_unrelated_database() {
-        let connection = rusqlite::Connection::open_in_memory().unwrap();
-        connection
-            .execute(
-                "CREATE TABLE cookies (host_key TEXT NOT NULL, name TEXT NOT NULL)",
-                [],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO cookies (host_key, name) VALUES ('example.com', 'a')",
-                [],
-            )
-            .unwrap();
-        let diagnosis = diagnose_cookie_db(&connection).unwrap();
-        assert_eq!(diagnosis, "1 cookies stored, none for xiaomi/mimo hosts");
+    fn sample_binary_cookies(host: &str, name: &str, value: &str) -> Vec<u8> {
+        let record = vec![0u8; 56];
+        let host_at = 56;
+        let name_at = host_at + host.len() + 1;
+        let value_at = name_at + name.len() + 1;
+        let mut body = record;
+        body.extend(host.as_bytes());
+        body.push(0);
+        body.extend(name.as_bytes());
+        body.push(0);
+        body.extend(value.as_bytes());
+        body.push(0);
+        let size = body.len() as u32;
+        body[..4].copy_from_slice(&size.to_le_bytes());
+        body[16..20].copy_from_slice(&(host_at as u32).to_le_bytes());
+        body[20..24].copy_from_slice(&(name_at as u32).to_le_bytes());
+        body[24..28].copy_from_slice(&56u32.to_le_bytes());
+        body[28..32].copy_from_slice(&(value_at as u32).to_le_bytes());
+        let mut page = Vec::new();
+        page.extend_from_slice(&0x00000100u32.to_le_bytes());
+        page.extend_from_slice(&1u32.to_le_bytes());
+        page.extend_from_slice(&12u32.to_le_bytes());
+        page.extend(&body);
+        let mut file = b"cook".to_vec();
+        file.extend_from_slice(&1u32.to_be_bytes());
+        file.extend_from_slice(&(page.len() as u32).to_be_bytes());
+        file.extend(page);
+        file
     }
 }
