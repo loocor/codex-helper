@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use toml_edit::{value, DocumentMut};
 
 use crate::codex_live::set_secret_file_permissions;
-use crate::providers::{provider_effort_aliases, CatalogModel, Provider};
+use crate::providers::{provider_effort_aliases, provider_is_mimo, CatalogModel, Provider};
 
 pub const HELPER_CATALOG_FILENAME: &str = "codex-helper-model-catalog.json";
 
@@ -62,12 +62,11 @@ fn build_provider_catalog(provider: &Provider) -> anyhow::Result<Value> {
             if slug.is_empty() || !seen.insert(slug.to_string()) {
                 continue;
             }
-            models.push(native_catalog_entry(
+            models.push(finish_catalog_entry(
+                provider,
+                native_catalog_entry(slug, index, Some(spec), false, effort_aliases),
                 slug,
-                index,
                 Some(spec),
-                false,
-                effort_aliases,
             ));
         }
     } else {
@@ -76,12 +75,11 @@ fn build_provider_catalog(provider: &Provider) -> anyhow::Result<Value> {
             if !seen.insert(slug.clone()) {
                 continue;
             }
-            models.push(native_catalog_entry(
+            models.push(finish_catalog_entry(
+                provider,
+                native_catalog_entry(&slug, models.len(), None, chat_safe, effort_aliases),
                 &slug,
-                models.len(),
                 None,
-                chat_safe,
-                effort_aliases,
             ));
         }
     }
@@ -89,6 +87,80 @@ fn build_provider_catalog(provider: &Provider) -> anyhow::Result<Value> {
         anyhow::bail!("Provider model is required to build a Codex catalog");
     }
     Ok(json!({ "models": models }))
+}
+
+fn finish_catalog_entry(
+    provider: &Provider,
+    mut entry: Value,
+    slug: &str,
+    spec: Option<&CatalogModel>,
+) -> Value {
+    if !provider_is_mimo(provider) {
+        return entry;
+    }
+    if let Some(object) = entry.as_object_mut() {
+        apply_mimo_catalog_metadata(object, slug, spec);
+    }
+    entry
+}
+
+/// Wire metadata from Xiaomi's Codex catalog. v2.6 custom tools are rejected
+/// unless Codex sends Responses Lite with a freeform apply_patch tool.
+/// `tool_mode` and `multi_agent_version` stay unset: official v2.6 entries set
+/// `code_mode_only`, which fails closed without the code-mode host.
+fn apply_mimo_catalog_metadata(
+    entry: &mut serde_json::Map<String, Value>,
+    slug: &str,
+    spec: Option<&CatalogModel>,
+) {
+    let slug_key = slug.trim().to_ascii_lowercase();
+    let v25 = slug_key.contains("v2.5");
+    if v25 {
+        entry.insert("use_responses_lite".to_string(), json!(false));
+    } else {
+        entry.insert("use_responses_lite".to_string(), json!(true));
+        entry.insert("apply_patch_tool_type".to_string(), json!("freeform"));
+    }
+    entry.insert("shell_type".to_string(), json!("unified_exec"));
+    entry.insert("supports_reasoning_summaries".to_string(), json!(true));
+    entry.insert("default_reasoning_summary".to_string(), json!("none"));
+    entry.insert("supports_parallel_tool_calls".to_string(), json!(false));
+    entry.insert("supports_image_detail_original".to_string(), json!(true));
+    entry.insert("supports_experimental_context".to_string(), json!(true));
+    entry.insert("supports_search_tool".to_string(), json!(false));
+    entry.insert(
+        "experimental_supported_tools".to_string(),
+        json!(["send_user_message_async", "clock"]),
+    );
+    entry.insert(
+        "truncation_policy".to_string(),
+        json!({ "mode": "tokens", "limit": 10000 }),
+    );
+    if slug_key == "mimo-v2.5-pro" {
+        entry.insert("input_modalities".to_string(), json!(["text"]));
+    } else {
+        entry.insert("input_modalities".to_string(), json!(["text", "image"]));
+    }
+    if slug_key == "mimo-v2.6-pro" {
+        entry.insert("node_repl_auto_review_required".to_string(), json!(true));
+    }
+    let user_context = spec
+        .and_then(|item| item.context_window)
+        .filter(|value| *value > 0);
+    if user_context.is_none() {
+        entry.insert("context_window".to_string(), json!(1_048_576));
+        entry.insert("max_context_window".to_string(), json!(1_048_576));
+    }
+    let user_reasoning = spec.is_some_and(|item| !item.reasoning_levels.is_empty());
+    if !user_reasoning {
+        let supported: Vec<Value> = REASONING_LEVEL_DESCRIPTIONS
+            .iter()
+            .filter(|(effort, _)| matches!(*effort, "none" | "low" | "medium" | "high"))
+            .map(|(effort, description)| json!({ "effort": *effort, "description": *description }))
+            .collect();
+        entry.insert("supported_reasoning_levels".to_string(), json!(supported));
+        entry.insert("default_reasoning_level".to_string(), json!("low"));
+    }
 }
 
 fn catalog_slugs(provider: &Provider) -> Vec<String> {
@@ -371,5 +443,85 @@ mod tests {
             .collect();
         assert_eq!(efforts, vec!["low", "high", "xhigh"]);
         assert_eq!(entry["default_reasoning_level"], "xhigh");
+    }
+
+    #[test]
+    fn mimo_v26_catalog_enables_responses_lite_without_replacing_codex_instructions() {
+        let provider = Provider {
+            id: "mimo".to_string(),
+            name: "MiMo".to_string(),
+            kind: ProviderKind::ApiKey,
+            model: "mimo-v2.6-pro".to_string(),
+            base_url: "https://api.xiaomimimo.com/v1".to_string(),
+            wire_api: "responses".to_string(),
+            template: "mimo".to_string(),
+            ..Provider::default()
+        };
+        let catalog = build_provider_catalog(&provider).expect("catalog");
+        let entry = &catalog["models"][0];
+        assert_eq!(entry["slug"], "mimo-v2.6-pro");
+        assert_eq!(entry["use_responses_lite"], true);
+        assert_eq!(entry["apply_patch_tool_type"], "freeform");
+        assert!(entry.get("tool_mode").is_none());
+        assert!(entry.get("multi_agent_version").is_none());
+        assert_eq!(entry["context_window"], 1_048_576);
+        assert_eq!(entry["default_reasoning_level"], "low");
+        assert_eq!(entry["node_repl_auto_review_required"], true);
+        let efforts: Vec<&str> = entry["supported_reasoning_levels"]
+            .as_array()
+            .expect("levels")
+            .iter()
+            .filter_map(|item| item.get("effort").and_then(Value::as_str))
+            .collect();
+        assert_eq!(efforts, vec!["none", "low", "medium", "high"]);
+        assert_eq!(
+            entry["base_instructions"].as_str(),
+            Some(
+                "You are Codex, a coding agent. You and the user share the same workspace and collaborate to achieve the user's goals."
+            )
+        );
+        assert!(entry.get("model_messages").is_none());
+    }
+
+    #[test]
+    fn mimo_v25_catalog_stays_on_standard_responses() {
+        let provider = Provider {
+            id: "mimo-plan".to_string(),
+            name: "MiMo Token Plan".to_string(),
+            kind: ProviderKind::ApiKey,
+            model: "mimo-v2.5-pro".to_string(),
+            base_url: "https://token-plan-cn.xiaomimimo.com/v1".to_string(),
+            wire_api: "responses".to_string(),
+            template: "mimo-plan".to_string(),
+            catalog_models: vec![crate::providers::CatalogModel {
+                display_name: "MiMo-V2.5-Pro".to_string(),
+                model: "mimo-v2.5-pro".to_string(),
+                context_window: Some(262_144),
+                reasoning_levels: vec!["high".to_string()],
+                default_reasoning_level: "high".to_string(),
+            }],
+            ..Provider::default()
+        };
+        let catalog = build_provider_catalog(&provider).expect("catalog");
+        let entry = &catalog["models"][0];
+        assert_eq!(entry["use_responses_lite"], false);
+        assert!(entry.get("apply_patch_tool_type").is_none());
+        assert_eq!(entry["context_window"], 262_144);
+        assert_eq!(entry["default_reasoning_level"], "high");
+        assert_eq!(entry["input_modalities"], json!(["text"]));
+    }
+
+    #[test]
+    fn non_mimo_catalog_does_not_enable_responses_lite() {
+        let provider = Provider {
+            id: "glm".to_string(),
+            name: "Zhipu GLM".to_string(),
+            kind: ProviderKind::ApiKey,
+            model: "glm-5.3".to_string(),
+            base_url: "https://open.bigmodel.cn/api/v1".to_string(),
+            ..Provider::default()
+        };
+        let catalog = build_provider_catalog(&provider).expect("catalog");
+        assert!(catalog["models"][0].get("use_responses_lite").is_none());
     }
 }

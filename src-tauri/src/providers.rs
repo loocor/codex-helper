@@ -596,6 +596,19 @@ pub fn provider_is_kimi(provider: &Provider) -> bool {
     haystack.contains("kimi") || haystack.contains("moonshot")
 }
 
+/// Xiaomi MiMo. Template ids cover both pay-as-you-go and Token Plan presets.
+/// A custom entry still matches when its base URL is a Xiaomi MiMo host.
+pub fn provider_is_mimo(provider: &Provider) -> bool {
+    let template = provider.template.trim().to_ascii_lowercase();
+    if template == "mimo" || template.starts_with("mimo-") {
+        return true;
+    }
+    provider
+        .base_url
+        .to_ascii_lowercase()
+        .contains("xiaomimimo.com")
+}
+
 /// DeepSeek `/v1/responses` accepts custom tools but only `apply_patch`.
 /// Other named custom tools (especially Codex `exec`) are rewritten to functions.
 pub fn provider_needs_deepseek_responses_sanitize(provider: &Provider) -> bool {
