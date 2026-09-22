@@ -63,6 +63,20 @@ const PROVIDER_PRESETS = {
     model: "glm-5.3",
     usagePageUrl: "https://bigmodel.cn/coding-plan/personal/usage",
   },
+  mimo: {
+    name: "MiMo",
+    baseUrl: "https://api.xiaomimimo.com/v1",
+    wireApi: "responses",
+    model: "mimo-v2.6-pro",
+    usagePageUrl: "https://platform.xiaomimimo.com/#/console/api-keys",
+  },
+  "mimo-plan": {
+    name: "MiMo Token Plan",
+    baseUrl: "https://token-plan-cn.xiaomimimo.com/v1",
+    wireApi: "responses",
+    model: "mimo-v2.6-pro",
+    usagePageUrl: "https://platform.xiaomimimo.com/#/console/plan-manage",
+  },
 };
 
 const MASKED_API_KEY = "********";
@@ -1025,6 +1039,8 @@ function detectPreset(provider) {
   if (url.includes("minimaxi.com") || url.includes("minimax.io") || url.includes("minimax.cn")) return "minimax";
   if (url.includes("dashscope.aliyuncs.com") || url.includes("bailian.console.aliyun.com")) return "dashscope";
   if (url.includes("bigmodel.cn")) return "bigmodel";
+  if (url.includes("xiaomimimo.com") && url.includes("token-plan")) return "mimo-plan";
+  if (url.includes("xiaomimimo.com")) return "mimo";
   return "custom";
 }
 
@@ -1079,6 +1095,8 @@ function openProviderDialog(mode, provider) {
             <option value="minimax">MiniMax</option>
             <option value="dashscope">DashScope</option>
             <option value="bigmodel">Zhipu GLM</option>
+            <option value="mimo">MiMo</option>
+            <option value="mimo-plan">MiMo Token Plan</option>
           </select>`,
           { apiOnly: true, attr: "data-codex-helper-provider-preset-label" },
         )}

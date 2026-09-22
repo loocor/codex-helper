@@ -198,6 +198,11 @@ test("settings page exposes provider management", () => {
   expect(settingsSource).toContain("https://platform.minimax.cn");
   expect(settingsSource).toContain("https://dashscope.aliyuncs.com/compatible-mode/v1");
   expect(settingsSource).toContain("https://bailian.console.aliyun.com");
+  expect(settingsSource).toContain("MiMo Token Plan");
+  expect(settingsSource).toContain("https://api.xiaomimimo.com/v1");
+  expect(settingsSource).toContain("https://token-plan-cn.xiaomimimo.com/v1");
+  expect(settingsSource).toContain("mimo-v2.6-pro");
+  expect(settingsSource).toContain('url.includes("xiaomimimo.com") && url.includes("token-plan")');
   expect(settingsSource).toContain("MiniMax-M3");
   expect(settingsSource).toContain("qwen3-coder-plus");
   expect(settingsSource).toContain("GitHub Copilot");
