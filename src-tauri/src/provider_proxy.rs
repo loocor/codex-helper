@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::io;
 use std::net::SocketAddr;
@@ -16,6 +17,10 @@ use hyper_util::rt::TokioIo;
 use serde_json::Value;
 use tokio::net::TcpListener;
 
+use crate::compat_custom::{
+    custom_tool_names_from_request, restore_custom_tool_calls, rewrite_custom_as_function,
+    rewrite_custom_input_items,
+};
 use crate::deepseek_sanitize::{
     apply_deepseek_responses_request_compat, rewrite_deepseek_native_json_bytes,
     rewrite_deepseek_native_sse_block, DeepSeekRestoreMap,
@@ -44,6 +49,7 @@ enum NativeRestore {
     None,
     Xai(XaiNativeRestoreMap),
     DeepSeek(DeepSeekRestoreMap),
+    CustomTools(HashSet<String>),
 }
 
 fn rewrite_native_sse_block(block: &str, restore: &NativeRestore) -> Bytes {
@@ -51,6 +57,7 @@ fn rewrite_native_sse_block(block: &str, restore: &NativeRestore) -> Bytes {
         NativeRestore::None => Bytes::from(format!("{block}\n\n")),
         NativeRestore::Xai(map) => rewrite_xai_native_sse_block(block, map),
         NativeRestore::DeepSeek(map) => rewrite_deepseek_native_sse_block(block, map),
+        NativeRestore::CustomTools(names) => rewrite_custom_tool_sse_block(block, names),
     }
 }
 
@@ -59,7 +66,79 @@ fn rewrite_native_json_bytes(bytes: &[u8], restore: &NativeRestore) -> Vec<u8> {
         NativeRestore::None => bytes.to_vec(),
         NativeRestore::Xai(map) => rewrite_xai_native_json_bytes(bytes, map),
         NativeRestore::DeepSeek(map) => rewrite_deepseek_native_json_bytes(bytes, map),
+        NativeRestore::CustomTools(names) => rewrite_custom_tool_json_bytes(bytes, names),
     }
+}
+
+fn rewrite_custom_tool_json_bytes(bytes: &[u8], names: &HashSet<String>) -> Vec<u8> {
+    let Ok(mut value) = serde_json::from_slice::<Value>(bytes) else {
+        return bytes.to_vec();
+    };
+    if !restore_custom_tool_calls(&mut value, names) {
+        return bytes.to_vec();
+    }
+    serde_json::to_vec(&value).unwrap_or_else(|_| bytes.to_vec())
+}
+
+fn rewrite_custom_tool_sse_block(block: &str, names: &HashSet<String>) -> Bytes {
+    let mut out = String::new();
+    for line in block.lines() {
+        let Some(payload) = line.strip_prefix("data:") else {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        };
+        let payload = payload.trim();
+        if payload.is_empty() || payload == "[DONE]" {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        match serde_json::from_str::<Value>(payload) {
+            Ok(mut value) => {
+                restore_custom_tool_calls(&mut value, names);
+                out.push_str("data: ");
+                out.push_str(&value.to_string());
+                out.push('\n');
+            }
+            Err(_) => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    Bytes::from(format!("{out}\n\n"))
+}
+
+fn remember_downgraded_tools(restore: &mut NativeRestore, names: HashSet<String>) {
+    match restore {
+        NativeRestore::Xai(map) => map.custom_tool_names.extend(names),
+        NativeRestore::DeepSeek(map) => map.custom_tool_names.extend(names),
+        NativeRestore::CustomTools(existing) => existing.extend(names),
+        NativeRestore::None => *restore = NativeRestore::CustomTools(names),
+    }
+}
+
+fn upstream_error_excerpt(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let message = serde_json::from_slice::<Value>(bytes)
+        .ok()
+        .and_then(|value| {
+            let error = value.get("error")?;
+            error
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| error.get("message")?.as_str().map(str::to_string))
+        })
+        .unwrap_or_else(|| text.to_string());
+    let excerpt: String = message.chars().take(180).collect();
+    if excerpt.contains("sk-") || excerpt.to_ascii_lowercase().contains("bearer ") {
+        return "[redacted]".to_string();
+    }
+    excerpt
 }
 
 type ProxyBody = BoxBody<Bytes, io::Error>;
@@ -253,6 +332,7 @@ impl ProviderProxy {
         let deepseek_request = deepseek_sanitize && responses_path;
         let rewrite = method == hyper::Method::POST && is_llm_path(&path);
         let mut restore = NativeRestore::None;
+        let mut retry_json = None;
         if rewrite {
             let mut json_body = serde_json::from_slice::<Value>(&body)
                 .context("Provider request is not valid JSON")?;
@@ -283,62 +363,98 @@ impl ProviderProxy {
                     &mut json_body,
                 ));
             }
+            retry_json = Some(json_body.clone());
             body = serde_json::to_vec(&json_body)?;
         }
-        let pending_log = self.pending_llm_log(&path, &method, &provider.id, &headers, &body);
+        let mut pending_log = self.pending_llm_log(&path, &method, &provider.id, &headers, &body);
         let client = reqwest::Client::builder()
             .no_proxy()
             .build()
             .context("Failed to build provider proxy client")?;
-        let mut upstream_request = client.request(method, url);
-        let skip_copilot_headers = oauth_kind == Some(OAuthKind::GithubCopilot);
-        for (name, value) in headers.iter() {
-            if matches!(
-                name.as_str(),
-                "host" | "content-length" | "authorization" | "connection" | "transfer-encoding"
-            ) {
-                continue;
-            }
-            if skip_copilot_headers
-                && matches!(
-                    name.as_str(),
-                    "user-agent"
-                        | "editor-version"
-                        | "editor-plugin-version"
-                        | "copilot-integration-id"
-                        | "x-github-api-version"
-                )
-            {
-                continue;
-            }
-            if let Ok(value) = value.to_str() {
-                upstream_request = upstream_request.header(name.as_str(), value);
-            }
-        }
-        if skip_copilot_headers {
-            for (name, value) in copilot_request_headers() {
-                upstream_request = upstream_request.header(name, value);
-            }
-        }
-        let bearer = if let Some(kind) = oauth_kind {
-            let state_root = self.state_root()?;
-            oauth_bearer_token(&state_root, kind).await?
-        } else if !provider.api_key.trim().is_empty() {
-            provider.api_key.clone()
-        } else {
-            anyhow::bail!("Provider API key is required");
-        };
-        upstream_request =
-            upstream_request.header("Authorization", authorization_header_value(&bearer));
-        let response = match upstream_request.body(body).send().await {
-            Ok(response) => response,
-            Err(error) => {
-                if let Some(pending_log) = pending_log {
-                    pending_log.fail(&format!("Provider upstream request failed: {error}"), None);
+        let mut response = self
+            .send_upstream(
+                &client,
+                method.clone(),
+                &url,
+                &headers,
+                oauth_kind,
+                &provider,
+                body.clone(),
+            )
+            .await?;
+        let first_status = response.status();
+        if responses_path && matches!(first_status.as_u16(), 400 | 422) {
+            if let Some(json_body) = retry_json.as_mut() {
+                let names = custom_tool_names_from_request(json_body, &HashSet::new());
+                if !names.is_empty() {
+                    let error_bytes = response.bytes().await.unwrap_or_default();
+                    let excerpt = upstream_error_excerpt(&error_bytes);
+                    let changed = rewrite_custom_as_function(json_body, &HashSet::new())
+                        | rewrite_custom_input_items(json_body, &HashSet::new());
+                    if !changed {
+                        return Ok(Response::builder()
+                            .status(first_status)
+                            .header(hyper::header::CONTENT_TYPE, "application/json")
+                            .body(bytes_body(error_bytes))?);
+                    }
+                    if let Some(log) = pending_log.take() {
+                        log.succeed(
+                            first_status.as_u16(),
+                            false,
+                            serde_json::json!({}),
+                            error_bytes.len(),
+                            None,
+                        );
+                    }
+                    remember_downgraded_tools(&mut restore, names);
+                    body = serde_json::to_vec(&*json_body)?;
+                    pending_log =
+                        self.pending_llm_log(&path, &method, &provider.id, &headers, &body);
+                    let retry = match self
+                        .send_upstream(
+                            &client,
+                            method.clone(),
+                            &url,
+                            &headers,
+                            oauth_kind,
+                            &provider,
+                            body,
+                        )
+                        .await
+                    {
+                        Ok(retry) => retry,
+                        Err(error) => {
+                            self.log_protocol_downgrade(
+                                &provider.id,
+                                routed_upstream
+                                    .as_deref()
+                                    .unwrap_or(provider.model.as_str()),
+                                first_status.as_u16(),
+                                0,
+                                &excerpt,
+                            );
+                            if let Some(log) = pending_log {
+                                log.fail(
+                                    &format!("Provider upstream request failed: {error}"),
+                                    None,
+                                );
+                            }
+                            return Err(error).context("Provider upstream request failed");
+                        }
+                    };
+                    self.log_protocol_downgrade(
+                        &provider.id,
+                        routed_upstream
+                            .as_deref()
+                            .unwrap_or(provider.model.as_str()),
+                        first_status.as_u16(),
+                        retry.status().as_u16(),
+                        &excerpt,
+                    );
+                    response = retry;
                 }
-                return Err(error).context("Provider upstream request failed");
             }
-        };
+        }
         let status = response.status();
         let response_headers = response.headers().clone();
         let is_sse = response_headers
@@ -821,6 +937,93 @@ impl ProviderProxy {
             return read_store(&state_root);
         }
         Ok(fallback)
+    }
+
+    fn log_protocol_downgrade(
+        &self,
+        provider_id: &str,
+        model: &str,
+        status: u16,
+        retry_status: u16,
+        excerpt: &str,
+    ) {
+        let logger = {
+            let state = self.inner.lock().expect("provider proxy lock");
+            state.logger.clone()
+        };
+        let Some(logger) = logger else {
+            return;
+        };
+        let _ = logger.append(
+            "provider.protocol_downgrade",
+            serde_json::json!({
+                "providerId": provider_id,
+                "model": model,
+                "trigger": "upstream_4xx_custom_tools",
+                "status": status,
+                "shapeBefore": "custom",
+                "shapeAfter": "function",
+                "retryStatus": retry_status,
+                "errorExcerpt": excerpt,
+            }),
+        );
+    }
+
+    async fn send_upstream(
+        &self,
+        client: &reqwest::Client,
+        method: hyper::Method,
+        url: &str,
+        headers: &hyper::HeaderMap,
+        oauth_kind: Option<OAuthKind>,
+        provider: &Provider,
+        body: Vec<u8>,
+    ) -> anyhow::Result<reqwest::Response> {
+        let mut upstream_request = client.request(method, url);
+        let skip_copilot_headers = oauth_kind == Some(OAuthKind::GithubCopilot);
+        for (name, value) in headers.iter() {
+            if matches!(
+                name.as_str(),
+                "host" | "content-length" | "authorization" | "connection" | "transfer-encoding"
+            ) {
+                continue;
+            }
+            if skip_copilot_headers
+                && matches!(
+                    name.as_str(),
+                    "user-agent"
+                        | "editor-version"
+                        | "editor-plugin-version"
+                        | "copilot-integration-id"
+                        | "x-github-api-version"
+                )
+            {
+                continue;
+            }
+            if let Ok(value) = value.to_str() {
+                upstream_request = upstream_request.header(name.as_str(), value);
+            }
+        }
+        if skip_copilot_headers {
+            for (name, value) in copilot_request_headers() {
+                upstream_request = upstream_request.header(name, value);
+            }
+        }
+        let bearer = if let Some(kind) = oauth_kind {
+            let state_root = self.state_root()?;
+            oauth_bearer_token(&state_root, kind).await?
+        } else if !provider.api_key.trim().is_empty() {
+            provider.api_key.clone()
+        } else {
+            anyhow::bail!("Provider API key is required");
+        };
+        upstream_request =
+            upstream_request.header("Authorization", authorization_header_value(&bearer));
+        upstream_request
+            .body(body)
+            .send()
+            .await
+            .context("Provider upstream request failed")
     }
 }
 
@@ -2024,6 +2227,37 @@ mod tests {
         );
     }
 
+    async fn read_http_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+        use tokio::io::AsyncReadExt;
+
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut tmp).await.expect("mock read");
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            let Some(header_end) = buf.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let header = String::from_utf8_lossy(&buf[..header_end]);
+            let length = header
+                .lines()
+                .find_map(|line| {
+                    let rest = line
+                        .strip_prefix("Content-Length:")
+                        .or_else(|| line.strip_prefix("content-length:"))?;
+                    rest.trim().parse::<usize>().ok()
+                })
+                .unwrap_or(0);
+            if buf.len() >= header_end + 4 + length {
+                break;
+            }
+        }
+        buf
+    }
+
     fn routed_provider(id: &str, model: &str, key: &str, base_url: &str) -> Provider {
         Provider {
             id: id.to_string(),
@@ -2097,6 +2331,89 @@ mod tests {
             !text.contains("mimo::mimo-v2.6-pro"),
             "namespace leaked: {text}"
         );
+    }
+
+    #[tokio::test]
+    async fn proxy_retries_custom_tool_rejection_as_function_tools() {
+        use tokio::io::AsyncWriteExt;
+
+        let mock = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock bind");
+        let mock_port = mock.local_addr().expect("mock addr").port();
+        let captured = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for attempt in 0..2 {
+                let (mut stream, _) = mock.accept().await.expect("mock accept");
+                let request = read_http_request(&mut stream).await;
+                requests.push(request);
+                if attempt == 0 {
+                    let body = br#"{"error":{"message":"custom tools require MiMo freeform Responses lite mode."}}"#;
+                    let header = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                        body.len()
+                    );
+                    stream
+                        .write_all(header.as_bytes())
+                        .await
+                        .expect("400 header");
+                    stream.write_all(body).await.expect("400 body");
+                } else {
+                    let body = br#"{"output":[{"type":"function_call","name":"exec","call_id":"call_1","arguments":"{\"input\":\"ls\"}"}]}"#;
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                        body.len()
+                    );
+                    stream
+                        .write_all(header.as_bytes())
+                        .await
+                        .expect("200 header");
+                    stream.write_all(body).await.expect("200 body");
+                }
+                stream.shutdown().await.expect("shutdown");
+            }
+            requests
+        });
+        let proxy = ProviderProxy::new();
+        proxy.set_store(ProviderStore {
+            active_id: "mimo".to_string(),
+            selected_ids: vec!["mimo".to_string()],
+            providers: vec![routed_provider(
+                "mimo",
+                "mimo-v2.6-flash",
+                "sk-mimo",
+                &format!("http://127.0.0.1:{mock_port}/v1"),
+            )],
+        });
+        let port = proxy.bind_on(0).await.expect("proxy bind");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client");
+        let response = client
+            .post(format!("http://127.0.0.1:{port}/v1/responses"))
+            .json(&serde_json::json!({
+                "model": "mimo-v2.6-flash",
+                "tools": [{ "type": "custom", "name": "exec" }]
+            }))
+            .send()
+            .await
+            .expect("proxy request");
+        let status = response.status();
+        let body = response.text().await.expect("body");
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("custom_tool_call"), "restore missing: {body}");
+        let requests = captured.await.expect("capture join");
+        let first = String::from_utf8_lossy(&requests[0]);
+        let second = String::from_utf8_lossy(&requests[1]);
+        assert!(
+            first.contains("\"type\":\"custom\"") || first.contains("\"type\": \"custom\""),
+            "{first}"
+        );
+        let second_body = second.split("\r\n\r\n").nth(1).unwrap_or(second.as_ref());
+        let parsed: serde_json::Value = serde_json::from_str(second_body).expect("retry json");
+        assert_eq!(parsed["tools"][0]["type"], "function");
+        assert_eq!(parsed["tools"][0]["name"], "exec");
     }
 }
 
