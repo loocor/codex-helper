@@ -257,18 +257,14 @@ fn collect_profile_cookies(db_path: &Path, keychain_secret: &[u8]) -> Result<Vec
     let pattern = format!("%{MIMO_COOKIE_HOST}%");
     let rows = statement
         .query_map([pattern], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
         })
         .map_err(|error| format!("failed to query cookies db: {error}"))?;
 
     let keys = candidate_keys(keychain_secret);
     let mut pairs = Vec::new();
     for row in rows {
-        let (_host, name, encrypted) = row.map_err(|error| format!("failed to read cookie row: {error}"))?;
+        let (name, encrypted) = row.map_err(|error| format!("failed to read cookie row: {error}"))?;
         if name.is_empty() {
             continue;
         }
