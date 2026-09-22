@@ -1053,9 +1053,13 @@ async fn query_mimo_usage(_provider: &Provider) -> Result<LiveUsage, String> {
 
 async fn mimo_get<T: serde::de::DeserializeOwned>(
     client: &reqwest::Client,
-    cookie_header: &str,
+    cookie_header: &[u8],
     path: &str,
 ) -> Result<T, String> {
+    // Cookie values may contain raw high bytes, so the header is built from
+    // bytes instead of a UTF-8-only string.
+    let cookie_header = reqwest::header::HeaderValue::from_bytes(cookie_header)
+        .map_err(|error| format!("MiMo cookie header is not a valid header value: {error}"))?;
     let response = client
         .get(format!("{MIMO_API_BASE}{path}"))
         .header("Cookie", cookie_header)

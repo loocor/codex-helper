@@ -55,9 +55,10 @@ const BROWSERS: &[BrowserSpec] = &[
     },
 ];
 
-/// Returns a `name=value; name2=value2` header value containing every
-/// decrypted `xiaomimimo.com` cookie found in Chrome, Edge, or Arc.
-pub fn fetch_mimo_cookie_header() -> Result<String, String> {
+/// Returns a `name=value; name2=value2` Cookie header value (raw bytes so
+/// non-ASCII cookie values survive verbatim) containing every decrypted
+/// `xiaomimimo.com` cookie found in Chrome, Edge, or Arc.
+pub fn fetch_mimo_cookie_header() -> Result<Vec<u8>, String> {
     let user_dirs = user_application_support_dir()?;
 
     let mut failures: Vec<String> = Vec::new();
@@ -82,7 +83,7 @@ fn user_application_support_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "Could not locate ~/Library/Application Support".to_string())
 }
 
-fn collect_browser_cookies(browser: &BrowserSpec, user_dirs: &Path) -> Result<String, String> {
+fn collect_browser_cookies(browser: &BrowserSpec, user_dirs: &Path) -> Result<Vec<u8>, String> {
     let user_data_dir = user_dirs.join(browser.app_support_dir);
     if !user_data_dir.is_dir() {
         return Err(format!(
@@ -103,7 +104,7 @@ fn collect_browser_cookies(browser: &BrowserSpec, user_dirs: &Path) -> Result<St
     let key = keychain_secret(browser.keychain_service)?;
 
     let mut failures: Vec<String> = Vec::new();
-    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut pairs: Vec<(String, Vec<u8>)> = Vec::new();
     for db_path in db_paths {
         match collect_profile_cookies(&db_path, &key) {
             Ok(mut profile_pairs) => pairs.append(&mut profile_pairs),
@@ -125,11 +126,16 @@ fn collect_browser_cookies(browser: &BrowserSpec, user_dirs: &Path) -> Result<St
 
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
     pairs.dedup_by(|a, b| a.0 == b.0);
-    Ok(pairs
-        .into_iter()
-        .map(|(name, value)| format!("{name}={value}"))
-        .collect::<Vec<_>>()
-        .join("; "))
+    let mut header: Vec<u8> = Vec::new();
+    for (name, value) in pairs {
+        if !header.is_empty() {
+            header.extend_from_slice(b"; ");
+        }
+        header.extend_from_slice(name.as_bytes());
+        header.push(b'=');
+        header.extend_from_slice(&value);
+    }
+    Ok(header)
 }
 
 /// Finds every profile-level Cookies database (modern profiles store it under
@@ -218,7 +224,7 @@ fn hex_decode(input: &[u8]) -> Result<Vec<u8>, String> {
         .collect()
 }
 
-fn collect_profile_cookies(db_path: &Path, keychain_secret: &[u8]) -> Result<Vec<(String, String)>, String> {
+fn collect_profile_cookies(db_path: &Path, keychain_secret: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
     let temp = tempfile::Builder::new()
         .prefix("codex-helper-cookies-")
         .tempdir()
@@ -278,15 +284,16 @@ fn collect_profile_cookies(db_path: &Path, keychain_secret: &[u8]) -> Result<Vec
     Ok(pairs)
 }
 
-/// HTTP header values must be visible ASCII (plus tab); cookie values that
-/// decrypt to anything else are garbage from a failed key attempt.
-fn is_valid_cookie_value(value: &str) -> bool {
-    value
-        .bytes()
-        .all(|byte| (0x20..=0x7e).contains(&byte) || byte == 0x09)
+/// Per the http crate, header values may be tab plus any byte in
+/// 0x20..=0x7e and the opaque range 0x80..=0xff; anything else (control
+/// bytes, DEL) means the decryption produced garbage.
+fn is_valid_cookie_value(value: &[u8]) -> bool {
+    value.iter().all(|byte| {
+        matches!(byte, 0x09 | 0x20..=0x7e | 0x80..=0xff)
+    })
 }
 
-fn decrypt_cookie_value(encrypted: &[u8], keys: &[[u8; KEY_LEN]]) -> Result<String, String> {
+fn decrypt_cookie_value(encrypted: &[u8], keys: &[[u8; KEY_LEN]]) -> Result<Vec<u8>, String> {
     let (version, ciphertext) = match encrypted.first() {
         Some(b'v') if encrypted.len() > 3 => (encrypted[..3].to_vec(), &encrypted[3..]),
         _ => return Err("unexpected cookie encryption format".to_string()),
@@ -306,11 +313,14 @@ fn decrypt_cookie_value(encrypted: &[u8], keys: &[[u8; KEY_LEN]]) -> Result<Stri
                 // A wrong key can still pass the PKCS7 check by chance and
                 // produce garbage bytes; such values would corrupt the
                 // Cookie header, so treat them as decryption failures.
-                let text = String::from_utf8_lossy(&plain).to_string();
-                if !text.is_empty() && is_valid_cookie_value(&text) {
-                    return Ok(text);
+                // Values with high bytes (>= 0x80) are legitimate: some
+                // servers set UTF-8 cookie values, and Chromium sends them
+                // verbatim as opaque header bytes.
+                if !plain.is_empty() && is_valid_cookie_value(&plain) {
+                    return Ok(plain);
                 }
-                last_error = "decrypted value was empty or not a valid cookie string".to_string();
+                last_error = "decrypted value was empty or contained invalid control bytes"
+                    .to_string();
             }
             Err(error) => last_error = format!("decryption failed: {error}"),
         }
