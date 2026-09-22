@@ -1062,7 +1062,15 @@ async fn mimo_get<T: serde::de::DeserializeOwned>(
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|error| format!("MiMo usage query failed: {error}"))?;
+        .map_err(|error| {
+            let mut detail = format!("{error}");
+            let mut source = std::error::Error::source(&error);
+            while let Some(cause) = source {
+                detail.push_str(&format!(": {cause}"));
+                source = cause.source();
+            }
+            format!("MiMo usage query failed: {detail}")
+        })?;
     let status = response.status();
     let body = response
         .text()

@@ -278,6 +278,14 @@ fn collect_profile_cookies(db_path: &Path, keychain_secret: &[u8]) -> Result<Vec
     Ok(pairs)
 }
 
+/// HTTP header values must be visible ASCII (plus tab); cookie values that
+/// decrypt to anything else are garbage from a failed key attempt.
+fn is_valid_cookie_value(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| (0x20..=0x7e).contains(&byte) || byte == 0x09)
+}
+
 fn decrypt_cookie_value(encrypted: &[u8], keys: &[[u8; KEY_LEN]]) -> Result<String, String> {
     let (version, ciphertext) = match encrypted.first() {
         Some(b'v') if encrypted.len() > 3 => (encrypted[..3].to_vec(), &encrypted[3..]),
@@ -295,11 +303,14 @@ fn decrypt_cookie_value(encrypted: &[u8], keys: &[[u8; KEY_LEN]]) -> Result<Stri
             .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
         {
             Ok(plain) => {
+                // A wrong key can still pass the PKCS7 check by chance and
+                // produce garbage bytes; such values would corrupt the
+                // Cookie header, so treat them as decryption failures.
                 let text = String::from_utf8_lossy(&plain).to_string();
-                if !text.is_empty() {
+                if !text.is_empty() && is_valid_cookie_value(&text) {
                     return Ok(text);
                 }
-                last_error = "decrypted value was empty".to_string();
+                last_error = "decrypted value was empty or not a valid cookie string".to_string();
             }
             Err(error) => last_error = format!("decryption failed: {error}"),
         }
