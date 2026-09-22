@@ -1350,7 +1350,13 @@ fn http_client() -> anyhow::Result<reqwest::Client> {
         .no_proxy()
         .timeout(Duration::from_secs(15))
         .build()
-        .context("Failed to build usage client")
+        .map_err(|error| {
+            let mut detail = format!("{error}");
+            if let Some(source) = std::error::Error::source(&error) {
+                detail.push_str(&format!(" ({source})"));
+            }
+            anyhow::anyhow!("Failed to build usage client: {detail}")
+        })
 }
 
 /// Honors the system proxy configuration (environment variables and, on
