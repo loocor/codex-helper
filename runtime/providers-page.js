@@ -2,6 +2,7 @@
 let providerDialogRoot = null;
 let providerCache = [];
 let providerActiveId = "";
+let providerSelectedIds = [];
 let providerFetchedModels = [];
 let providerModelsFetchedThisSession = false;
 let providerOauthPollTimer = null;
@@ -191,6 +192,12 @@ function setProviderStatus(message) {
   setHelperText("[data-codex-helper-providers-status]", message);
 }
 
+function providerSyncSuffix(result) {
+  if (!result?.sync) return "";
+  if (result.sync.status === "ok") return " Synced to peers.";
+  return result.sync.message ? ` Peer sync failed: ${result.sync.message}` : "";
+}
+
 function providerLiveRefreshMessage(verb, name, refresh) {
   const label = name || "provider";
   if (refresh === "restart_desktop") {
@@ -215,6 +222,11 @@ function renderProviders(result) {
   );
   providerCache = providers;
   providerActiveId = typeof result?.activeId === "string" ? result.activeId : "";
+  providerSelectedIds = Array.isArray(result?.selectedIds)
+    ? result.selectedIds.filter((id) => typeof id === "string" && id)
+    : providerActiveId
+      ? [providerActiveId]
+      : [];
   const statusText =
     result?.status === "ok"
       ? result.proxyError
@@ -232,7 +244,9 @@ function renderProviders(result) {
       continue;
     }
     for (const provider of providers) {
-      list.appendChild(createProviderListRow(provider, provider.id === providerActiveId));
+      list.appendChild(
+        createProviderListRow(provider, providerSelectedIds.includes(provider.id)),
+      );
     }
   }
   void refreshProviderUsages();
@@ -251,7 +265,11 @@ function createProviderListRow(provider, active) {
   name.textContent = provider.name || provider.id;
   const meta = document.createElement("div");
   meta.className = "codex-helper-provider-row-meta";
-  meta.textContent = providerAuthLabel(provider);
+  const apiSelected = providerSelectedIds.filter((id) => id !== "official");
+  const isDefault = provider.id === providerActiveId && apiSelected.length > 1;
+  meta.textContent = isDefault
+    ? `${providerAuthLabel(provider)} · Default`
+    : providerAuthLabel(provider);
   label.appendChild(name);
   label.appendChild(meta);
 
@@ -259,7 +277,7 @@ function createProviderListRow(provider, active) {
   toggle.className = "codex-helper-switch";
   toggle.setAttribute(helperCommandAttribute, "activate-provider");
   toggle.setAttribute("data-codex-helper-provider-id", provider.id);
-  toggle.setAttribute("aria-label", `Use ${provider.name || provider.id}`);
+  toggle.setAttribute("aria-label", `Include ${provider.name || provider.id} in the model list`);
   const checkbox = document.createElement("input");
   checkbox.type = "checkbox";
   checkbox.setAttribute("role", "switch");
@@ -691,6 +709,7 @@ function providerDialogPayload() {
     compat: authMode === "apiKey" ? "" : authMode,
     modelMappings: existingProviderMappings(),
     catalogModels,
+    prefixModelNames: dialogField("prefixModelNames")?.checked === true,
   };
   if (providerModelsFetchedThisSession) {
     payload.models = providerFetchedModels;
@@ -1154,6 +1173,13 @@ function openProviderDialog(mode, provider) {
             </div>
           </div>
           <div class="codex-helper-provider-mapping-body">
+            <label class="codex-helper-provider-catalog-prefix">
+              <span>Prefix with provider name</span>
+              <span class="codex-helper-switch">
+                <input type="checkbox" data-codex-helper-provider-field="prefixModelNames" aria-label="Prefix model names with the provider name">
+                <span class="codex-helper-switch-track" aria-hidden="true"><span class="codex-helper-switch-thumb"></span></span>
+              </span>
+            </label>
             <div class="codex-helper-provider-fetch-error" data-codex-helper-provider-fetch-error></div>
             <div class="codex-helper-provider-fetched" data-codex-helper-fetched-list hidden></div>
             <div class="codex-helper-provider-catalog">
@@ -1214,6 +1240,12 @@ function openProviderDialog(mode, provider) {
   for (const [name, value] of Object.entries(fields)) {
     const node = dialogField(name);
     if (node) node.value = value;
+  }
+  const prefixNames = dialogField("prefixModelNames");
+  if (prefixNames instanceof HTMLInputElement) {
+    prefixNames.checked = draft
+      ? draft.prefixModelNames === true
+      : provider?.prefixModelNames === true;
   }
   seedCatalogRows(provider, draft);
   providerFetchedModels = Array.isArray(draft?.fetchedModels) ? draft.fetchedModels : [];
@@ -1281,7 +1313,9 @@ function confirmProviderDelete(provider) {
     </div>
   `;
   dialog.querySelector(".codex-helper-provider-dialog-message").textContent =
-    `${provider.name || provider.id} will be removed from Helper. This does not change ChatGPT until you activate another provider.`;
+    providerSelectedIds.includes(provider.id)
+      ? `${provider.name || provider.id} will be removed from the model list and from Helper.`
+      : `${provider.name || provider.id} will be removed from Helper. This does not change ChatGPT until you activate another provider.`;
   host.replaceChildren(dialog);
   helperNativeSettingsRoot = dialog;
   helperNativeSettingsContentHost = host;
@@ -1510,6 +1544,66 @@ async function toggleProviderApiKeyVisibility() {
   button.innerHTML = nativeSettingsStandardIconSvg(reveal ? "eye-off" : "eye");
 }
 
+// Toggle one provider in the shared model list: switching a provider on
+// activates it, switching it off removes it while the rest of the mix stays.
+async function handleProviderSwitch(id, source) {
+  const input = source instanceof HTMLInputElement
+    ? source
+    : source?.querySelector?.("input");
+  // Capture-phase click handlers call preventDefault, so the checkbox still
+  // holds the pre-click state. A checked switch is being turned off.
+  const turningOff = input instanceof HTMLInputElement && input.checked;
+  if (turningOff && id === "official") {
+    if (input instanceof HTMLInputElement) input.checked = true;
+    setProviderStatus("Turn on an API provider to leave Official ChatGPT login");
+    logProviderEvent("providers.select_blocked", { id, reason: "official_exclusive" });
+    return;
+  }
+  // Paint the new position before the bridge returns. The click handler
+  // cancels the native toggle, and peer sync used to keep that return slow.
+  if (input instanceof HTMLInputElement) input.checked = !turningOff;
+  if (turningOff) {
+    logProviderEvent("providers.select_requested", { id, selected: false });
+    const result = await bridge("/providers/select", { id, selected: false });
+    if (result?.status !== "ok") {
+      setProviderStatus(resultText(result));
+      logProviderEvent("providers.select_failed", { id, result });
+      await refreshHelperPage();
+      return;
+    }
+    renderProviders(result);
+    const syncSuffix = providerSyncSuffix(result);
+    setProviderStatus(
+      `${providerLiveRefreshMessage("Removed", providerById(id)?.name || id, result.refresh)} It is no longer in the model list.${syncSuffix}`,
+    );
+    logProviderEvent("providers.selected", { id, selected: false, activeId: result.activeId });
+    return;
+  }
+  logProviderEvent("providers.activate_requested", { id });
+  const result = await bridge("/providers/activate", { id });
+  if (result?.status !== "ok") {
+    setProviderStatus(resultText(result));
+    logProviderEvent("providers.activate_failed", { id, result });
+    await refreshHelperPage();
+    return;
+  }
+  renderProviders(result);
+  const syncSuffix = providerSyncSuffix(result);
+  const selected = Array.isArray(result.selectedIds)
+    ? result.selectedIds.filter((item) => item !== "official")
+    : [];
+  const mix = selected.length > 1 ? ` ${selected.length} providers are in the model list.` : "";
+  setProviderStatus(
+    `${providerLiveRefreshMessage("Activated", providerById(id)?.name || id, result.refresh)}${mix}${syncSuffix}`,
+  );
+  logProviderEvent("providers.activated", {
+    id,
+    activeId: result.activeId,
+    selectedIds: result.selectedIds,
+    refresh: result.refresh,
+  });
+}
+
 async function handleProviderCommand(command, source) {
   if (command === "open-provider-usage") {
     const id =
@@ -1634,45 +1728,7 @@ async function handleProviderCommand(command, source) {
   const id = source?.getAttribute("data-codex-helper-provider-id") || providerDialogRoot?.getAttribute("data-codex-helper-provider-id") || "";
   if (command === "activate-provider") {
     if (!id) return;
-    const input = source instanceof HTMLInputElement
-      ? source
-      : source?.querySelector?.("input");
-    const list = source?.closest?.("[data-codex-helper-providers-list]");
-    if (id === providerActiveId) {
-      if (input instanceof HTMLInputElement) input.checked = true;
-      return;
-    }
-    if (list instanceof HTMLElement) {
-      for (const node of list.querySelectorAll(".codex-helper-switch input")) {
-        if (node instanceof HTMLInputElement) node.checked = node === input;
-      }
-    } else if (input instanceof HTMLInputElement) {
-      input.checked = true;
-    }
-    logProviderEvent("providers.activate_requested", { id });
-    const result = await bridge("/providers/activate", { id });
-    if (result?.status !== "ok") {
-      setProviderStatus(resultText(result));
-      logProviderEvent("providers.activate_failed", { id, result });
-      await refreshHelperPage();
-      return;
-    }
-    renderProviders(result);
-    const syncSuffix = result.sync
-      ? result.sync.status === "ok"
-        ? " Synced to peers."
-        : result.sync.message
-          ? ` Peer sync failed: ${result.sync.message}`
-          : ""
-      : "";
-    setProviderStatus(
-      `${providerLiveRefreshMessage("Activated", providerById(id)?.name || id, result.refresh)}${syncSuffix}`,
-    );
-    logProviderEvent("providers.activated", {
-      id,
-      activeId: result.activeId,
-      refresh: result.refresh,
-    });
+    await handleProviderSwitch(id, source);
     return;
   }
   if (command === "provider-open" || command === "provider-edit") {

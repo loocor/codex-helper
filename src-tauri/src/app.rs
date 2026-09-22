@@ -7,7 +7,7 @@ use crate::ports::PortForwardManager;
 use crate::provider_proxy::global_provider_proxy;
 use crate::providers::{providers_in_display_order, read_store, Provider, ProviderStore};
 use crate::proxy_env::configure_process_loopback_no_proxy;
-use crate::routes::{activate_provider_response, handle_bridge_request, BridgeContext};
+use crate::routes::{activate_provider_exclusive_response, handle_bridge_request, BridgeContext};
 use crate::settings_window::{
     open_settings_callback, request_show_settings_window, SETTINGS_WINDOW_TARGET_ID,
 };
@@ -154,7 +154,11 @@ async fn helper_bridge(
     let result = handle_bridge_request(ctx, request).await;
     if matches!(
         path.as_str(),
-        "/providers/save" | "/providers/delete" | "/providers/activate" | "/providers/reorder"
+        "/providers/save"
+            | "/providers/delete"
+            | "/providers/activate"
+            | "/providers/select"
+            | "/providers/reorder"
     ) && result.get("status").and_then(Value::as_str) == Some("ok")
     {
         if let Err(error) = rebuild_tray_menu(&app) {
@@ -473,7 +477,7 @@ fn activate_provider_from_tray(
         .map(tray_provider_display_name)
         .unwrap_or(provider_id)
         .to_string();
-    let response = activate_provider_response(&state.state_dir.root, provider_id);
+    let response = activate_provider_exclusive_response(&state.state_dir.root, provider_id);
     if response.get("status").and_then(Value::as_str) != Some("ok") {
         let message = response
             .get("message")

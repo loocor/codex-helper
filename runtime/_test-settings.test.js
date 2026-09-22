@@ -167,6 +167,21 @@ test("settings page exposes provider management", () => {
     "Restart ChatGPT desktop if it does not pick up the change.",
   );
   expect(settingsSource).toContain('bridge("/providers/delete"');
+  expect(settingsSource).toContain('bridge("/providers/select"');
+  expect(settingsSource).toContain("selectedIds");
+  // Capture-phase click handlers call preventDefault, so the checkbox still
+  // holds the pre-click state. A checked switch is being turned off.
+  expect(settingsSource).toContain(
+    "const turningOff = input instanceof HTMLInputElement && input.checked",
+  );
+  const switchPaint = settingsSource.indexOf("input.checked = !turningOff");
+  const selectRequest = settingsSource.indexOf('bridge("/providers/select"');
+  expect(switchPaint).toBeGreaterThan(-1);
+  expect(switchPaint).toBeLessThan(selectRequest);
+  expect(settingsSource).not.toContain(
+    "const turningOff = input instanceof HTMLInputElement && !input.checked",
+  );
+
   expect(settingsSource).toContain('bridge("/providers/models"');
   expect(settingsSource).toContain("new-provider");
   expect(settingsSource).toContain("codex-helper-provider-add-button");
@@ -174,6 +189,9 @@ test("settings page exposes provider management", () => {
   expect(settingsSource).toContain("Fetch Models");
   expect(settingsSource).toContain("Add Model");
   expect(settingsSource).toContain("Catalog");
+  expect(settingsSource).toContain("Prefix with provider name");
+  expect(settingsSource).toContain('data-codex-helper-provider-field="prefixModelNames"');
+  expect(settingsSource).toContain("prefixModelNames: dialogField(\"prefixModelNames\")?.checked === true");
   expect(settingsSource).toContain("if (model) model.value = preset.model");
   expect(settingsSource).not.toContain("if (model && !model.value.trim()) model.value = preset.model");
   expect(settingsSource).toContain("Menu Display Name");

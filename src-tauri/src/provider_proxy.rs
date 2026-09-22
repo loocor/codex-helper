@@ -31,7 +31,8 @@ use crate::providers::{
     apply_provider_effort_aliases, apply_provider_model_mappings, provider_allowed_models,
     provider_device_oauth_kind, provider_effort_aliases,
     provider_needs_deepseek_responses_sanitize, provider_needs_xai_compat, read_store,
-    rewrite_unmatched_request_model, Provider, ProviderKind, ProviderStore,
+    resolve_model_route, rewrite_unmatched_request_model, selected_api_providers, Provider,
+    ProviderKind, ProviderStore,
 };
 use crate::xai_sanitize::{
     append_utf8_safe, apply_xai_native_responses_request_compat, rewrite_xai_native_json_bytes,
@@ -205,30 +206,45 @@ impl ProviderProxy {
     }
 
     async fn forward(&self, request: Request<Incoming>) -> anyhow::Result<Response<ProxyBody>> {
-        let provider = self
-            .active_provider()?
-            .ok_or_else(|| anyhow::anyhow!("No active provider"))?;
-        if provider.id == "official" || provider.kind == ProviderKind::Oauth {
-            anyhow::bail!("Official ChatGPT login does not use the Helper provider proxy");
-        }
-        let upstream = provider.base_url.trim().trim_end_matches('/');
-        if upstream.is_empty() {
-            anyhow::bail!("Active provider has no base URL");
-        }
         let path = request
             .uri()
             .path_and_query()
             .map(|value| value.as_str().to_string())
             .unwrap_or_else(|| "/".to_string());
+        let method = request.method().clone();
+        let headers = request.headers().clone();
+        let raw_body = request.collect().await?.to_bytes();
+        let store = self.current_store()?;
+        let mut provider = store
+            .providers
+            .iter()
+            .find(|item| item.id == store.active_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("No active provider"))?;
+        let mut routed_upstream = None;
+        if method == hyper::Method::POST && is_llm_path(&path) {
+            if let Ok(json_body) = serde_json::from_slice::<Value>(&raw_body) {
+                if let Some(model) = json_body.get("model").and_then(Value::as_str) {
+                    if let Some((routed, route)) = resolve_model_route(&store, model) {
+                        provider = routed.clone();
+                        routed_upstream = Some(route.upstream_model);
+                    }
+                }
+            }
+        }
+        if provider.id == "official" || provider.kind == ProviderKind::Oauth {
+            anyhow::bail!("Official ChatGPT login does not use the Helper provider proxy");
+        }
+        self.authorize_request(&headers, &provider, &store)?;
+        let upstream = provider.base_url.trim().trim_end_matches('/');
+        if upstream.is_empty() {
+            anyhow::bail!("Active provider has no base URL");
+        }
         let oauth_kind = provider_device_oauth_kind(&provider);
         let upstream = oauth_kind
             .map(|kind| kind.default_base_url().to_string())
             .unwrap_or_else(|| upstream.to_string());
         let url = join_provider_upstream_url_for(oauth_kind, &upstream, &path);
-        let method = request.method().clone();
-        let headers = request.headers().clone();
-        self.authorize_request(&headers, &provider)?;
-        let raw_body = request.collect().await?.to_bytes();
         let mut body = raw_body.to_vec();
         let xai_compat = provider_needs_xai_compat(&provider);
         let deepseek_sanitize = provider_needs_deepseek_responses_sanitize(&provider);
@@ -240,13 +256,21 @@ impl ProviderProxy {
         if rewrite {
             let mut json_body = serde_json::from_slice::<Value>(&body)
                 .context("Provider request is not valid JSON")?;
-            apply_provider_model_mappings(&mut json_body, &provider.model_mappings);
+            let mapped = apply_provider_model_mappings(&mut json_body, &provider.model_mappings);
+            if !mapped {
+                if let Some(upstream_model) = &routed_upstream {
+                    if let Some(object) = json_body.as_object_mut() {
+                        object.insert("model".to_string(), Value::String(upstream_model.clone()));
+                    }
+                } else {
+                    rewrite_unmatched_request_model(
+                        &mut json_body,
+                        &provider.model,
+                        &provider_allowed_models(&provider),
+                    );
+                }
+            }
             apply_provider_effort_aliases(&mut json_body, provider_effort_aliases(&provider));
-            rewrite_unmatched_request_model(
-                &mut json_body,
-                &provider.model,
-                &provider_allowed_models(&provider),
-            );
             if xai_request {
                 restore = NativeRestore::Xai(apply_xai_native_responses_request_compat(
                     &mut json_body,
@@ -756,8 +780,9 @@ impl ProviderProxy {
         &self,
         headers: &hyper::HeaderMap,
         provider: &Provider,
+        providers: &ProviderStore,
     ) -> anyhow::Result<()> {
-        let store = match self.state_root() {
+        let endpoint_store = match self.state_root() {
             Ok(root) => endpoint::read_store(&root)?,
             Err(_) => endpoint::EndpointStore::default(),
         };
@@ -769,10 +794,33 @@ impl ProviderProxy {
                     .strip_prefix("Bearer ")
                     .or_else(|| value.strip_prefix("bearer "))
             });
-        if let Err(message) = endpoint::authorize_bearer(&store, bearer, provider) {
-            anyhow::bail!("Unauthorized: {message}");
+        let active = providers
+            .providers
+            .iter()
+            .find(|item| item.id == providers.active_id);
+        let mut candidates = selected_api_providers(providers).into_iter().chain(active);
+        if endpoint::authorize_bearer(&endpoint_store, bearer, provider).is_ok()
+            || candidates.any(|candidate| {
+                endpoint::authorize_bearer(&endpoint_store, bearer, candidate).is_ok()
+            })
+        {
+            return Ok(());
         }
-        Ok(())
+        let message = endpoint::authorize_bearer(&endpoint_store, bearer, provider)
+            .err()
+            .unwrap_or_else(|| "Invalid Endpoint API key".to_string());
+        anyhow::bail!("Unauthorized: {message}");
+    }
+
+    fn current_store(&self) -> anyhow::Result<ProviderStore> {
+        let (state_root, fallback) = {
+            let state = self.inner.lock().expect("provider proxy lock");
+            (state.state_root.clone(), state.store.clone())
+        };
+        if let Some(state_root) = state_root {
+            return read_store(&state_root);
+        }
+        Ok(fallback)
     }
 }
 
@@ -1180,6 +1228,7 @@ mod tests {
         let proxy = ProviderProxy::new();
         proxy.set_store(ProviderStore {
             active_id: "grok".to_string(),
+            selected_ids: Vec::new(),
             providers: vec![Provider {
                 id: "grok".to_string(),
                 name: "Grok".to_string(),
@@ -1195,6 +1244,7 @@ mod tests {
                 }],
                 models: Vec::new(),
                 catalog_models: Vec::new(),
+                prefix_model_names: false,
                 usage_page_url: String::new(),
                 template: String::new(),
             }],
@@ -1256,6 +1306,7 @@ mod tests {
         let proxy = ProviderProxy::new();
         proxy.set_store(ProviderStore {
             active_id: "grok".to_string(),
+            selected_ids: Vec::new(),
             providers: vec![Provider {
                 id: "grok".to_string(),
                 name: "Grok".to_string(),
@@ -1268,6 +1319,7 @@ mod tests {
                 model_mappings: Vec::new(),
                 models: Vec::new(),
                 catalog_models: Vec::new(),
+                prefix_model_names: false,
                 usage_page_url: String::new(),
                 template: String::new(),
             }],
@@ -1322,6 +1374,7 @@ mod tests {
         let proxy = ProviderProxy::new();
         proxy.set_store(ProviderStore {
             active_id: "deepseek".to_string(),
+            selected_ids: Vec::new(),
             providers: vec![Provider {
                 id: "deepseek".to_string(),
                 name: "DeepSeek".to_string(),
@@ -1334,6 +1387,7 @@ mod tests {
                 model_mappings: Vec::new(),
                 models: Vec::new(),
                 catalog_models: Vec::new(),
+                prefix_model_names: false,
                 usage_page_url: String::new(),
                 template: String::new(),
             }],
@@ -1420,6 +1474,7 @@ mod tests {
         let proxy = ProviderProxy::new();
         proxy.set_store(ProviderStore {
             active_id: "deepseek".to_string(),
+            selected_ids: Vec::new(),
             providers: vec![Provider {
                 id: "deepseek".to_string(),
                 name: "DeepSeek".to_string(),
@@ -1432,6 +1487,7 @@ mod tests {
                 model_mappings: Vec::new(),
                 models: vec!["deepseek-chat".to_string()],
                 catalog_models: Vec::new(),
+                prefix_model_names: false,
                 usage_page_url: String::new(),
                 template: String::new(),
             }],
@@ -1487,6 +1543,7 @@ mod tests {
         let proxy = ProviderProxy::new();
         proxy.set_store(ProviderStore {
             active_id: "kimi".to_string(),
+            selected_ids: Vec::new(),
             providers: vec![Provider {
                 id: "kimi".to_string(),
                 name: "Kimi".to_string(),
@@ -1499,6 +1556,7 @@ mod tests {
                 model_mappings: Vec::new(),
                 models: Vec::new(),
                 catalog_models: Vec::new(),
+                prefix_model_names: false,
                 usage_page_url: String::new(),
                 template: String::new(),
             }],
@@ -1540,6 +1598,7 @@ mod tests {
         let proxy = ProviderProxy::new();
         proxy.set_store(ProviderStore {
             active_id: "bigmodel".to_string(),
+            selected_ids: Vec::new(),
             providers: vec![provider],
         });
         let port = proxy.bind_on(0).await.expect("proxy bind");
@@ -1629,6 +1688,7 @@ mod tests {
             model_mappings: Vec::new(),
             models: Vec::new(),
             catalog_models: Vec::new(),
+            prefix_model_names: false,
             usage_page_url: String::new(),
             template: String::new(),
         }
@@ -1670,6 +1730,7 @@ mod tests {
         proxy.set_log_llm_traffic(enabled);
         proxy.set_store(ProviderStore {
             active_id: "kimi".to_string(),
+            selected_ids: Vec::new(),
             providers: vec![test_api_provider("kimi", "kimi-k2.5", mock_port)],
         });
         let port = proxy.bind_on(0).await.expect("proxy bind");
@@ -1960,6 +2021,81 @@ mod tests {
                 "/v1/models",
             ),
             "https://api.githubcopilot.com/models"
+        );
+    }
+
+    fn routed_provider(id: &str, model: &str, key: &str, base_url: &str) -> Provider {
+        Provider {
+            id: id.to_string(),
+            name: id.to_string(),
+            kind: ProviderKind::ApiKey,
+            model: model.to_string(),
+            base_url: base_url.to_string(),
+            wire_api: "responses".to_string(),
+            api_key: key.to_string(),
+            compat: String::new(),
+            model_mappings: Vec::new(),
+            models: vec![model.to_string()],
+            catalog_models: Vec::new(),
+            prefix_model_names: false,
+            usage_page_url: String::new(),
+            template: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_routes_namespaced_model_to_its_provider() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mock = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock bind");
+        let mock_port = mock.local_addr().expect("mock addr").port();
+        let captured = tokio::spawn(async move {
+            let (mut stream, _) = mock.accept().await.expect("mock accept");
+            let mut buf = vec![0u8; 65536];
+            let n = stream.read(&mut buf).await.expect("mock read");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}")
+                .await
+                .expect("mock write");
+            buf[..n].to_vec()
+        });
+        let base = format!("http://127.0.0.1:{mock_port}/v1");
+        let proxy = ProviderProxy::new();
+        proxy.set_store(ProviderStore {
+            active_id: "grok".to_string(),
+            selected_ids: vec!["grok".to_string(), "mimo".to_string()],
+            providers: vec![
+                routed_provider("grok", "grok-4.7", "sk-grok", &base),
+                routed_provider("mimo", "mimo-v2.6-pro", "sk-mimo", &base),
+            ],
+        });
+        let port = proxy.bind_on(0).await.expect("proxy bind");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client");
+        let response = client
+            .post(format!("http://127.0.0.1:{port}/v1/responses"))
+            .json(&serde_json::json!({ "model": "mimo::mimo-v2.6-pro", "input": "ping" }))
+            .send()
+            .await
+            .expect("proxy request");
+        assert_eq!(response.status(), 200);
+        let raw = captured.await.expect("capture join");
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            text.contains("Bearer sk-mimo"),
+            "routed key missing: {text}"
+        );
+        assert!(
+            text.contains("mimo-v2.6-pro"),
+            "upstream model missing: {text}"
+        );
+        assert!(
+            !text.contains("mimo::mimo-v2.6-pro"),
+            "namespace leaked: {text}"
         );
     }
 }

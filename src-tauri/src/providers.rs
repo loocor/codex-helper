@@ -11,7 +11,7 @@ use crate::codex_live::{
     read_config_document, write_config_atomic, write_secret_file_atomic, LiveProviderWrite,
     UNIFIED_SESSION_PROVIDER_ID,
 };
-use crate::model_catalog::{apply_provider_catalog, clear_helper_catalog};
+use crate::model_catalog::{apply_mixed_catalog, clear_helper_catalog};
 use crate::provider_oauth::{
     oauth_is_signed_in, oauth_kind_from_provider, OAuthKind, HELPER_OAUTH_LIVE_TOKEN,
 };
@@ -82,6 +82,8 @@ pub struct Provider {
     pub model_mappings: Vec<ModelMapping>,
     pub models: Vec<String>,
     pub catalog_models: Vec<CatalogModel>,
+    /// When set, catalog display names are prefixed with this provider's name.
+    pub prefix_model_names: bool,
     pub usage_page_url: String,
 }
 
@@ -99,6 +101,7 @@ impl Default for Provider {
             model_mappings: Vec::new(),
             models: Vec::new(),
             catalog_models: Vec::new(),
+            prefix_model_names: false,
             usage_page_url: String::new(),
             template: String::new(),
         }
@@ -109,6 +112,9 @@ impl Default for Provider {
 #[serde(rename_all = "camelCase", default)]
 pub struct ProviderStore {
     pub active_id: String,
+    /// Providers mixed into the shared Codex model list. Empty legacy stores
+    /// behave like `[active_id]`. `official` is exclusive with API providers.
+    pub selected_ids: Vec<String>,
     pub providers: Vec<Provider>,
 }
 
@@ -120,6 +126,7 @@ impl Default for ProviderStore {
     fn default() -> Self {
         Self {
             active_id: OFFICIAL_PROVIDER_ID.to_string(),
+            selected_ids: vec![OFFICIAL_PROVIDER_ID.to_string()],
             providers: vec![Provider {
                 id: OFFICIAL_PROVIDER_ID.to_string(),
                 name: OFFICIAL_PROVIDER_NAME.to_string(),
@@ -132,6 +139,7 @@ impl Default for ProviderStore {
                 model_mappings: Vec::new(),
                 models: Vec::new(),
                 catalog_models: Vec::new(),
+                prefix_model_names: false,
                 usage_page_url: String::new(),
                 template: String::new(),
             }],
@@ -141,6 +149,115 @@ impl Default for ProviderStore {
 
 pub fn providers_path(state_root: &Path) -> PathBuf {
     state_root.join("providers.json")
+}
+
+pub const MODEL_NAMESPACE_SEPARATOR: &str = "::";
+
+/// Selection used for catalog membership and proxy routing.
+/// An empty list is the legacy store shape and means `[active_id]`.
+pub fn effective_selected_ids(store: &ProviderStore) -> Vec<String> {
+    let selected: Vec<String> = store
+        .selected_ids
+        .iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect();
+    if !selected.is_empty() {
+        return selected;
+    }
+    let active = store.active_id.trim();
+    if active.is_empty() {
+        vec![OFFICIAL_PROVIDER_ID.to_string()]
+    } else {
+        vec![active.to_string()]
+    }
+}
+
+/// API providers participating in the shared model list, in selection order.
+/// Official ChatGPT login is exclusive and never joins the mix.
+pub fn selected_api_providers(store: &ProviderStore) -> Vec<&Provider> {
+    effective_selected_ids(store)
+        .iter()
+        .filter(|id| id.as_str() != OFFICIAL_PROVIDER_ID)
+        .filter_map(|id| {
+            store
+                .providers
+                .iter()
+                .find(|provider| provider.id == id.as_str())
+        })
+        .filter(|provider| provider.kind == ProviderKind::ApiKey)
+        .collect()
+}
+
+pub fn namespaced_model_slug(provider_id: &str, model: &str) -> String {
+    format!("{provider_id}{MODEL_NAMESPACE_SEPARATOR}{model}")
+}
+
+/// Catalog slug for one provider model. Collisions across the mix are namespaced.
+pub fn catalog_model_slug(providers: &[&Provider], provider_id: &str, model: &str) -> String {
+    let model = model.trim();
+    let owners = providers
+        .iter()
+        .filter(|provider| {
+            provider_available_models(provider)
+                .iter()
+                .any(|item| item.eq_ignore_ascii_case(model))
+        })
+        .count();
+    if owners > 1 {
+        namespaced_model_slug(provider_id, model)
+    } else {
+        model.to_string()
+    }
+}
+
+fn canonical_provider_model(provider: &Provider, model: &str) -> Option<String> {
+    provider_available_models(provider)
+        .into_iter()
+        .find(|item| item.eq_ignore_ascii_case(model))
+}
+
+pub struct ModelRoute {
+    pub provider_id: String,
+    pub upstream_model: String,
+}
+
+/// Resolve the routing target for a model slug from the shared catalog.
+/// Namespaced slugs (`providerId::model`) bind to one provider; bare slugs
+/// bind to the first selected provider that offers them.
+pub fn resolve_model_route<'a>(
+    store: &'a ProviderStore,
+    model: &str,
+) -> Option<(&'a Provider, ModelRoute)> {
+    let model = model.trim();
+    if model.is_empty() {
+        return None;
+    }
+    if let Some((provider_id, upstream)) = model.split_once(MODEL_NAMESPACE_SEPARATOR) {
+        let provider = selected_api_providers(store)
+            .into_iter()
+            .find(|provider| provider.id == provider_id)?;
+        let upstream = canonical_provider_model(provider, upstream.trim())?;
+        return Some((
+            provider,
+            ModelRoute {
+                provider_id: provider.id.clone(),
+                upstream_model: upstream,
+            },
+        ));
+    }
+    for provider in selected_api_providers(store) {
+        if let Some(upstream) = canonical_provider_model(provider, model) {
+            return Some((
+                provider,
+                ModelRoute {
+                    provider_id: provider.id.clone(),
+                    upstream_model: upstream,
+                },
+            ));
+        }
+    }
+    None
 }
 
 pub fn read_store(state_root: &Path) -> anyhow::Result<ProviderStore> {
@@ -158,10 +275,45 @@ pub fn read_store(state_root: &Path) -> anyhow::Result<ProviderStore> {
     if pin_official_provider_first(&mut store) {
         changed = true;
     }
+    if normalize_selection(&mut store) {
+        changed = true;
+    }
     if changed {
         write_store(state_root, &store)?;
     }
     Ok(store)
+}
+
+fn normalize_selection(store: &mut ProviderStore) -> bool {
+    let mut selected: Vec<String> = Vec::new();
+    for id in &store.selected_ids {
+        let id = id.trim();
+        if id.is_empty() || selected.iter().any(|existing| existing == id) {
+            continue;
+        }
+        if id == OFFICIAL_PROVIDER_ID {
+            selected.clear();
+            selected.push(OFFICIAL_PROVIDER_ID.to_string());
+            break;
+        }
+        if store.providers.iter().any(|provider| provider.id == id) {
+            selected.push(id.to_string());
+        }
+    }
+    if selected.is_empty() {
+        let active = store.active_id.trim();
+        let fallback = if store.providers.iter().any(|provider| provider.id == active) {
+            active.to_string()
+        } else {
+            OFFICIAL_PROVIDER_ID.to_string()
+        };
+        selected.push(fallback);
+    }
+    if selected == store.selected_ids {
+        return false;
+    }
+    store.selected_ids = selected;
+    true
 }
 
 fn normalize_official_provider_name(store: &mut ProviderStore) -> bool {
@@ -351,10 +503,8 @@ pub fn upsert_provider(
         .unwrap_or("")
         .trim()
         .to_string();
-    let existing_key = store
-        .providers
-        .iter()
-        .find(|provider| provider.id == id)
+    let existing = store.providers.iter().find(|provider| provider.id == id);
+    let existing_key = existing
         .map(|provider| provider.api_key.clone())
         .unwrap_or_default();
     let api_key = if incoming_key.is_empty() || incoming_key == MASKED_API_KEY {
@@ -363,19 +513,19 @@ pub fn upsert_provider(
         incoming_key
     };
     let model_mappings = parse_model_mappings(payload)?;
-    let existing_models = store
-        .providers
-        .iter()
-        .find(|provider| provider.id == id)
+    let existing_models = existing
         .map(|provider| provider.models.clone())
         .unwrap_or_default();
-    let existing_catalog = store
-        .providers
-        .iter()
-        .find(|provider| provider.id == id)
+    let existing_catalog = existing
         .map(|provider| provider.catalog_models.clone())
         .unwrap_or_default();
     let catalog_models = parse_catalog_models(payload, &existing_catalog)?;
+    let existing_prefix = existing.is_some_and(|provider| provider.prefix_model_names);
+    let prefix_model_names = payload
+        .get("prefixModelNames")
+        .or_else(|| payload.get("prefix_model_names"))
+        .and_then(Value::as_bool)
+        .unwrap_or(existing_prefix);
     let models = if payload.get("models").is_some() {
         parse_models(payload, &existing_models)?
     } else if !catalog_models.is_empty() {
@@ -435,6 +585,7 @@ pub fn upsert_provider(
         model_mappings,
         models,
         catalog_models,
+        prefix_model_names,
         usage_page_url: parse_usage_page_url(payload)?,
         template,
     };
@@ -501,6 +652,7 @@ pub fn delete_provider(
         anyhow::bail!("Provider not found: {id}");
     }
     store.providers.retain(|provider| provider.id != id);
+    store.selected_ids.retain(|existing| existing != &id);
     write_store(state_root, &store)?;
     Ok(store)
 }
@@ -709,6 +861,7 @@ pub fn activate_provider(
         .find(|item| item.id == previous_id)
         .map(|item| item.model.clone())
         .filter(|model| !model.is_empty());
+    include_provider_in_selection(&mut store, &provider);
     let mut document = read_config_document(codex_home)?;
     match provider.kind {
         ProviderKind::Oauth => {
@@ -736,12 +889,14 @@ pub fn activate_provider(
             } else {
                 provider.api_key.clone()
             };
+            let selected = selected_api_providers(&store);
+            let model = catalog_model_slug(&selected, &provider.id, &provider.model);
             apply_api_provider(
                 &mut document,
                 LiveProviderWrite {
                     id: UNIFIED_SESSION_PROVIDER_ID,
                     name: &provider.name,
-                    model: &provider.model,
+                    model: &model,
                     base_url: live_base_url,
                     wire_api: &provider.wire_api,
                     api_key: Some(live_api_key.as_str()),
@@ -750,13 +905,83 @@ pub fn activate_provider(
                         .filter(|id| *id != provider.id && *id != UNIFIED_SESSION_PROVIDER_ID),
                 },
             );
-            apply_provider_catalog(codex_home, &mut document, &provider)?;
+            apply_mixed_catalog(codex_home, &mut document, &selected)?;
         }
     }
     write_config_atomic(codex_home, &document)?;
     store.active_id = provider.id;
     write_store(state_root, &store)?;
     Ok((store, refresh))
+}
+
+fn include_provider_in_selection(store: &mut ProviderStore, provider: &Provider) {
+    if provider.kind == ProviderKind::Oauth || provider.id == OFFICIAL_PROVIDER_ID {
+        store.selected_ids = vec![OFFICIAL_PROVIDER_ID.to_string()];
+        return;
+    }
+    store.selected_ids.retain(|id| id != OFFICIAL_PROVIDER_ID);
+    if !store.selected_ids.iter().any(|id| id == &provider.id) {
+        store.selected_ids.push(provider.id.clone());
+    }
+}
+
+/// Add or remove one provider from the shared model list.
+/// Turning the last API provider off returns Codex to Official ChatGPT login.
+/// Cross-provider failover is not part of this switch.
+/// Tray and other single-switch callers replace the mix with one provider.
+pub fn activate_provider_exclusive(
+    state_root: &Path,
+    id: &str,
+    proxy_base_url: &str,
+    codex_home: &Path,
+) -> anyhow::Result<(ProviderStore, LiveRefresh)> {
+    let id = normalize_id(id)?;
+    let mut store = read_store(state_root)?;
+    if !store.providers.iter().any(|provider| provider.id == id) {
+        anyhow::bail!("Provider not found: {id}");
+    }
+    store.selected_ids = vec![id.clone()];
+    store.active_id = id.clone();
+    write_store(state_root, &store)?;
+    activate_provider(state_root, &id, proxy_base_url, codex_home)
+}
+
+pub fn set_provider_selected(
+    state_root: &Path,
+    id: &str,
+    selected: bool,
+    proxy_base_url: &str,
+    codex_home: &Path,
+) -> anyhow::Result<(ProviderStore, LiveRefresh)> {
+    if selected {
+        return activate_provider(state_root, id, proxy_base_url, codex_home);
+    }
+    let id = normalize_id(id)?;
+    if id == OFFICIAL_PROVIDER_ID {
+        anyhow::bail!("Turn on an API provider to leave Official ChatGPT login");
+    }
+    let mut store = read_store(state_root)?;
+    if !store.providers.iter().any(|provider| provider.id == id) {
+        anyhow::bail!("Provider not found: {id}");
+    }
+    store
+        .selected_ids
+        .retain(|existing| existing != &id && existing != OFFICIAL_PROVIDER_ID);
+    if store.selected_ids.is_empty() {
+        return activate_provider(state_root, OFFICIAL_PROVIDER_ID, proxy_base_url, codex_home);
+    }
+    let active = if store
+        .selected_ids
+        .iter()
+        .any(|existing| existing == &store.active_id)
+    {
+        store.active_id.clone()
+    } else {
+        store.selected_ids[0].clone()
+    };
+    store.active_id = active.clone();
+    write_store(state_root, &store)?;
+    activate_provider(state_root, &active, proxy_base_url, codex_home)
 }
 
 fn parse_device_oauth(payload: &Value) -> anyhow::Result<Option<OAuthKind>> {
@@ -984,6 +1209,7 @@ pub fn list_response(store: &ProviderStore, proxy_base_url: &str) -> Value {
     json!({
         "status": "ok",
         "activeId": store.active_id,
+        "selectedIds": store.selected_ids,
         "proxyBaseUrl": proxy_base_url,
         "providers": public_store(store).providers,
     })
@@ -1178,6 +1404,7 @@ mod tests {
             model_mappings: Vec::new(),
             models: Vec::new(),
             catalog_models: Vec::new(),
+            prefix_model_names: false,
             usage_page_url: String::new(),
             template: String::new(),
         }
@@ -1214,6 +1441,7 @@ mod tests {
             &root,
             &ProviderStore {
                 active_id: "official".to_string(),
+                selected_ids: Vec::new(),
                 providers: vec![
                     ProviderStore::default().providers[0].clone(),
                     Provider {
@@ -1228,6 +1456,7 @@ mod tests {
                         model_mappings: Vec::new(),
                         models: Vec::new(),
                         catalog_models: Vec::new(),
+                        prefix_model_names: false,
                         usage_page_url: String::new(),
                         template: String::new(),
                     },
@@ -1370,6 +1599,7 @@ mod tests {
             &root,
             &ProviderStore {
                 active_id: "official".to_string(),
+                selected_ids: Vec::new(),
                 providers: vec![
                     ProviderStore::default().providers[0].clone(),
                     Provider {
@@ -1384,6 +1614,7 @@ mod tests {
                         model_mappings: Vec::new(),
                         models: Vec::new(),
                         catalog_models: Vec::new(),
+                        prefix_model_names: false,
                         usage_page_url: String::new(),
                         template: String::new(),
                     },
@@ -1417,6 +1648,7 @@ mod tests {
             &root,
             &ProviderStore {
                 active_id: "official".to_string(),
+                selected_ids: Vec::new(),
                 providers: vec![
                     ProviderStore::default().providers[0].clone(),
                     Provider {
@@ -1431,6 +1663,7 @@ mod tests {
                         model_mappings: Vec::new(),
                         models: Vec::new(),
                         catalog_models: Vec::new(),
+                        prefix_model_names: false,
                         usage_page_url: String::new(),
                         template: String::new(),
                     },
@@ -1480,6 +1713,7 @@ mod tests {
             &root,
             &ProviderStore {
                 active_id: "grok".to_string(),
+                selected_ids: Vec::new(),
                 providers: vec![
                     ProviderStore::default().providers[0].clone(),
                     Provider {
@@ -1494,6 +1728,7 @@ mod tests {
                         model_mappings: Vec::new(),
                         models: Vec::new(),
                         catalog_models: Vec::new(),
+                        prefix_model_names: false,
                         usage_page_url: String::new(),
                         template: String::new(),
                     },
@@ -1705,6 +1940,7 @@ mod tests {
             &root,
             &ProviderStore {
                 active_id: OFFICIAL_PROVIDER_ID.to_string(),
+                selected_ids: Vec::new(),
                 providers: vec![
                     ProviderStore::default().providers[0].clone(),
                     Provider {
@@ -1767,6 +2003,7 @@ mod tests {
             &root,
             &ProviderStore {
                 active_id: "official".to_string(),
+                selected_ids: Vec::new(),
                 providers: vec![
                     ProviderStore::default().providers[0].clone(),
                     Provider {
@@ -1781,6 +2018,7 @@ mod tests {
                         model_mappings: Vec::new(),
                         models: Vec::new(),
                         catalog_models: Vec::new(),
+                        prefix_model_names: false,
                         usage_page_url: String::new(),
                         template: String::new(),
                     },
@@ -1802,6 +2040,7 @@ mod tests {
             &root,
             &ProviderStore {
                 active_id: "grok".to_string(),
+                selected_ids: Vec::new(),
                 providers: vec![
                     ProviderStore::default().providers[0].clone(),
                     sample_api_provider("grok", "Grok"),
@@ -1815,5 +2054,103 @@ mod tests {
                 .expect("activate");
         assert_eq!(store.active_id, "deepseek");
         assert_eq!(refresh, LiveRefresh::NewConversation);
+        assert_eq!(
+            store.selected_ids,
+            vec!["grok".to_string(), "deepseek".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_model_route_namespaces_collisions_and_keeps_unique_slugs() {
+        let mut grok = sample_api_provider("grok", "Grok");
+        grok.model = "shared".to_string();
+        grok.models = vec!["grok-4.7".to_string()];
+        let mut mimo = sample_api_provider("mimo", "MiMo");
+        mimo.model = "Shared".to_string();
+        mimo.models = vec!["mimo-v2.6-pro".to_string()];
+        let store = ProviderStore {
+            active_id: "grok".to_string(),
+            selected_ids: vec!["grok".to_string(), "mimo".to_string()],
+            providers: vec![ProviderStore::default().providers[0].clone(), grok, mimo],
+        };
+        let (provider, route) = resolve_model_route(&store, "mimo::shared").expect("namespaced");
+        assert_eq!(provider.id, "mimo");
+        assert_eq!(route.upstream_model, "Shared");
+        let (provider, route) = resolve_model_route(&store, "grok-4.7").expect("unique");
+        assert_eq!(provider.id, "grok");
+        assert_eq!(route.upstream_model, "grok-4.7");
+        assert!(resolve_model_route(&store, "shared").unwrap().0.id == "grok");
+        assert!(resolve_model_route(&store, "missing").is_none());
+    }
+
+    #[test]
+    fn deselecting_last_api_provider_returns_to_official() {
+        let helper = tempdir().expect("helper");
+        let codex = tempdir().expect("codex");
+        let root = helper.path().join(".codex-helper");
+        write_store(
+            &root,
+            &ProviderStore {
+                active_id: "official".to_string(),
+                selected_ids: vec!["official".to_string()],
+                providers: vec![
+                    ProviderStore::default().providers[0].clone(),
+                    sample_api_provider("grok", "Grok"),
+                ],
+            },
+        )
+        .expect("store");
+        activate_provider(&root, "grok", "http://127.0.0.1:3721/v1", codex.path()).expect("on");
+        let (store, refresh) = set_provider_selected(
+            &root,
+            "grok",
+            false,
+            "http://127.0.0.1:3721/v1",
+            codex.path(),
+        )
+        .expect("off");
+        assert_eq!(store.active_id, OFFICIAL_PROVIDER_ID);
+        assert_eq!(store.selected_ids, vec![OFFICIAL_PROVIDER_ID.to_string()]);
+        assert_eq!(refresh, LiveRefresh::RestartDesktop);
+        let live = std::fs::read_to_string(codex.path().join("config.toml")).expect("config");
+        assert!(!live.contains("model_catalog_json"));
+    }
+
+    #[test]
+    fn exclusive_activation_replaces_the_mix() {
+        let helper = tempdir().expect("helper");
+        let codex = tempdir().expect("codex");
+        let root = helper.path().join(".codex-helper");
+        write_store(
+            &root,
+            &ProviderStore {
+                active_id: "official".to_string(),
+                selected_ids: vec!["official".to_string()],
+                providers: vec![
+                    ProviderStore::default().providers[0].clone(),
+                    Provider {
+                        model: "grok-4.7".to_string(),
+                        ..sample_api_provider("grok", "Grok")
+                    },
+                    Provider {
+                        model: "deepseek-v4".to_string(),
+                        ..sample_api_provider("deepseek", "DeepSeek")
+                    },
+                ],
+            },
+        )
+        .expect("store");
+        activate_provider(&root, "grok", "http://127.0.0.1:3721/v1", codex.path()).expect("grok");
+        activate_provider(&root, "deepseek", "http://127.0.0.1:3721/v1", codex.path())
+            .expect("mix");
+        let (store, _) =
+            activate_provider_exclusive(&root, "grok", "http://127.0.0.1:3721/v1", codex.path())
+                .expect("exclusive");
+        assert_eq!(store.active_id, "grok");
+        assert_eq!(store.selected_ids, vec!["grok".to_string()]);
+        let catalog = std::fs::read_to_string(codex.path().join("codex-helper-model-catalog.json"))
+            .expect("catalog");
+        assert!(catalog.contains("grok"));
+        assert!(!catalog.contains("deepseek"));
     }
 }

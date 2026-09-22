@@ -21,8 +21,9 @@ use crate::provider_usage::{
     validated_usage_page_url,
 };
 use crate::providers::{
-    activate_provider, delete_provider, list_response, provider_api_key, read_store,
-    reorder_providers, upsert_provider, LiveRefresh,
+    activate_provider, activate_provider_exclusive, delete_provider, list_response,
+    provider_api_key, read_store, reorder_providers, set_provider_selected, upsert_provider,
+    LiveRefresh,
 };
 use crate::settings::{read_settings, update_settings};
 use crate::settings_window::{settings_page_id, OpenSettings, SETTINGS_WINDOW_TARGET_ID};
@@ -185,6 +186,11 @@ pub async fn handle_bridge_request(ctx: BridgeContext, request: BridgeRequest) -
         "/providers/activate" => {
             let response = providers_activate_response(&ctx.state_dir.root, &payload);
             log_provider_event(&ctx.logger, "providers.activated", &response);
+            response
+        }
+        "/providers/select" => {
+            let response = providers_select_response(&ctx.state_dir.root, &payload);
+            log_provider_event(&ctx.logger, "providers.selected", &response);
             response
         }
         "/providers/reorder" => {
@@ -674,8 +680,10 @@ fn provider_store_response(store: crate::providers::ProviderStore) -> Value {
 fn providers_save_response(state_root: &std::path::Path, payload: &Value) -> Value {
     match upsert_provider(state_root, payload) {
         Ok((store, saved_id)) => {
-            if store.active_id == saved_id {
-                return project_named_provider(state_root, &saved_id.clone(), Some(saved_id));
+            let in_mix = store.selected_ids.iter().any(|id| id == &saved_id)
+                && store.active_id != "official";
+            if store.active_id == saved_id || in_mix {
+                return project_named_provider(state_root, &store.active_id, Some(saved_id));
             }
             let mut response = provider_store_response(store);
             response["savedId"] = json!(saved_id);
@@ -691,8 +699,16 @@ fn providers_delete_response(state_root: &std::path::Path, payload: &Value) -> V
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim();
+    let was_selected = read_store(state_root)
+        .ok()
+        .is_some_and(|store| store.selected_ids.iter().any(|existing| existing == id));
     match delete_provider(state_root, id, &default_codex_home()) {
-        Ok(store) => attach_auto_sync(state_root, provider_store_response(store)),
+        Ok(store) => {
+            if was_selected && store.active_id != "official" {
+                return project_named_provider(state_root, &store.active_id, None);
+            }
+            attach_auto_sync(state_root, provider_store_response(store))
+        }
         Err(error) => json!({ "status": "failed", "message": error.to_string() }),
     }
 }
@@ -706,6 +722,26 @@ fn providers_activate_response(state_root: &std::path::Path, payload: &Value) ->
     activate_provider_response(state_root, id)
 }
 
+fn providers_select_response(state_root: &std::path::Path, payload: &Value) -> Value {
+    let id = payload
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let selected = payload
+        .get("selected")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let result = set_provider_selected(
+        state_root,
+        id,
+        selected,
+        &proxy_base_url(),
+        &default_codex_home(),
+    );
+    provider_switch_response(state_root, result)
+}
+
 fn providers_reorder_response(state_root: &std::path::Path, payload: &Value) -> Value {
     match reorder_providers(state_root, payload) {
         Ok(store) => provider_store_response(store),
@@ -717,23 +753,48 @@ pub(crate) fn activate_provider_response(state_root: &std::path::Path, id: &str)
     project_named_provider(state_root, id, None)
 }
 
+pub(crate) fn activate_provider_exclusive_response(
+    state_root: &std::path::Path,
+    id: &str,
+) -> Value {
+    let result =
+        activate_provider_exclusive(state_root, id, &proxy_base_url(), &default_codex_home());
+    provider_switch_response(state_root, result)
+}
+
 fn project_named_provider(
     state_root: &std::path::Path,
     id: &str,
     saved_id: Option<String>,
 ) -> Value {
-    let proxy_url = global_provider_proxy()
+    let result = activate_provider(state_root, id, &proxy_base_url(), &default_codex_home());
+    let mut response = provider_switch_response(state_root, result);
+    if response.get("status").and_then(Value::as_str) == Some("ok") {
+        if let Some(saved_id) = saved_id {
+            response["savedId"] = json!(saved_id);
+        }
+    }
+    response
+}
+
+fn proxy_base_url() -> String {
+    global_provider_proxy()
         .base_url()
         .map_err(|error| error.to_string())
-        .unwrap_or_default();
-    match activate_provider(state_root, id, &proxy_url, &default_codex_home()) {
-        Ok((store, refresh)) => {
-            let mut response = provider_store_response(store);
-            if let Some(saved_id) = saved_id {
-                response["savedId"] = json!(saved_id);
-            }
-            attach_auto_sync(state_root, attach_refresh(response, refresh))
-        }
+        .unwrap_or_default()
+}
+
+/// Shared tail for routes that switch the active provider: attach the live
+/// refresh hint and schedule peer sync, or surface the failure.
+fn provider_switch_response(
+    state_root: &std::path::Path,
+    result: anyhow::Result<(crate::providers::ProviderStore, LiveRefresh)>,
+) -> Value {
+    match result {
+        Ok((store, refresh)) => attach_auto_sync(
+            state_root,
+            attach_refresh(provider_store_response(store), refresh),
+        ),
         Err(error) => json!({ "status": "failed", "message": error.to_string() }),
     }
 }
@@ -896,6 +957,7 @@ fn log_provider_event(logger: &crate::logging::DiagnosticLogger, event: &str, re
             "providers.saved"
                 | "providers.deleted"
                 | "providers.activated"
+                | "providers.selected"
                 | "providers.reordered"
                 | "endpoint.key_created"
                 | "endpoint.key_deleted"

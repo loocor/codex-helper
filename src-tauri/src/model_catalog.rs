@@ -6,7 +6,9 @@ use serde_json::{json, Value};
 use toml_edit::{value, DocumentMut};
 
 use crate::codex_live::set_secret_file_permissions;
-use crate::providers::{provider_effort_aliases, provider_is_mimo, CatalogModel, Provider};
+use crate::providers::{
+    catalog_model_slug, provider_effort_aliases, provider_is_mimo, CatalogModel, Provider,
+};
 
 pub const HELPER_CATALOG_FILENAME: &str = "codex-helper-model-catalog.json";
 
@@ -30,12 +32,12 @@ pub fn clear_helper_catalog(codex_home: &Path, document: &mut DocumentMut) -> an
     Ok(())
 }
 
-pub fn apply_provider_catalog(
+pub fn apply_mixed_catalog(
     codex_home: &Path,
     document: &mut DocumentMut,
-    provider: &Provider,
+    providers: &[&Provider],
 ) -> anyhow::Result<()> {
-    let catalog = build_provider_catalog(provider)?;
+    let catalog = build_mixed_catalog(providers, code_mode_host_available())?;
     let path = catalog_path(codex_home);
     let contents = format!("{}\n", serde_json::to_string_pretty(&catalog)?);
     std::fs::write(&path, contents)
@@ -45,6 +47,17 @@ pub fn apply_provider_catalog(
     Ok(())
 }
 
+/// Codex only honors `tool_mode = code_mode_only` when this host binary exists.
+/// Missing host fails closed and hides the model's tools.
+pub fn code_mode_host_available() -> bool {
+    [
+        "/Applications/ChatGPT.app/Contents/Resources/codex-code-mode-host",
+        "/Applications/Codex.app/Contents/Resources/codex-code-mode-host",
+    ]
+    .iter()
+    .any(|path| Path::new(path).is_file())
+}
+
 fn is_helper_catalog_pointer(path: &str) -> bool {
     std::path::Path::new(path)
         .file_name()
@@ -52,41 +65,111 @@ fn is_helper_catalog_pointer(path: &str) -> bool {
         == Some(HELPER_CATALOG_FILENAME)
 }
 
+#[cfg(test)]
 fn build_provider_catalog(provider: &Provider) -> anyhow::Result<Value> {
-    let effort_aliases = provider_effort_aliases(provider);
-    let mut models = Vec::new();
-    let mut seen = HashSet::new();
-    if !provider.catalog_models.is_empty() {
-        for (index, spec) in provider.catalog_models.iter().enumerate() {
-            let slug = spec.model.trim();
-            if slug.is_empty() || !seen.insert(slug.to_string()) {
-                continue;
-            }
-            models.push(finish_catalog_entry(
-                provider,
-                native_catalog_entry(slug, index, Some(spec), false, effort_aliases),
-                slug,
-                Some(spec),
-            ));
+    build_mixed_catalog(&[provider], code_mode_host_available())
+}
+
+fn build_mixed_catalog(providers: &[&Provider], code_mode_host: bool) -> anyhow::Result<Value> {
+    CatalogBuilder::new(providers, code_mode_host).build()
+}
+
+/// Accumulates one deduplicated catalog entry per selected provider model.
+/// `providers` is the full selected mix, needed to detect slug collisions.
+struct CatalogBuilder<'a> {
+    providers: &'a [&'a Provider],
+    code_mode_host: bool,
+    models: Vec<Value>,
+    seen: HashSet<String>,
+}
+
+impl<'a> CatalogBuilder<'a> {
+    fn new(providers: &'a [&'a Provider], code_mode_host: bool) -> Self {
+        Self {
+            providers,
+            code_mode_host,
+            models: Vec::new(),
+            seen: HashSet::new(),
         }
-    } else {
+    }
+
+    fn build(mut self) -> anyhow::Result<Value> {
+        for provider in self.providers {
+            self.append_provider(provider);
+        }
+        if self.models.is_empty() {
+            anyhow::bail!("Provider model is required to build a Codex catalog");
+        }
+        Ok(json!({ "models": self.models }))
+    }
+
+    fn append_provider(&mut self, provider: &Provider) {
+        let effort_aliases = provider_effort_aliases(provider);
+        let prefix = provider
+            .prefix_model_names
+            .then_some(provider.name.trim())
+            .filter(|name| !name.is_empty());
+        if !provider.catalog_models.is_empty() {
+            for spec in &provider.catalog_models {
+                let slug = spec.model.trim();
+                if slug.is_empty() {
+                    continue;
+                }
+                let entry = native_catalog_entry(
+                    slug,
+                    self.models.len(),
+                    Some(spec),
+                    false,
+                    effort_aliases,
+                );
+                self.push_model(provider, slug, prefix, entry, Some(spec));
+            }
+            return;
+        }
         let chat_safe = provider.wire_api.trim().eq_ignore_ascii_case("chat");
         for slug in catalog_slugs(provider) {
-            if !seen.insert(slug.clone()) {
-                continue;
-            }
-            models.push(finish_catalog_entry(
-                provider,
-                native_catalog_entry(&slug, models.len(), None, chat_safe, effort_aliases),
-                &slug,
-                None,
-            ));
+            let entry =
+                native_catalog_entry(&slug, self.models.len(), None, chat_safe, effort_aliases);
+            self.push_model(provider, &slug, prefix, entry, None);
         }
     }
-    if models.is_empty() {
-        anyhow::bail!("Provider model is required to build a Codex catalog");
+
+    /// Namespaces colliding slugs, optionally prefixes the display name, and
+    /// skips entries that duplicate an already-added catalog slug.
+    fn push_model(
+        &mut self,
+        provider: &Provider,
+        upstream_slug: &str,
+        prefix: Option<&str>,
+        entry: Value,
+        spec: Option<&CatalogModel>,
+    ) {
+        let catalog_slug = catalog_model_slug(self.providers, &provider.id, upstream_slug);
+        if !self.seen.insert(catalog_slug.to_ascii_lowercase()) {
+            return;
+        }
+        let mut entry =
+            finish_catalog_entry(provider, entry, upstream_slug, spec, self.code_mode_host);
+        if let Some(object) = entry.as_object_mut() {
+            object.insert("slug".to_string(), json!(catalog_slug));
+            if let Some(name) = prefix {
+                let display = object
+                    .get("display_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(upstream_slug);
+                let label = format!("{name} / ");
+                if !display
+                    .to_ascii_lowercase()
+                    .starts_with(&label.to_ascii_lowercase())
+                {
+                    let prefixed = format!("{label}{display}");
+                    object.insert("display_name".to_string(), json!(prefixed));
+                    object.insert("description".to_string(), json!(prefixed));
+                }
+            }
+        }
+        self.models.push(entry);
     }
-    Ok(json!({ "models": models }))
 }
 
 fn finish_catalog_entry(
@@ -94,24 +177,27 @@ fn finish_catalog_entry(
     mut entry: Value,
     slug: &str,
     spec: Option<&CatalogModel>,
+    code_mode_host: bool,
 ) -> Value {
     if !provider_is_mimo(provider) {
         return entry;
     }
     if let Some(object) = entry.as_object_mut() {
-        apply_mimo_catalog_metadata(object, slug, spec);
+        apply_mimo_catalog_metadata(object, slug, spec, code_mode_host);
     }
     entry
 }
 
 /// Wire metadata from Xiaomi's Codex catalog. v2.6 custom tools are rejected
 /// unless Codex sends Responses Lite with a freeform apply_patch tool.
-/// `tool_mode` and `multi_agent_version` stay unset: official v2.6 entries set
-/// `code_mode_only`, which fails closed without the code-mode host.
+/// `code_mode_only` is set only when the code-mode host exists. Official entries
+/// also set `multi_agent_version = v2`; Helper leaves that unset because spawned
+/// subagent sessions currently drop the task text.
 fn apply_mimo_catalog_metadata(
     entry: &mut serde_json::Map<String, Value>,
     slug: &str,
     spec: Option<&CatalogModel>,
+    code_mode_host: bool,
 ) {
     let slug_key = slug.trim().to_ascii_lowercase();
     let v25 = slug_key.contains("v2.5");
@@ -120,6 +206,9 @@ fn apply_mimo_catalog_metadata(
     } else {
         entry.insert("use_responses_lite".to_string(), json!(true));
         entry.insert("apply_patch_tool_type".to_string(), json!("freeform"));
+        if code_mode_host && slug_key.contains("v2.6") {
+            entry.insert("tool_mode".to_string(), json!("code_mode_only"));
+        }
     }
     entry.insert("shell_type".to_string(), json!("unified_exec"));
     entry.insert("supports_reasoning_summaries".to_string(), json!(true));
@@ -457,7 +546,7 @@ mod tests {
             template: "mimo".to_string(),
             ..Provider::default()
         };
-        let catalog = build_provider_catalog(&provider).expect("catalog");
+        let catalog = build_mixed_catalog(&[&provider], false).expect("catalog");
         let entry = &catalog["models"][0];
         assert_eq!(entry["slug"], "mimo-v2.6-pro");
         assert_eq!(entry["use_responses_lite"], true);
@@ -509,6 +598,100 @@ mod tests {
         assert_eq!(entry["context_window"], 262_144);
         assert_eq!(entry["default_reasoning_level"], "high");
         assert_eq!(entry["input_modalities"], json!(["text"]));
+    }
+
+    #[test]
+    fn mimo_v26_catalog_uses_code_mode_only_when_host_exists() {
+        let provider = Provider {
+            id: "mimo".to_string(),
+            name: "MiMo".to_string(),
+            kind: ProviderKind::ApiKey,
+            model: "mimo-v2.6-flash".to_string(),
+            base_url: "https://api.xiaomimimo.com/v1".to_string(),
+            wire_api: "responses".to_string(),
+            template: "mimo".to_string(),
+            ..Provider::default()
+        };
+        let catalog = build_mixed_catalog(&[&provider], true).expect("catalog");
+        let entry = &catalog["models"][0];
+        assert_eq!(entry["tool_mode"], "code_mode_only");
+        assert!(entry.get("multi_agent_version").is_none());
+        assert_eq!(entry["use_responses_lite"], true);
+    }
+
+    #[test]
+    fn mixed_catalog_namespaces_colliding_slugs_without_prefixing_display_names() {
+        let grok = Provider {
+            id: "grok".to_string(),
+            name: "Grok".to_string(),
+            kind: ProviderKind::ApiKey,
+            model: "shared-model".to_string(),
+            models: vec!["grok-only".to_string()],
+            ..Provider::default()
+        };
+        let mimo = Provider {
+            id: "mimo".to_string(),
+            name: "MiMo".to_string(),
+            kind: ProviderKind::ApiKey,
+            model: "shared-model".to_string(),
+            models: vec!["mimo-v2.6-pro".to_string()],
+            base_url: "https://api.xiaomimimo.com/v1".to_string(),
+            template: "mimo".to_string(),
+            ..Provider::default()
+        };
+        let catalog = build_mixed_catalog(&[&grok, &mimo], false).expect("catalog");
+        let slugs: Vec<&str> = catalog["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .filter_map(|entry| entry.get("slug").and_then(Value::as_str))
+            .collect();
+        assert_eq!(
+            slugs,
+            vec![
+                "grok::shared-model",
+                "grok-only",
+                "mimo::shared-model",
+                "mimo-v2.6-pro"
+            ]
+        );
+        let names: Vec<&str> = catalog["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .filter_map(|entry| entry.get("display_name").and_then(Value::as_str))
+            .collect();
+        assert_eq!(names[0], "shared-model");
+        assert_eq!(names[1], "grok-only");
+        assert_eq!(names[3], "mimo-v2.6-pro");
+        assert!(catalog["models"][3].get("tool_mode").is_none());
+    }
+
+    #[test]
+    fn prefix_model_names_adds_the_provider_name_to_that_providers_display_names() {
+        let grok = Provider {
+            id: "grok".to_string(),
+            name: "Grok".to_string(),
+            kind: ProviderKind::ApiKey,
+            model: "shared-model".to_string(),
+            prefix_model_names: true,
+            ..Provider::default()
+        };
+        let copilot = Provider {
+            id: "copilot".to_string(),
+            name: "Copilot".to_string(),
+            kind: ProviderKind::ApiKey,
+            model: "shared-model".to_string(),
+            ..Provider::default()
+        };
+        let catalog = build_mixed_catalog(&[&grok, &copilot], false).expect("catalog");
+        let names: Vec<&str> = catalog["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .filter_map(|entry| entry.get("display_name").and_then(Value::as_str))
+            .collect();
+        assert_eq!(names, vec!["Grok / shared-model", "shared-model"]);
     }
 
     #[test]

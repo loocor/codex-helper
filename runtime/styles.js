@@ -1383,6 +1383,14 @@ function installHelperStyles() {
         justify-content: flex-end;
         gap: 8px;
       }
+      [data-codex-helper-provider-dialog] .codex-helper-provider-catalog-prefix {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-height: 30px;
+        font-size: 13px;
+      }
       [data-codex-helper-provider-dialog] .codex-helper-provider-mapping-body {
         margin-left: 148px;
         min-width: 0;
