@@ -2,6 +2,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
@@ -416,8 +418,89 @@ pub fn push_now_with(
     Ok(value)
 }
 
-pub fn auto_push(state_root: &Path) -> Option<Value> {
-    auto_push_with(state_root, &SyncTools::default())
+struct AutoPushJob {
+    pending: bool,
+    running: bool,
+    root: PathBuf,
+    tools: SyncTools,
+}
+
+/// Coalesced background peer copy. A provider switch schedules this and
+/// returns before SSH finishes. A second schedule during a copy pushes again
+/// with the latest files instead of starting a parallel copy.
+#[derive(Clone)]
+pub struct AutoPushQueue {
+    inner: Arc<Mutex<AutoPushJob>>,
+}
+
+impl AutoPushQueue {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(AutoPushJob {
+                pending: false,
+                running: false,
+                root: PathBuf::new(),
+                tools: SyncTools::default(),
+            })),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn schedule(&self, state_root: &Path, tools: SyncTools) {
+        self.enqueue(state_root, tools);
+    }
+
+    fn enqueue(&self, state_root: &Path, tools: SyncTools) {
+        let start_worker = {
+            let mut job = self.inner.lock().expect("auto push queue poisoned");
+            job.pending = true;
+            job.root = state_root.to_path_buf();
+            job.tools = tools;
+            if job.running {
+                false
+            } else {
+                job.running = true;
+                true
+            }
+        };
+        if !start_worker {
+            return;
+        }
+        let inner = Arc::clone(&self.inner);
+        thread::Builder::new()
+            .name("codex-helper-auto-sync".to_string())
+            .spawn(move || loop {
+                let (root, tools) = {
+                    let mut job = inner.lock().expect("auto push queue poisoned");
+                    if !job.pending {
+                        job.running = false;
+                        return;
+                    }
+                    job.pending = false;
+                    (job.root.clone(), job.tools.clone())
+                };
+                let _ = auto_push_with(&root, &tools);
+            })
+            .expect("failed to start auto sync");
+    }
+}
+
+fn auto_sync_enabled(state_root: &Path) -> bool {
+    read_store(state_root).ok().is_some_and(|store| {
+        store.role == SyncRole::Primary && store.auto_sync && !store.peers.is_empty()
+    })
+}
+
+fn global_auto_push_queue() -> &'static AutoPushQueue {
+    static QUEUE: OnceLock<AutoPushQueue> = OnceLock::new();
+    QUEUE.get_or_init(AutoPushQueue::new)
+}
+
+pub fn schedule_auto_push(state_root: &Path) {
+    if !auto_sync_enabled(state_root) {
+        return;
+    }
+    global_auto_push_queue().enqueue(state_root, SyncTools::default());
 }
 
 pub fn auto_push_with(state_root: &Path, tools: &SyncTools) -> Option<Value> {
@@ -1052,7 +1135,7 @@ mod tests {
     fn auto_push_skips_when_disabled() {
         let dir = tempdir().unwrap();
         write_store(dir.path(), &SyncStore::default()).unwrap();
-        assert!(auto_push(dir.path()).is_none());
+        assert!(auto_push_with(dir.path(), &SyncTools::default()).is_none());
     }
 
     #[test]
@@ -1195,6 +1278,63 @@ mod tests {
         .expect("same-id content change");
         assert_eq!(second.active_id, "official");
         assert!(!second.restart_desktop);
+    }
+
+    #[test]
+    fn schedule_auto_push_returns_before_remote_copy_finishes() {
+        let dir = tempdir().unwrap();
+        let hits = dir.path().join("hits");
+        let tool = dir.path().join("slow-tool");
+        fs::write(
+            &tool,
+            format!(
+                "#!/bin/sh\nprintf 'x\\n' >> {}\nsleep 0.8\n",
+                shell_single_quote(&hits.display().to_string())
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&tool).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&tool, permissions).unwrap();
+        let store = upsert_peer(
+            dir.path(),
+            &json!({
+                "host": "mini.sgponte",
+                "user": "loocor",
+                "authMethod": "password",
+                "password": "s3cret",
+            }),
+        )
+        .unwrap();
+        write_store(
+            dir.path(),
+            &SyncStore {
+                auto_sync: true,
+                ..store
+            },
+        )
+        .unwrap();
+        fs::write(providers::providers_path(dir.path()), "{}\n").unwrap();
+
+        let started = std::time::Instant::now();
+        AutoPushQueue::new().schedule(
+            dir.path(),
+            SyncTools {
+                ssh: tool.clone(),
+                rsync: tool,
+            },
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(250),
+            "auto push blocked the caller for {elapsed:?}"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        while std::time::Instant::now() < deadline && !hits.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(hits.exists(), "background push never started");
     }
 
     #[test]

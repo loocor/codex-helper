@@ -804,13 +804,11 @@ fn attach_refresh(mut response: Value, refresh: LiveRefresh) -> Value {
     response
 }
 
-fn attach_auto_sync(state_root: &std::path::Path, mut response: Value) -> Value {
+fn attach_auto_sync(state_root: &std::path::Path, response: Value) -> Value {
     if response.get("status").and_then(Value::as_str) != Some("ok") {
         return response;
     }
-    if let Some(sync) = sync::auto_push(state_root) {
-        response["sync"] = sync;
-    }
+    sync::schedule_auto_push(state_root);
     response
 }
 
