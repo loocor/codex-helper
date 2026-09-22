@@ -91,10 +91,10 @@ fn collect_browser_cookies(browser: &BrowserSpec, user_dirs: &Path) -> Result<St
         ));
     }
 
-    let mut db_paths = find_cookie_databases(&user_data_dir);
+    let mut db_paths = find_cookie_databases(&user_data_dir)?;
     if db_paths.is_empty() {
         return Err(format!(
-            "no Cookies database found under {}",
+            "no Cookies database found under {} (is the browser installed and signed in?)",
             user_data_dir.display()
         ));
     }
@@ -134,11 +134,18 @@ fn collect_browser_cookies(browser: &BrowserSpec, user_dirs: &Path) -> Result<St
 
 /// Finds every profile-level Cookies database (modern profiles store it under
 /// `Network/`, older ones directly in the profile directory).
-fn find_cookie_databases(user_data_dir: &Path) -> Vec<PathBuf> {
+fn find_cookie_databases(user_data_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let mut found = Vec::new();
-    let Ok(entries) = std::fs::read_dir(user_data_dir) else {
-        return found;
-    };
+    let entries = std::fs::read_dir(user_data_dir).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            format!(
+                "macOS blocked access to {} (grant CodexHelper Full Disk Access in System Settings, Privacy & Security, Full Disk Access, then retry)",
+                user_data_dir.display()
+            )
+        } else {
+            format!("failed to list {}: {error}", user_data_dir.display())
+        }
+    })?;
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
@@ -150,7 +157,7 @@ fn find_cookie_databases(user_data_dir: &Path) -> Vec<PathBuf> {
             }
         }
     }
-    found
+    Ok(found)
 }
 
 fn keychain_secret(service: &str) -> Result<Vec<u8>, String> {
@@ -217,8 +224,16 @@ fn collect_profile_cookies(db_path: &Path, keychain_secret: &[u8]) -> Result<Vec
         .tempdir()
         .map_err(|error| format!("failed to create temp dir: {error}"))?;
     let copy_path = temp.path().join("Cookies");
-    std::fs::copy(db_path, &copy_path)
-        .map_err(|error| format!("failed to copy cookies db: {error}"))?;
+    std::fs::copy(db_path, &copy_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            format!(
+                "macOS blocked access to {} (grant CodexHelper Full Disk Access in System Settings, Privacy & Security, Full Disk Access, then retry)",
+                db_path.display()
+            )
+        } else {
+            format!("failed to copy cookies db: {error}")
+        }
+    })?;
     // Copy WAL/SHM sidecars so the snapshot includes recent writes.
     for suffix in ["-wal", "-shm"] {
         let source = PathBuf::from(format!("{}{suffix}", db_path.display()));
