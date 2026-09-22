@@ -269,8 +269,10 @@ fn collect_profile_cookies(db_path: &Path, keychain_secret: &[u8]) -> Result<Vec
 
     let keys = candidate_keys(keychain_secret);
     let mut pairs = Vec::new();
+    let mut matched_rows = 0usize;
     for row in rows {
         let (name, encrypted) = row.map_err(|error| format!("failed to read cookie row: {error}"))?;
+        matched_rows += 1;
         if name.is_empty() {
             continue;
         }
@@ -281,7 +283,43 @@ fn collect_profile_cookies(db_path: &Path, keychain_secret: &[u8]) -> Result<Vec
             .map_err(|error| format!("failed to decrypt cookie \"{name}\": {error}"))?;
         pairs.push((name, value));
     }
+    if pairs.is_empty() {
+        let diagnosis = diagnose_cookie_db(&connection)
+            .unwrap_or_else(|error| format!("diagnosis unavailable: {error}"));
+        return Err(format!(
+            "no cookies matched ({matched_rows} rows, {diagnosis}); sign in to https://platform.xiaomimimo.com in this browser and retry",
+        ));
+    }
     Ok(pairs)
+}
+
+/// Summarizes the cookie database when no rows matched so the error message
+/// distinguishes an empty or stale database from cookies stored under a
+/// related Xiaomi SSO host. Only xiaomi/mimo host names are surfaced.
+fn diagnose_cookie_db(connection: &rusqlite::Connection) -> Result<String, String> {
+    let total: i64 = connection
+        .query_row("SELECT COUNT(*) FROM cookies", [], |row| row.get(0))
+        .map_err(|error| format!("failed to count cookies: {error}"))?;
+    let mut statement = connection
+        .prepare(
+            "SELECT DISTINCT host_key FROM cookies
+             WHERE host_key LIKE '%mimo%' OR host_key LIKE '%xiaomi%'
+             ORDER BY host_key",
+        )
+        .map_err(|error| format!("failed to list related hosts: {error}"))?;
+    let hosts = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("failed to list related hosts: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to list related hosts: {error}"))?;
+    if hosts.is_empty() {
+        Ok(format!("{total} cookies stored, none for xiaomi/mimo hosts"))
+    } else {
+        Ok(format!(
+            "{total} cookies stored, related hosts: {}",
+            hosts.join(", ")
+        ))
+    }
 }
 
 /// Per the http crate, header values may be tab plus any byte in
@@ -357,5 +395,47 @@ mod tests {
     fn rejects_short_or_plain_values() {
         let keys = candidate_keys(b"peanuts");
         assert!(decrypt_cookie_value(b"plain", &keys).is_err());
+    }
+
+    #[test]
+    fn diagnosis_reports_related_hosts() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute(
+                "CREATE TABLE cookies (host_key TEXT NOT NULL, name TEXT NOT NULL)",
+                [],
+            )
+            .unwrap();
+        for host in ["example.com", ".xiaomimimo.com", "platform.xiaomimimo.com"] {
+            connection
+                .execute(
+                    "INSERT INTO cookies (host_key, name) VALUES (?1, 'session')",
+                    [host],
+                )
+                .unwrap();
+        }
+        let diagnosis = diagnose_cookie_db(&connection).unwrap();
+        assert!(diagnosis.contains("3 cookies stored"), "{diagnosis}");
+        assert!(diagnosis.contains(".xiaomimimo.com"), "{diagnosis}");
+        assert!(!diagnosis.contains("example.com"), "{diagnosis}");
+    }
+
+    #[test]
+    fn diagnosis_reports_unrelated_database() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute(
+                "CREATE TABLE cookies (host_key TEXT NOT NULL, name TEXT NOT NULL)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO cookies (host_key, name) VALUES ('example.com', 'a')",
+                [],
+            )
+            .unwrap();
+        let diagnosis = diagnose_cookie_db(&connection).unwrap();
+        assert_eq!(diagnosis, "1 cookies stored, none for xiaomi/mimo hosts");
     }
 }
