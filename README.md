@@ -11,9 +11,9 @@ It focuses on a small set of local and remote workflow gaps while keeping the Co
 - **Remote port forwarding**: detect and forward web ports from Codex SSH sessions so remote dev servers can be opened locally.
 - **Helper Settings**: configure Helper from a standalone window opened from the menu bar, with a UI that stays close to Codex.
 - **Usage-limit overlay hide**: optionally hide the *You're out of Codex and Work usage* card. This is visual only and does not reset or bypass account limits.
-- **Provider management**: switch ChatGPT desktop between Official ChatGPT login, API keys (DeepSeek, Kimi, MiniMax, DashScope, Zhipu GLM, Xiaomi MiMo, or custom), GitHub Copilot, and xAI Grok. Helper writes `~/.codex/config.toml` and a native-style model catalog. Copilot and Grok OAuth use device-code flows and store tokens in `~/.codex-helper/oauth/`.
+- **Provider management**: switch ChatGPT desktop between Official ChatGPT login and API providers (DeepSeek, Kimi, MiniMax, DashScope, Zhipu GLM, Xiaomi MiMo, GitHub Copilot, xAI Grok, or custom). API providers can be mixed: every selected provider's models appear in one Codex model list, and the local proxy routes each request by model. A catalog option on each provider, off by default, prefixes those model names with the provider name. Official login stays exclusive. Helper writes `~/.codex/config.toml` and a native-style model catalog. Copilot and Grok OAuth use device-code flows and store tokens in `~/.codex-helper/oauth/`.
 - **SSH sync**: Helper Settings → Sync pushes `providers.json`, OAuth tokens, and the active provider to other Macs over SSH. A replica Helper applies the incoming active provider locally.
-- **Local provider proxy**: non-Official traffic goes through `127.0.0.1:3721` (`/v1/responses` and `/v1/chat/completions`). Helper injects the upstream key, sanitizes ChatGPT-desktop tool payloads, and can expose named local Endpoint keys for other agents.
+- **Local provider proxy**: non-Official traffic goes through `127.0.0.1:3721` (`/v1/responses` and `/v1/chat/completions`). Helper injects the upstream key for the routed provider, sanitizes ChatGPT-desktop tool payloads, and retries a custom-tool rejection once as function tools. It can also expose named local Endpoint keys for other agents. A failed request does not switch providers.
 
 ## Characteristics
 
