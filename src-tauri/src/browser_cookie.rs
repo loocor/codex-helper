@@ -5,11 +5,13 @@
 //! 1. Copy the profile's SQLite `Cookies` database (plus WAL/SHM) to a
 //!    temporary directory to avoid lock contention with the running browser.
 //! 2. Read `host_key` / `name` / `encrypted_value` rows for
-//!    `xiaomimimo.com` hosts.
+//!    `xiaomimimo.com` hosts. `host_key` is required: Chrome cookie DB
+//!    version >= 24 prefixes the plaintext with `SHA256(host_key)`.
 //! 3. Fetch the browser's "Safe Storage" secret from the macOS Keychain and
 //!    derive the AES-128 key (PBKDF2-HMAC-SHA1, salt `saltysalt`, 1003
 //!    iterations; a 32-char hex secret is used directly as the raw key).
-//! 4. Decrypt `v10`/`v11` cookies (AES-128-CBC, IV = 16 spaces, PKCS7) and
+//! 4. Decrypt `v10`/`v11` cookies (AES-128-CBC, IV = 16 spaces, PKCS7),
+//!    drop the host hash only when it matches that row's `host_key`, and
 //!    assemble a `Cookie:` header value.
 //!
 //! Every failure path produces an explicit error; nothing falls back
@@ -20,9 +22,15 @@ use std::process::Command;
 
 use aes::Aes128;
 use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+use sha2::{Digest, Sha256};
 
 const MIMO_COOKIE_HOST: &str = "xiaomimimo.com";
+const PLATFORM_SESSION_COOKIE: &str = "api-platform_serviceToken";
+const PLATFORM_CONSOLE_URL: &str = "https://platform.xiaomimimo.com/#/console/balance";
 const KEY_LEN: usize = 16;
+const HOST_HASH_LEN: usize = 32;
+/// Microseconds between 1601-01-01 (Chrome cookie epoch) and Unix epoch.
+const CHROME_EPOCH_UNIX_MICROS: i64 = 11_644_473_600 * 1_000_000;
 const IV: [u8; 16] = [0x20; 16];
 
 type Aes128CbcDec = cbc::Decryptor<Aes128>;
@@ -65,15 +73,29 @@ pub fn fetch_mimo_cookie_header() -> Result<Vec<u8>, String> {
     for browser in BROWSERS {
         match collect_browser_cookies(browser, &user_dirs) {
             Ok(header) if !header.is_empty() => return Ok(header),
-            Ok(_) => failures.push(format!("{}: no {} cookies found", browser.name, MIMO_COOKIE_HOST)),
+            Ok(_) => failures.push(format!(
+                "{}: no {} cookies found",
+                browser.name, MIMO_COOKIE_HOST
+            )),
             Err(error) => failures.push(format!("{}: {}", browser.name, error)),
         }
     }
-    Err(format!(
-        "Could not read {} cookies from any supported browser. Sign in to https://platform.xiaomimimo.com in Chrome, Edge, or Arc, then retry. Attempts: {}",
-        MIMO_COOKIE_HOST,
-        failures.join("; ")
-    ))
+    Err(format_mimo_cookie_failure(&failures.join("; ")))
+}
+
+fn format_mimo_cookie_failure(attempts: &str) -> String {
+    if attempts.contains("Full Disk Access")
+        || attempts.contains("Keychain rejected")
+        || attempts.contains("Keychain item")
+    {
+        return format!("Could not read browser cookies. {attempts}");
+    }
+    if attempts.contains("could not decrypt") {
+        return format!("MiMo console cookie decryption failed. {attempts}");
+    }
+    format!(
+        "Could not read a MiMo console session ({PLATFORM_SESSION_COOKIE}) from Chrome, Edge, or Arc. Open {PLATFORM_CONSOLE_URL} and wait until the balance page loads /api/v1/balance, then retry. Opening https://mimo.org is not enough, and account.xiaomi.com cookies are not used. Attempts: {attempts}"
+    )
 }
 
 fn user_application_support_dir() -> Result<PathBuf, String> {
@@ -118,10 +140,7 @@ fn collect_browser_cookies(browser: &BrowserSpec, user_dirs: &Path) -> Result<Ve
         } else {
             failures.join("; ")
         };
-        return Err(format!(
-            "failed to read cookies ({detail}); sign in to https://platform.xiaomimimo.com in {} and approve Keychain access, then retry",
-            browser.name
-        ));
+        return Err(browser_cookie_failure(browser.name, &detail));
     }
 
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
@@ -224,7 +243,10 @@ fn hex_decode(input: &[u8]) -> Result<Vec<u8>, String> {
         .collect()
 }
 
-fn collect_profile_cookies(db_path: &Path, keychain_secret: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
+fn collect_profile_cookies(
+    db_path: &Path,
+    keychain_secret: &[u8],
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     let temp = tempfile::Builder::new()
         .prefix("codex-helper-cookies-")
         .tempdir()
@@ -244,10 +266,7 @@ fn collect_profile_cookies(db_path: &Path, keychain_secret: &[u8]) -> Result<Vec
     for suffix in ["-wal", "-shm"] {
         let source = PathBuf::from(format!("{}{suffix}", db_path.display()));
         if source.is_file() {
-            let _ = std::fs::copy(
-                &source,
-                temp.path().join(format!("Cookies{suffix}")),
-            );
+            let _ = std::fs::copy(&source, temp.path().join(format!("Cookies{suffix}")));
         }
     }
 
@@ -257,40 +276,144 @@ fn collect_profile_cookies(db_path: &Path, keychain_secret: &[u8]) -> Result<Vec
     )
     .map_err(|error| format!("failed to open cookies db: {error}"))?;
 
+    let db_version = cookie_db_version(&connection);
     let mut statement = connection
-        .prepare("SELECT name, encrypted_value FROM cookies WHERE host_key LIKE ?1")
+        .prepare(
+            "SELECT host_key, name, encrypted_value, expires_utc, is_persistent
+             FROM cookies WHERE host_key LIKE ?1",
+        )
         .map_err(|error| format!("failed to query cookies db: {error}"))?;
     let pattern = format!("%{MIMO_COOKIE_HOST}%");
     let rows = statement
         .query_map([pattern], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
         })
         .map_err(|error| format!("failed to query cookies db: {error}"))?;
 
     let keys = candidate_keys(keychain_secret);
+    let now_unix_micros = unix_time_micros();
     let mut pairs = Vec::new();
-    let mut matched_rows = 0usize;
+    let mut matched_names = Vec::new();
+    let mut decrypt_errors = Vec::new();
+    let mut saw_expired_session = false;
     for row in rows {
-        let (name, encrypted) = row.map_err(|error| format!("failed to read cookie row: {error}"))?;
-        matched_rows += 1;
+        let (host_key, name, encrypted, expires_utc, is_persistent) =
+            row.map_err(|error| format!("failed to read cookie row: {error}"))?;
         if name.is_empty() {
             continue;
         }
-        if encrypted.is_empty() {
+        matched_names.push(name.clone());
+        if cookie_is_expired_at(is_persistent, expires_utc, now_unix_micros) {
+            if name == PLATFORM_SESSION_COOKIE {
+                saw_expired_session = true;
+            }
             continue;
         }
-        let value = decrypt_cookie_value(&encrypted, &keys)
-            .map_err(|error| format!("failed to decrypt cookie \"{name}\": {error}"))?;
-        pairs.push((name, value));
+        if encrypted.is_empty() {
+            decrypt_errors.push(format!(
+                "cookie \"{name}\" on {host_key} has an empty encrypted value"
+            ));
+            continue;
+        }
+        match decrypt_cookie_value(&encrypted, &host_key, db_version, &keys) {
+            Ok(value) => pairs.push((name, value)),
+            Err(error) => decrypt_errors.push(format!(
+                "failed to decrypt cookie \"{name}\" on {host_key}: {error}"
+            )),
+        }
     }
-    if pairs.is_empty() {
-        let diagnosis = diagnose_cookie_db(&connection)
-            .unwrap_or_else(|error| format!("diagnosis unavailable: {error}"));
+    if pairs
+        .iter()
+        .any(|(name, _)| name == PLATFORM_SESSION_COOKIE)
+    {
+        // Optional cookies such as api-platform_ph must not hide a decrypted
+        // session token. Their failures are omitted once the session exists.
+        return Ok(pairs);
+    }
+    let session_decrypt_error = decrypt_errors
+        .iter()
+        .find(|error| error.contains(PLATFORM_SESSION_COOKIE));
+    if let Some(error) = session_decrypt_error {
         return Err(format!(
-            "no cookies matched ({matched_rows} rows, {diagnosis}); sign in to https://platform.xiaomimimo.com in this browser and retry",
+            "Found {PLATFORM_SESSION_COOKIE} but could not decrypt it: {error}. Full Disk Access is not the problem"
         ));
     }
-    Ok(pairs)
+    let diagnosis = diagnose_cookie_db(&connection)
+        .unwrap_or_else(|error| format!("diagnosis unavailable: {error}"));
+    Err(missing_platform_session_error(
+        &diagnosis,
+        &matched_names,
+        saw_expired_session,
+        &decrypt_errors,
+    ))
+}
+
+fn cookie_db_version(connection: &rusqlite::Connection) -> Option<i64> {
+    connection
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'version'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()
+}
+
+fn unix_time_micros() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_micros()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+fn cookie_is_expired_at(is_persistent: i64, expires_utc: i64, now_unix_micros: i64) -> bool {
+    if is_persistent == 0 || expires_utc <= 0 {
+        return false;
+    }
+    expires_utc < now_unix_micros.saturating_add(CHROME_EPOCH_UNIX_MICROS)
+}
+
+fn browser_cookie_failure(browser_name: &str, detail: &str) -> String {
+    if detail.contains(PLATFORM_SESSION_COOKIE) {
+        return detail.to_string();
+    }
+    format!(
+        "failed to read cookies ({detail}); sign in to {PLATFORM_CONSOLE_URL} in {browser_name} and approve Keychain access, then retry"
+    )
+}
+
+fn missing_platform_session_error(
+    diagnosis: &str,
+    matched_names: &[String],
+    expired_session: bool,
+    decrypt_errors: &[String],
+) -> String {
+    let matched = if matched_names.is_empty() {
+        format!("no {MIMO_COOKIE_HOST} rows")
+    } else {
+        format!(
+            "{MIMO_COOKIE_HOST} cookies present: {}",
+            matched_names.join(", ")
+        )
+    };
+    let mut message = if expired_session {
+        format!(
+            "{PLATFORM_SESSION_COOKIE} is in the browser cookie database but has expired. Open {PLATFORM_CONSOLE_URL} and wait until the balance page loads /api/v1/balance, then retry. It lasts about 24 hours. {matched}. {diagnosis}. Full Disk Access is not the problem"
+        )
+    } else {
+        format!(
+            "No MiMo console session ({PLATFORM_SESSION_COOKIE} on .platform.xiaomimimo.com). {matched}. {diagnosis}. Open {PLATFORM_CONSOLE_URL} and wait until the balance page loads /api/v1/balance, then retry. That cookie lasts about 24 hours and is missing after expiry or a browser restart. Opening https://mimo.org does not create it, and account.xiaomi.com cookies cannot be exchanged for it. Full Disk Access is not the problem"
+        )
+    };
+    if !decrypt_errors.is_empty() {
+        message.push_str(&format!(". Decrypt errors: {}", decrypt_errors.join("; ")));
+    }
+    message
 }
 
 /// Summarizes the cookie database when no rows matched so the error message
@@ -313,7 +436,9 @@ fn diagnose_cookie_db(connection: &rusqlite::Connection) -> Result<String, Strin
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("failed to list related hosts: {error}"))?;
     if hosts.is_empty() {
-        Ok(format!("{total} cookies stored, none for xiaomi/mimo hosts"))
+        Ok(format!(
+            "{total} cookies stored, none for xiaomi/mimo hosts"
+        ))
     } else {
         Ok(format!(
             "{total} cookies stored, related hosts: {}",
@@ -326,12 +451,17 @@ fn diagnose_cookie_db(connection: &rusqlite::Connection) -> Result<String, Strin
 /// 0x20..=0x7e and the opaque range 0x80..=0xff; anything else (control
 /// bytes, DEL) means the decryption produced garbage.
 fn is_valid_cookie_value(value: &[u8]) -> bool {
-    value.iter().all(|byte| {
-        matches!(byte, 0x09 | 0x20..=0x7e | 0x80..=0xff)
-    })
+    value
+        .iter()
+        .all(|byte| matches!(byte, 0x09 | 0x20..=0x7e | 0x80..=0xff))
 }
 
-fn decrypt_cookie_value(encrypted: &[u8], keys: &[[u8; KEY_LEN]]) -> Result<Vec<u8>, String> {
+fn decrypt_cookie_value(
+    encrypted: &[u8],
+    host_key: &str,
+    db_version: Option<i64>,
+    keys: &[[u8; KEY_LEN]],
+) -> Result<Vec<u8>, String> {
     let (version, ciphertext) = match encrypted.first() {
         Some(b'v') if encrypted.len() > 3 => (encrypted[..3].to_vec(), &encrypted[3..]),
         _ => return Err("unexpected cookie encryption format".to_string()),
@@ -344,26 +474,52 @@ fn decrypt_cookie_value(encrypted: &[u8], keys: &[[u8; KEY_LEN]]) -> Result<Vec<
     }
     let mut last_error = String::from("no key could decrypt this cookie");
     for key in keys {
-        match Aes128CbcDec::new(key.into(), &IV.into())
-            .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
+        match Aes128CbcDec::new(key.into(), &IV.into()).decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
         {
-            Ok(plain) => {
-                // A wrong key can still pass the PKCS7 check by chance and
-                // produce garbage bytes; such values would corrupt the
-                // Cookie header, so treat them as decryption failures.
-                // Values with high bytes (>= 0x80) are legitimate: some
-                // servers set UTF-8 cookie values, and Chromium sends them
-                // verbatim as opaque header bytes.
-                if !plain.is_empty() && is_valid_cookie_value(&plain) {
-                    return Ok(plain);
-                }
-                last_error = "decrypted value was empty or contained invalid control bytes"
-                    .to_string();
-            }
+            Ok(plain) => match cookie_plaintext(&plain, host_key, db_version) {
+                Ok(value) => return Ok(value),
+                Err(error) => last_error = error,
+            },
             Err(error) => last_error = format!("decryption failed: {error}"),
         }
     }
     Err(last_error)
+}
+
+/// Chrome cookie DB version >= 24 prefixes plaintext with SHA256(host_key)
+/// before encryption. Remove that prefix only when it matches this row.
+/// A mismatch is rejected on version >= 24 and left unstripped otherwise,
+/// so an older database is not sliced unconditionally.
+fn cookie_plaintext(
+    plain: &[u8],
+    host_key: &str,
+    db_version: Option<i64>,
+) -> Result<Vec<u8>, String> {
+    let digest = Sha256::digest(host_key.as_bytes());
+    let hash_matches =
+        plain.len() >= HOST_HASH_LEN && plain[..HOST_HASH_LEN] == digest.as_slice()[..];
+    if hash_matches {
+        let value = &plain[HOST_HASH_LEN..];
+        if value.is_empty() || !is_valid_cookie_value(value) {
+            return Err(
+                "decrypted cookie was empty or contained invalid control bytes after removing SHA256(host_key)"
+                    .to_string(),
+            );
+        }
+        return Ok(value.to_vec());
+    }
+    if db_version.is_some_and(|version| version >= 24) {
+        return Err("decrypted cookie did not start with SHA256(host_key)".to_string());
+    }
+    // A wrong key can still pass the PKCS7 check by chance and produce
+    // garbage bytes; such values would corrupt the Cookie header, so treat
+    // them as decryption failures. Values with high bytes (>= 0x80) are
+    // legitimate: some servers set UTF-8 cookie values, and Chromium sends
+    // them verbatim as opaque header bytes.
+    if plain.is_empty() || !is_valid_cookie_value(plain) {
+        return Err("decrypted value was empty or contained invalid control bytes".to_string());
+    }
+    Ok(plain.to_vec())
 }
 
 #[cfg(test)]
@@ -387,14 +543,122 @@ mod tests {
     #[test]
     fn rejects_unknown_encryption_version() {
         let keys = candidate_keys(b"peanuts");
-        let error = decrypt_cookie_value(b"v20-not-really", &keys).unwrap_err();
+        let error =
+            decrypt_cookie_value(b"v20-not-really", "example.com", Some(24), &keys).unwrap_err();
         assert!(error.contains("v20"), "unexpected error: {error}");
     }
 
     #[test]
     fn rejects_short_or_plain_values() {
         let keys = candidate_keys(b"peanuts");
-        assert!(decrypt_cookie_value(b"plain", &keys).is_err());
+        assert!(decrypt_cookie_value(b"plain", "example.com", Some(24), &keys).is_err());
+    }
+
+    #[test]
+    fn strips_verified_host_hash_prefix() {
+        let keys = candidate_keys(b"peanuts");
+        let host = ".platform.xiaomimimo.com";
+        let value = b"api-platform-session";
+        let encrypted = encrypt_cookie(&keys[0], &with_host_hash(host, value));
+        let decrypted = decrypt_cookie_value(&encrypted, host, Some(24), &keys).unwrap();
+        assert_eq!(decrypted, value);
+        let without_version = decrypt_cookie_value(&encrypted, host, None, &keys).unwrap();
+        assert_eq!(without_version, value);
+    }
+
+    #[test]
+    fn keeps_legacy_cookie_without_host_hash() {
+        let keys = candidate_keys(b"peanuts");
+        let host = ".platform.xiaomimimo.com";
+        let value = b"legacy-cookie-value-longer-than-thirty-two-bytes";
+        let encrypted = encrypt_cookie(&keys[0], value);
+        let decrypted = decrypt_cookie_value(&encrypted, host, Some(23), &keys).unwrap();
+        assert_eq!(decrypted, value);
+    }
+
+    #[test]
+    fn rejects_mismatched_host_hash_on_modern_db() {
+        let keys = candidate_keys(b"peanuts");
+        let host = ".platform.xiaomimimo.com";
+        let encrypted = encrypt_cookie(
+            &keys[0],
+            &with_host_hash("wrong.example", b"api-platform-session"),
+        );
+        let error = decrypt_cookie_value(&encrypted, host, Some(24), &keys).unwrap_err();
+        assert!(
+            error.contains("did not start with SHA256(host_key)"),
+            "{error}"
+        );
+        assert!(!error.contains("api-platform-session"), "{error}");
+    }
+
+    #[test]
+    fn does_not_slice_unverified_prefix_on_legacy_db() {
+        let keys = candidate_keys(b"peanuts");
+        let host = ".platform.xiaomimimo.com";
+        let encrypted = encrypt_cookie(
+            &keys[0],
+            &with_host_hash("wrong.example", b"api-platform-session"),
+        );
+        let error = decrypt_cookie_value(&encrypted, host, Some(23), &keys).unwrap_err();
+        assert!(error.contains("invalid control bytes"), "{error}");
+        assert!(
+            !error.contains("after removing SHA256(host_key)"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn missing_session_message_does_not_blame_keychain() {
+        let message = missing_platform_session_error(
+            "1815 cookies stored, related hosts: .account.xiaomi.com, .mimo.org",
+            &[],
+            false,
+            &[],
+        );
+        assert!(message.contains(PLATFORM_SESSION_COOKIE), "{message}");
+        assert!(message.contains(PLATFORM_CONSOLE_URL), "{message}");
+        assert!(message.contains("mimo.org"), "{message}");
+        assert!(
+            message.contains("Full Disk Access is not the problem"),
+            "{message}"
+        );
+        assert!(!message.contains("Keychain"), "{message}");
+        let wrapped = browser_cookie_failure("Chrome", &message);
+        assert_eq!(wrapped, message);
+        let decrypt = format_mimo_cookie_failure(
+            "Chrome: Found api-platform_serviceToken but could not decrypt it",
+        );
+        assert!(
+            decrypt.starts_with("MiMo console cookie decryption failed"),
+            "{decrypt}"
+        );
+    }
+
+    #[test]
+    fn expired_session_cookie_is_not_live() {
+        let now = 1_700_000_000_000_000;
+        let expired = now + CHROME_EPOCH_UNIX_MICROS - 1;
+        let fresh = now + CHROME_EPOCH_UNIX_MICROS + 1_000;
+        assert!(cookie_is_expired_at(1, expired, now));
+        assert!(!cookie_is_expired_at(1, fresh, now));
+        assert!(!cookie_is_expired_at(0, expired, now));
+    }
+
+    fn encrypt_cookie(key: &[u8; KEY_LEN], plain: &[u8]) -> Vec<u8> {
+        use cbc::cipher::BlockEncryptMut;
+        let mut packet = b"v10".to_vec();
+        packet.extend(
+            cbc::Encryptor::<Aes128>::new(key.into(), &IV.into())
+                .encrypt_padded_vec_mut::<Pkcs7>(plain),
+        );
+        packet
+    }
+
+    fn with_host_hash(host_key: &str, value: &[u8]) -> Vec<u8> {
+        let mut plain = Sha256::digest(host_key.as_bytes()).to_vec();
+        plain.extend_from_slice(value);
+        plain
     }
 
     #[test]
