@@ -21,7 +21,7 @@ use crate::provider_oauth::{
 };
 use crate::providers::{
     provider_device_oauth_kind, provider_is_bigmodel, provider_is_deepseek, provider_is_kimi,
-    provider_is_minimax, read_store, Provider, ProviderStore,
+    provider_is_mimo, provider_is_minimax, read_store, Provider, ProviderStore,
 };
 
 const CHATGPT_USAGE_URL: &str = "https://chatgpt.com/";
@@ -210,6 +210,9 @@ async fn query_live_usage(
     }
     if provider_is_kimi(provider) {
         return query_kimi_usage(provider).await.map(Some);
+    }
+    if provider_is_mimo(provider) {
+        return query_mimo_usage(provider).await.map(Some);
     }
     if let Some(OAuthKind::GithubCopilot) = provider_device_oauth_kind(provider) {
         if oauth_is_signed_in(state_root, OAuthKind::GithubCopilot) {
@@ -1026,6 +1029,222 @@ fn live_usage_from_kimi_balance(body: KimiBalanceResponse) -> Result<LiveUsage, 
         used_percent: None,
         resets_at: None,
     })
+}
+
+// Xiaomi MiMo Platform authenticates console APIs with the browser session
+// cookie instead of the provider API key, so queries reuse the cookie jar of
+// a local Chromium-family browser.
+const MIMO_API_BASE: &str = "https://platform.xiaomimimo.com/api/v1";
+
+async fn query_mimo_usage(_provider: &Provider) -> Result<LiveUsage, String> {
+    let cookie_header = crate::browser_cookie::fetch_mimo_cookie_header()?;
+    let client = http_client().map_err(|error| error.to_string())?;
+
+    // A MiMo account may use pay-as-you-go balance, a Token Plan
+    // subscription, or both, so each source is queried independently and a
+    // single-source failure is reported inline instead of failing the whole
+    // query when the other source still answers.
+    let balance = mimo_get::<MimoBalanceData>(&client, &cookie_header, "/balance").await;
+    let usage = mimo_get::<MimoPlanUsageData>(&client, &cookie_header, "/tokenPlan/usage").await;
+    let detail = mimo_get::<MimoPlanDetailData>(&client, &cookie_header, "/tokenPlan/detail").await;
+
+    live_usage_from_mimo(balance, usage, detail)
+}
+
+async fn mimo_get<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    cookie_header: &str,
+    path: &str,
+) -> Result<T, String> {
+    let response = client
+        .get(format!("{MIMO_API_BASE}{path}"))
+        .header("Cookie", cookie_header)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|error| format!("MiMo usage query failed: {error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Failed to read MiMo usage response: {error}"))?;
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(format!(
+            "MiMo usage query failed (HTTP {status}): browser cookies are not signed in to platform.xiaomimimo.com; sign in and retry"
+        ));
+    }
+    if !status.is_success() {
+        return Err(format!("MiMo usage query failed (HTTP {status}): {body}"));
+    }
+    let parsed: MimoEnvelope<T> = serde_json::from_str(&body)
+        .map_err(|error| format!("MiMo usage response was not valid JSON: {error}"))?;
+    match parsed.code {
+        Some(0) | Some(200) | None => {}
+        Some(401) => {
+            return Err(
+                "MiMo usage query failed (code 401): browser cookies are not signed in to platform.xiaomimimo.com; sign in and retry"
+                    .to_string(),
+            )
+        }
+        Some(code) => {
+            return Err(format!(
+                "MiMo usage query failed (code {code}): {}",
+                parsed.message.unwrap_or_default()
+            ))
+        }
+    }
+    parsed
+        .data
+        .ok_or_else(|| format!("MiMo usage response had no data for {path}"))
+}
+
+#[derive(Debug, Deserialize)]
+struct MimoEnvelope<T> {
+    code: Option<i64>,
+    message: Option<String>,
+    #[allow(dead_code)]
+    login_url: Option<String>,
+    data: Option<T>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MimoBalanceData {
+    balance: Option<f64>,
+    #[serde(rename = "giftBalance")]
+    gift_balance: Option<f64>,
+    #[allow(dead_code)]
+    currency: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MimoPlanUsageData {
+    usage: Option<MimoPlanUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MimoPlanUsage {
+    items: Option<Vec<MimoPlanUsageItem>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MimoPlanUsageItem {
+    name: Option<String>,
+    used: Option<f64>,
+    limit: Option<f64>,
+    percent: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MimoPlanDetailData {
+    #[serde(rename = "planName")]
+    plan_name: Option<String>,
+    #[serde(rename = "currentPeriodEnd")]
+    current_period_end: Option<String>,
+}
+
+fn live_usage_from_mimo(
+    balance: Result<MimoBalanceData, String>,
+    usage: Result<MimoPlanUsageData, String>,
+    detail: Result<MimoPlanDetailData, String>,
+) -> Result<LiveUsage, String> {
+    if balance.is_err() && usage.is_err() {
+        return Err(format!(
+            "MiMo usage query failed. balance: {}; token plan: {}",
+            balance.unwrap_err(),
+            usage.unwrap_err()
+        ));
+    }
+
+    let mut summaries: Vec<String> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    let mut used_percent: Option<f64> = None;
+    let mut resets_at: Option<String> = None;
+
+    match usage {
+        Ok(data) => {
+            let plan = mimo_plan_percent(&data);
+            match plan {
+                Some((percent, used, limit)) => {
+                    used_percent = Some(percent);
+                    let tokens = match (used, limit) {
+                        (Some(used), Some(limit)) if limit > 0.0 => {
+                            format!(" ({}/{} tokens)", format_number(used), format_number(limit))
+                        }
+                        _ => String::new(),
+                    };
+                    summaries.push(format!("plan {percent:.1}% used{tokens}"));
+                }
+                None => summaries.push("plan usage not available".to_string()),
+            }
+        }
+        Err(error) => failures.push(format!("token plan: {error}")),
+    }
+
+    match detail {
+        Ok(data) => {
+            if let Some(name) = data.plan_name.as_deref().filter(|name| !name.is_empty()) {
+                summaries.insert(0, format!("plan {name}"));
+            }
+            if let Some(period_end) = data
+                .current_period_end
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                resets_at = Some(period_end.to_string());
+            }
+        }
+        Err(error) => failures.push(format!("plan detail: {error}")),
+    }
+
+    match balance {
+        Ok(data) => {
+            if let Some(amount) = data.balance {
+                let mut balance_summary = format!("¥{amount:.2} balance");
+                if let Some(gift) = data.gift_balance.filter(|gift| *gift > 0.0) {
+                    balance_summary.push_str(&format!(" (gift ¥{gift:.2})"));
+                }
+                summaries.push(balance_summary);
+            }
+        }
+        Err(error) => failures.push(format!("balance: {error}")),
+    }
+
+    let mut summary = summaries.join(" · ");
+    if !failures.is_empty() {
+        summary.push_str(&format!(" ({})", failures.join("; ")));
+    }
+    Ok(LiveUsage {
+        used_percent,
+        resets_at,
+        summary,
+    })
+}
+
+/// Picks the primary (non-compensation) usage item as the plan percentage.
+fn mimo_plan_percent(data: &MimoPlanUsageData) -> Option<(f64, Option<f64>, Option<f64>)> {
+    let items = data.usage.as_ref()?.items.as_ref()?;
+    items
+        .iter()
+        .filter(|item| item.name.as_deref() != Some("compensation_total_token"))
+        .find_map(|item| {
+            let percent = item.percent?;
+            if !percent.is_finite() {
+                return None;
+            }
+            let used = item.used.filter(|value| value.is_finite());
+            let limit = item.limit.filter(|value| value.is_finite());
+            Some((percent.clamp(0.0, 100.0), used, limit))
+        })
+}
+
+fn format_number(value: f64) -> String {
+    if value >= 1_000_000.0 {
+        format!("{:.1}M", value / 1_000_000.0)
+    } else if value >= 1_000.0 {
+        format!("{:.1}k", value / 1_000.0)
+    } else {
+        format!("{value:.0}")
+    }
 }
 
 async fn query_copilot_usage(github_token: &str) -> Result<LiveUsage, String> {
@@ -1944,6 +2163,97 @@ mod tests {
         .expect("usage");
         assert_eq!(live.used_percent, None);
         assert_eq!(live.summary, "¥54.78 remaining (voucher ¥1.50)");
+    }
+
+    fn mimo_usage_item(name: &str, used: f64, limit: f64, percent: f64) -> MimoPlanUsageItem {
+        MimoPlanUsageItem {
+            name: Some(name.to_string()),
+            used: Some(used),
+            limit: Some(limit),
+            percent: Some(percent),
+        }
+    }
+
+    #[test]
+    fn mimo_plan_percent_becomes_used_percent() {
+        let usage = MimoPlanUsageData {
+            usage: Some(MimoPlanUsage {
+                items: Some(vec![
+                    mimo_usage_item("total_token", 3_750_000.0, 10_000_000.0, 37.5),
+                    mimo_usage_item("compensation_total_token", 1_000.0, 0.0, 0.0),
+                ]),
+            }),
+        };
+        let live = live_usage_from_mimo(
+            Err("skipped".to_string()),
+            Ok(usage),
+            Ok(MimoPlanDetailData {
+                plan_name: Some("Lite".to_string()),
+                current_period_end: Some("2026-10-01T00:00:00Z".to_string()),
+            }),
+        )
+        .expect("usage");
+        assert_eq!(live.used_percent, Some(37.5));
+        assert!(live.summary.contains("plan Lite"), "{}", live.summary);
+        assert!(live.summary.contains("37.5% used"), "{}", live.summary);
+        assert!(live.summary.contains("(3.8M/10.0M tokens)"), "{}", live.summary);
+        assert_eq!(live.resets_at.as_deref(), Some("2026-10-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn mimo_balance_only_account_reports_balance() {
+        let live = live_usage_from_mimo(
+            Ok(MimoBalanceData {
+                balance: Some(12.345),
+                gift_balance: Some(5.0),
+                currency: None,
+            }),
+            Err("token plan: MiMo usage query failed (code 1001): no subscription".to_string()),
+            Err("plan detail: MiMo usage query failed (code 1001): no subscription".to_string()),
+        )
+        .expect("usage");
+        assert_eq!(live.used_percent, None);
+        assert!(live.summary.contains("¥12.35 balance"), "{}", live.summary);
+        assert!(live.summary.contains("gift ¥5.00"), "{}", live.summary);
+        assert!(live.summary.contains("token plan:"), "{}", live.summary);
+    }
+
+    #[test]
+    fn mimo_all_sources_failed_is_an_error() {
+        let error = live_usage_from_mimo(
+            Err("balance: HTTP 500".to_string()),
+            Err("token plan: HTTP 500".to_string()),
+            Err("plan detail: HTTP 500".to_string()),
+        )
+        .expect_err("rejected");
+        assert!(error.contains("balance:"), "{}", error);
+        assert!(error.contains("token plan:"), "{}", error);
+    }
+
+    #[test]
+    fn mimo_compensation_only_usage_has_no_percent() {
+        let usage = MimoPlanUsageData {
+            usage: Some(MimoPlanUsage {
+                items: Some(vec![mimo_usage_item(
+                    "compensation_total_token",
+                    1_000.0,
+                    2_000.0,
+                    50.0,
+                )]),
+            }),
+        };
+        let live = live_usage_from_mimo(
+            Ok(MimoBalanceData {
+                balance: None,
+                gift_balance: None,
+                currency: None,
+            }),
+            Ok(usage),
+            Err("plan detail: skipped".to_string()),
+        )
+        .expect("usage");
+        assert_eq!(live.used_percent, None);
+        assert!(live.summary.contains("plan usage not available"), "{}", live.summary);
     }
 
     #[test]

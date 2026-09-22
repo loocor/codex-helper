@@ -1,5 +1,6 @@
 mod app;
 mod bridge;
+mod browser_cookie;
 mod cdp;
 mod codex_control;
 pub mod codex_live;
