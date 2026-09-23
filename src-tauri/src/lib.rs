@@ -8,6 +8,7 @@ mod compat_custom;
 mod debug_port;
 mod deepseek_sanitize;
 mod endpoint;
+mod failover;
 mod launch_at_login;
 mod launcher;
 mod llm_compat_inventory;

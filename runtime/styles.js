@@ -1151,6 +1151,12 @@ function installHelperStyles() {
         opacity: 1;
         stroke-dashoffset: calc(62.831853 * (1 - var(--usage-percent) / 100));
       }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-provider-usage-pie[data-quota-exhausted] .codex-helper-provider-usage-fill {
+        stroke: #e5484d;
+      }
+      [${helperNativeSettingsPageAttribute}] .codex-helper-provider-usage-pie[data-quota-exhausted] .codex-helper-provider-usage-track {
+        stroke: color-mix(in srgb, #e5484d 20%, transparent);
+      }
       [${helperNativeSettingsPageAttribute}] .codex-helper-provider-row > .codex-helper-switch {
         flex: 0 0 auto;
       }

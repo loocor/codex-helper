@@ -555,9 +555,15 @@ function setProviderUsagePie(node, { percent, tooltip, checking = false }) {
   if (percent == null) {
     node.style.removeProperty("--usage-percent");
     node.removeAttribute("data-has-usage");
+    node.removeAttribute("data-quota-exhausted");
   } else {
     node.style.setProperty("--usage-percent", String(percent));
     node.setAttribute("data-has-usage", "true");
+    if (percent >= 100) {
+      node.setAttribute("data-quota-exhausted", "");
+    } else {
+      node.removeAttribute("data-quota-exhausted");
+    }
   }
   if (tooltip) {
     node.setAttribute("title", tooltip);

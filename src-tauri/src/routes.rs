@@ -951,7 +951,11 @@ async fn providers_usage_response(state_root: &std::path::Path, payload: &Value)
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim();
-    query_provider_usage(state_root, id).await
+    let result = query_provider_usage(state_root, id).await;
+    if let Some(percent) = result.get("usedPercent").and_then(Value::as_f64) {
+        crate::failover::QuotaState::global().record_percent(id, percent);
+    }
+    result
 }
 
 fn providers_usage_open_response(state_root: &std::path::Path, payload: &Value) -> Value {

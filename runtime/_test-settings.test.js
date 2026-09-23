@@ -329,8 +329,14 @@ test("settings page exposes provider management", () => {
   expect(settingsSource).toContain("createProviderUsagePie");
   expect(settingsSource).toContain("codex-helper-provider-usage-pie");
   expect(settingsSource).toContain("open-provider-usage");
+  expect(settingsSource).toContain("data-quota-exhausted");
   expect(settingsSource).not.toContain("createProviderUsageLine");
   expect(settingsSource).not.toContain('link.textContent = "Usage"');
+});
+
+test("usage pie marks quota exhausted at 100 percent", () => {
+  expect(settingsSource).toContain("data-quota-exhausted");
+  expect(settingsSource).toContain("percent >= 100");
 });
 
 test("settings page exposes usage-limit overlay hide switch", () => {

@@ -141,6 +141,19 @@ fn upstream_error_excerpt(bytes: &[u8]) -> String {
     excerpt
 }
 
+
+struct ForwardAttempt {
+    provider: Provider,
+    response: reqwest::Response,
+    restore: NativeRestore,
+    retry_json: Option<Value>,
+    pending_log: Option<PendingLlmLog>,
+    url: String,
+    oauth_kind: Option<OAuthKind>,
+    responses_path: bool,
+    routed_upstream: Option<String>,
+}
+
 type ProxyBody = BoxBody<Bytes, io::Error>;
 
 pub const PROVIDER_PROXY_PORT: u16 = 3721;
@@ -300,7 +313,7 @@ impl ProviderProxy {
             .find(|item| item.id == store.active_id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("No active provider"))?;
-        let mut routed_upstream = None;
+        let mut routed_upstream: Option<String> = None;
         if method == hyper::Method::POST && is_llm_path(&path) {
             if let Ok(json_body) = serde_json::from_slice::<Value>(&raw_body) {
                 if let Some(model) = json_body.get("model").and_then(Value::as_str) {
@@ -315,79 +328,181 @@ impl ProviderProxy {
             anyhow::bail!("Official ChatGPT login does not use the Helper provider proxy");
         }
         self.authorize_request(&headers, &provider, &store)?;
-        let upstream = provider.base_url.trim().trim_end_matches('/');
-        if upstream.is_empty() {
-            anyhow::bail!("Active provider has no base URL");
-        }
-        let oauth_kind = provider_device_oauth_kind(&provider);
-        let upstream = oauth_kind
-            .map(|kind| kind.default_base_url().to_string())
-            .unwrap_or_else(|| upstream.to_string());
-        let url = join_provider_upstream_url_for(oauth_kind, &upstream, &path);
-        let mut body = raw_body.to_vec();
-        let xai_compat = provider_needs_xai_compat(&provider);
-        let deepseek_sanitize = provider_needs_deepseek_responses_sanitize(&provider);
-        let responses_path = is_responses_path(&path);
-        let xai_request = xai_compat && responses_path;
-        let deepseek_request = deepseek_sanitize && responses_path;
-        let rewrite = method == hyper::Method::POST && is_llm_path(&path);
-        let mut restore = NativeRestore::None;
-        let mut retry_json = None;
-        if rewrite {
-            let mut json_body = serde_json::from_slice::<Value>(&body)
-                .context("Provider request is not valid JSON")?;
-            let mapped = apply_provider_model_mappings(&mut json_body, &provider.model_mappings);
-            if !mapped {
-                if let Some(upstream_model) = &routed_upstream {
-                    if let Some(object) = json_body.as_object_mut() {
-                        object.insert("model".to_string(), Value::String(upstream_model.clone()));
-                    }
-                } else {
-                    rewrite_unmatched_request_model(
-                        &mut json_body,
-                        &provider.model,
-                        &provider_allowed_models(&provider),
-                    );
-                }
-            }
-            apply_provider_effort_aliases(&mut json_body, provider_effort_aliases(&provider));
-            if xai_request {
-                restore = NativeRestore::Xai(apply_xai_native_responses_request_compat(
-                    &mut json_body,
-                    Some(provider.model.as_str()).filter(|model| !model.is_empty()),
-                    &provider_allowed_models(&provider),
-                ));
-            }
-            if deepseek_request {
-                restore = NativeRestore::DeepSeek(apply_deepseek_responses_request_compat(
-                    &mut json_body,
-                ));
-            }
-            retry_json = Some(json_body.clone());
-            body = serde_json::to_vec(&json_body)?;
-        }
-        let mut pending_log = self.pending_llm_log(&path, &method, &provider.id, &headers, &body);
+
+        let candidates =
+            crate::failover::failover_candidates(&store, &provider.id);
         let client = reqwest::Client::builder()
             .no_proxy()
             .build()
             .context("Failed to build provider proxy client")?;
-        let mut response = self
-            .send_upstream(
-                &client,
-                method.clone(),
-                &url,
-                &headers,
+        let health = crate::failover::FailoverHealth::global();
+        let quota = crate::failover::QuotaState::global();
+
+        let responses_path = is_responses_path(&path);
+        let rewrite = method == hyper::Method::POST && is_llm_path(&path);
+
+        let mut winning: Option<ForwardAttempt> = None;
+        let mut last_response: Option<reqwest::Response> = None;
+
+        for (index, candidate) in candidates.iter().enumerate() {
+            let candidate_provider = match store
+                .providers
+                .iter()
+                .find(|item| item.id == candidate.provider_id)
+            {
+                Some(item) => item.clone(),
+                None => continue,
+            };
+            if index > 0 {
+                if !health.is_available(&candidate.provider_id, &candidate.model) {
+                    continue;
+                }
+                if quota.is_exhausted(&candidate.provider_id) {
+                    continue;
+                }
+            }
+            let candidate_routed = if index == 0 { routed_upstream.as_deref() } else { None };
+
+            let upstream = candidate_provider.base_url.trim().trim_end_matches('/');
+            if upstream.is_empty() {
+                if index == 0 {
+                    anyhow::bail!("Active provider has no base URL");
+                }
+                continue;
+            }
+            let oauth_kind = provider_device_oauth_kind(&candidate_provider);
+            let upstream = oauth_kind
+                .map(|kind| kind.default_base_url().to_string())
+                .unwrap_or_else(|| upstream.to_string());
+            let url = join_provider_upstream_url_for(oauth_kind, &upstream, &path);
+            let mut body = raw_body.to_vec();
+            let xai_compat = provider_needs_xai_compat(&candidate_provider);
+            let deepseek_sanitize =
+                provider_needs_deepseek_responses_sanitize(&candidate_provider);
+            let xai_request = xai_compat && responses_path;
+            let deepseek_request = deepseek_sanitize && responses_path;
+            let mut restore = NativeRestore::None;
+            let mut retry_json: Option<Value> = None;
+            if rewrite {
+                let mut json_body = serde_json::from_slice::<Value>(&body)
+                    .context("Provider request is not valid JSON")?;
+                let mapped = apply_provider_model_mappings(
+                    &mut json_body,
+                    &candidate_provider.model_mappings,
+                );
+                if !mapped {
+                    if let Some(upstream_model) = candidate_routed {
+                        if let Some(object) = json_body.as_object_mut() {
+                            object.insert(
+                                "model".to_string(),
+                                Value::String(upstream_model.to_string()),
+                            );
+                        }
+                    } else {
+                        rewrite_unmatched_request_model(
+                            &mut json_body,
+                            &candidate_provider.model,
+                            &provider_allowed_models(&candidate_provider),
+                        );
+                    }
+                }
+                apply_provider_effort_aliases(
+                    &mut json_body,
+                    provider_effort_aliases(&candidate_provider),
+                );
+                if xai_request {
+                    restore = NativeRestore::Xai(apply_xai_native_responses_request_compat(
+                        &mut json_body,
+                        Some(candidate_provider.model.as_str())
+                            .filter(|model| !model.is_empty()),
+                        &provider_allowed_models(&candidate_provider),
+                    ));
+                }
+                if deepseek_request {
+                    restore = NativeRestore::DeepSeek(apply_deepseek_responses_request_compat(
+                        &mut json_body,
+                    ));
+                }
+                retry_json = Some(json_body.clone());
+                body = serde_json::to_vec(&json_body)?;
+            }
+            let pending_log =
+                self.pending_llm_log(&path, &method, &candidate_provider.id, &headers, &body);
+            let response = self
+                .send_upstream(
+                    &client,
+                    method.clone(),
+                    &url,
+                    &headers,
+                    oauth_kind,
+                    &candidate_provider,
+                    body.clone(),
+                )
+                .await;
+            let response = match response {
+                Ok(response) => response,
+                Err(error) => {
+                    if index == 0 {
+                        return Err(error);
+                    }
+                    health.record_failure(&candidate.provider_id, &candidate.model);
+                    continue;
+                }
+            };
+            let status = response.status();
+            let has_more = index + 1 < candidates.len();
+            if has_more && crate::failover::is_failover_status(status.as_u16()) {
+                health.record_failure(&candidate.provider_id, &candidate.model);
+                if crate::failover::is_quota_exhausted_status(status.as_u16()) {
+                    quota.mark_exhausted(&candidate.provider_id);
+                }
+                if let Some(logger) = self.logger() {
+                    let _ = logger.append(
+                        "providers.failover",
+                        serde_json::json!({
+                            "fromProvider": candidate.provider_id,
+                            "fromModel": candidate.model,
+                            "status": status.as_u16(),
+                        }),
+                    );
+                }
+                let _ = response.bytes().await;
+                last_response = None;
+                continue;
+            }
+            health.record_success(&candidate.provider_id, &candidate.model);
+            quota.clear(&candidate.provider_id);
+            last_response = None;
+            winning = Some(ForwardAttempt {
+                provider: candidate_provider,
+                response,
+                restore,
+                retry_json,
+                pending_log,
+                url,
                 oauth_kind,
-                &provider,
-                body.clone(),
-            )
-            .await?;
-        let first_status = response.status();
-        if responses_path && matches!(first_status.as_u16(), 400 | 422) {
-            if let Some(json_body) = retry_json.as_mut() {
+                responses_path,
+                routed_upstream: candidate_routed.map(str::to_string),
+            });
+            break;
+        }
+
+        let mut attempt = match winning {
+            Some(attempt) => attempt,
+            None => {
+                if let Some(response) = last_response {
+                    return self.serve_response(response, NativeRestore::None, None).await;
+                }
+                anyhow::bail!("No failover candidate produced a response");
+            }
+        };
+
+        let first_status = attempt.response.status();
+        if attempt.responses_path && matches!(first_status.as_u16(), 400 | 422) {
+            if let Some(json_body) = attempt.retry_json.as_mut() {
                 let names = custom_tool_names_from_request(json_body, &HashSet::new());
                 if !names.is_empty() {
-                    let error_bytes = response.bytes().await.unwrap_or_default();
+                    let error_bytes = attempt.response.bytes().await.unwrap_or_default();
                     let excerpt = upstream_error_excerpt(&error_bytes);
                     let changed = rewrite_custom_as_function(json_body, &HashSet::new())
                         | rewrite_custom_input_items(json_body, &HashSet::new());
@@ -397,7 +512,7 @@ impl ProviderProxy {
                             .header(hyper::header::CONTENT_TYPE, "application/json")
                             .body(bytes_body(error_bytes))?);
                     }
-                    if let Some(log) = pending_log.take() {
+                    if let Some(log) = attempt.pending_log.take() {
                         log.succeed(
                             first_status.as_u16(),
                             false,
@@ -406,18 +521,23 @@ impl ProviderProxy {
                             None,
                         );
                     }
-                    remember_downgraded_tools(&mut restore, names);
-                    body = serde_json::to_vec(&*json_body)?;
-                    pending_log =
-                        self.pending_llm_log(&path, &method, &provider.id, &headers, &body);
+                    remember_downgraded_tools(&mut attempt.restore, names);
+                    let body = serde_json::to_vec(&*json_body)?;
+                    attempt.pending_log = self.pending_llm_log(
+                        &path,
+                        &method,
+                        &attempt.provider.id,
+                        &headers,
+                        &body,
+                    );
                     let retry = match self
                         .send_upstream(
                             &client,
                             method.clone(),
-                            &url,
+                            &attempt.url,
                             &headers,
-                            oauth_kind,
-                            &provider,
+                            attempt.oauth_kind,
+                            &attempt.provider,
                             body,
                         )
                         .await
@@ -425,15 +545,16 @@ impl ProviderProxy {
                         Ok(retry) => retry,
                         Err(error) => {
                             self.log_protocol_downgrade(
-                                &provider.id,
-                                routed_upstream
+                                &attempt.provider.id,
+                                attempt
+                                    .routed_upstream
                                     .as_deref()
-                                    .unwrap_or(provider.model.as_str()),
+                                    .unwrap_or(attempt.provider.model.as_str()),
                                 first_status.as_u16(),
                                 0,
                                 &excerpt,
                             );
-                            if let Some(log) = pending_log {
+                            if let Some(log) = attempt.pending_log {
                                 log.fail(
                                     &format!("Provider upstream request failed: {error}"),
                                     None,
@@ -443,18 +564,34 @@ impl ProviderProxy {
                         }
                     };
                     self.log_protocol_downgrade(
-                        &provider.id,
-                        routed_upstream
+                        &attempt.provider.id,
+                        attempt
+                            .routed_upstream
                             .as_deref()
-                            .unwrap_or(provider.model.as_str()),
+                            .unwrap_or(attempt.provider.model.as_str()),
                         first_status.as_u16(),
                         retry.status().as_u16(),
                         &excerpt,
                     );
-                    response = retry;
+                    attempt.response = retry;
                 }
             }
         }
+        self.serve_response(attempt.response, attempt.restore, attempt.pending_log)
+            .await
+    }
+
+    fn logger(&self) -> Option<Arc<DiagnosticLogger>> {
+        let state = self.inner.lock().expect("provider proxy lock");
+        state.logger.clone()
+    }
+
+    async fn serve_response(
+        &self,
+        response: reqwest::Response,
+        restore: NativeRestore,
+        pending_log: Option<PendingLlmLog>,
+    ) -> anyhow::Result<Response<ProxyBody>> {
         let status = response.status();
         let response_headers = response.headers().clone();
         let is_sse = response_headers
@@ -562,6 +699,7 @@ impl ProviderProxy {
             inspect_stream,
         ))?)
     }
+
 }
 
 fn bytes_body(bytes: impl Into<Bytes>) -> ProxyBody {
