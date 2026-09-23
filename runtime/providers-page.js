@@ -185,7 +185,32 @@ function providerAuthLabel(provider) {
   const mode = providerAuthMode(provider);
   if (mode === "github_copilot") return "GitHub Copilot";
   if (mode === "xai_oauth") return "xAI Grok";
-  return provider?.model || provider?.baseUrl || "API key";
+  return "";
+}
+
+function providerDefaultModelLabel(provider) {
+  const model = String(provider?.model || "").trim();
+  if (!model) return "";
+  const catalog = Array.isArray(provider?.catalogModels) ? provider.catalogModels : [];
+  const match = catalog.find((entry) => {
+    const slug = String(entry?.model || "").trim();
+    return slug.toLowerCase() === model.toLowerCase();
+  });
+  const display = String(match?.displayName || match?.display_name || "").trim();
+  return display || model;
+}
+
+function providerListMeta(provider) {
+  const model = providerDefaultModelLabel(provider);
+  const auth = providerAuthLabel(provider);
+  const parts = [];
+  if (auth) parts.push(auth);
+  if (model) parts.push(model);
+  if (!parts.length) parts.push(String(provider?.baseUrl || "").trim() || "API key");
+  const apiSelected = providerSelectedIds.filter((id) => id !== "official");
+  const isRoutingDefault = provider.id === providerActiveId && apiSelected.length > 1;
+  if (isRoutingDefault) parts.push("Default");
+  return parts.join(" · ");
 }
 
 function setProviderStatus(message) {
@@ -265,11 +290,7 @@ function createProviderListRow(provider, active) {
   name.textContent = provider.name || provider.id;
   const meta = document.createElement("div");
   meta.className = "codex-helper-provider-row-meta";
-  const apiSelected = providerSelectedIds.filter((id) => id !== "official");
-  const isDefault = provider.id === providerActiveId && apiSelected.length > 1;
-  meta.textContent = isDefault
-    ? `${providerAuthLabel(provider)} · Default`
-    : providerAuthLabel(provider);
+  meta.textContent = providerListMeta(provider);
   label.appendChild(name);
   label.appendChild(meta);
 

@@ -367,6 +367,15 @@ test("settings page exposes start at login switch", () => {
   expect(source).toContain("launchAtLoginEnabled: false");
 });
 
+test("provider list shows each default model display name", () => {
+  expect(settingsSource).toContain("function providerDefaultModelLabel(");
+  expect(settingsSource).toContain("function providerListMeta(");
+  expect(settingsSource).toContain("match?.displayName || match?.display_name");
+  expect(settingsSource).toContain("slug.toLowerCase() === model.toLowerCase()");
+  expect(settingsSource).toContain("meta.textContent = providerListMeta(provider)");
+  expect(settingsSource).not.toContain("provider?.model || provider?.baseUrl");
+});
+
 test("settings page exposes API provider LLM traffic logging switch", () => {
   expect(settingsSource).toContain('nativeSettingsGroupSection("Diagnostics"');
   expect(settingsSource).toContain("Log API provider LLM traffic");
