@@ -12,9 +12,11 @@
     "launch": "bun run build:bridge && bun src/launch.ts",
     "build": "bun build src/launch.ts --target=bun --outdir=dist",
     "build:app": "APPLE_SIGNING_IDENTITY=\"${APPLE_SIGNING_IDENTITY:-Developer ID Application: Chengdu Wake.Link Technology Co., Ltd. (AN5X2K46ER)}\" ./scripts/build-macos-app.sh",
-    "build:app:adhoc": "APPLE_SIGNING_IDENTITY=- ./scripts/build-macos-app.sh"
+    "build:app:adhoc": "APPLE_SIGNING_IDENTITY=- ./scripts/build-macos-app.sh",
+    "tauri": "tauri"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.5",
     "@types/bun": "^1.3.4",
     "typescript": "^5.8.0"
   }

@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
 use std::fs::File;
-use std::io::{BufReader, BufWriter};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -257,7 +257,7 @@ fn prepare_tray_icon() {
 
     let source = read_rgba_png(&tray_source);
     let menu = fit_and_pad_rgba(&source, MENU_BAR_PX);
-    write_rgba_png(&tray_menu, &menu);
+    write_rgba_png_if_changed(&tray_menu, &menu);
 
     println!("cargo:rerun-if-changed={}", tray_menu.display());
 }
@@ -298,18 +298,26 @@ fn read_rgba_png(path: &Path) -> RgbaImage {
     }
 }
 
-fn write_rgba_png(path: &Path, image: &RgbaImage) {
-    let file = File::create(path)
-        .unwrap_or_else(|error| panic!("failed to create {}: {error}", path.display()));
-    let mut encoder = png::Encoder::new(BufWriter::new(file), image.width, image.height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder
-        .write_header()
-        .unwrap_or_else(|error| panic!("failed to write PNG header {}: {error}", path.display()));
-    writer
-        .write_image_data(&image.pixels)
-        .unwrap_or_else(|error| panic!("failed to write PNG data {}: {error}", path.display()));
+fn write_rgba_png_if_changed(path: &Path, image: &RgbaImage) {
+    // Encode in memory so we can skip the write when content is unchanged;
+    // otherwise the fresh mtime re-triggers cargo + the Tauri file watcher.
+    let mut encoded: Vec<u8> = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut encoded, image.width, image.height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .expect("failed to write PNG header to memory");
+        writer
+            .write_image_data(&image.pixels)
+            .expect("failed to write PNG data to memory");
+    }
+    if fs::read(path).is_ok_and(|existing| existing == encoded) {
+        return;
+    }
+    fs::write(path, &encoded)
+        .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
 }
 
 fn fit_and_pad_rgba(source: &RgbaImage, canvas_size: u32) -> RgbaImage {
