@@ -1104,6 +1104,10 @@ fn mimo_query_failure(detail: String) -> UsageFailure {
     UsageFailure::new(message, detail)
 }
 
+fn same_usage_failure(error: String) -> UsageFailure {
+    UsageFailure::new(error.clone(), error)
+}
+
 fn mimo_cookie_header(provider: &Provider) -> Result<Vec<u8>, UsageFailure> {
     if provider.usage_cookie_source == "manual" {
         return manual_mimo_cookie_header(&provider.usage_cookie_header);
@@ -1118,11 +1122,9 @@ fn manual_mimo_cookie_header(raw: &str) -> Result<Vec<u8>, UsageFailure> {
             "manual cookie header is empty",
         ));
     }
-    let cookies = crate::browser_cookie::parse_cookie_header(raw)
-        .map_err(|error| UsageFailure::new(error.clone(), error))?;
+    let cookies = crate::browser_cookie::parse_cookie_header(raw).map_err(same_usage_failure)?;
     require_mimo_session(&cookies)?;
-    crate::browser_cookie::cookie_header_bytes(&cookies)
-        .map_err(|error| UsageFailure::new(error.clone(), error))
+    crate::browser_cookie::cookie_header_bytes(&cookies).map_err(same_usage_failure)
 }
 
 fn auto_mimo_cookie_header() -> Result<Vec<u8>, UsageFailure> {
@@ -1142,8 +1144,7 @@ fn auto_mimo_cookie_header() -> Result<Vec<u8>, UsageFailure> {
             format!("{} {}", batch.browser, batch.profile)
         };
         if require_mimo_session(&batch.cookies).is_ok() {
-            return cookie_header_bytes(&batch.cookies)
-                .map_err(|error| UsageFailure::new(error.clone(), error));
+            return cookie_header_bytes(&batch.cookies).map_err(same_usage_failure);
         }
         if batch
             .undecryptable

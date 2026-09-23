@@ -483,28 +483,32 @@ fn redact_cookie_values(value: &str) -> String {
     ];
     let mut output = value.to_string();
     for name in NAMES {
-        let needle = format!("{name}=");
-        let mut search_from = 0;
-        while let Some(relative) = output[search_from..].find(&needle) {
-            let value_start = search_from + relative + needle.len();
-            let value_end = output[value_start..]
-                .find(|ch: char| ch == ';' || ch.is_whitespace())
-                .map(|index| value_start + index)
-                .unwrap_or(output.len());
-            if value_end == value_start {
-                search_from = value_start;
-                if search_from >= output.len() {
-                    break;
-                }
-                continue;
-            }
-            output.replace_range(value_start..value_end, "********");
-            search_from = value_start + "********".len();
-            if search_from >= output.len() {
-                break;
-            }
-        }
+        output = redact_assignment(&output, name);
     }
+    output
+}
+
+/// Replaces `name=value` with `name=********` until `;` or whitespace.
+/// An empty assignment is left unchanged.
+fn redact_assignment(value: &str, name: &str) -> String {
+    let needle = format!("{name}=");
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while let Some(relative) = value[cursor..].find(&needle) {
+        let value_start = cursor + relative + needle.len();
+        let value_end = value[value_start..]
+            .find(|ch: char| ch == ';' || ch.is_whitespace())
+            .map(|index| value_start + index)
+            .unwrap_or(value.len());
+        output.push_str(&value[cursor..value_start]);
+        if value_end == value_start {
+            cursor = value_start;
+            continue;
+        }
+        output.push_str("********");
+        cursor = value_end;
+    }
+    output.push_str(&value[cursor..]);
     output
 }
 

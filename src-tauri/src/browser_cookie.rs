@@ -52,13 +52,11 @@ struct ChromiumBrowser {
 /// A missing browser is a note, not a failure of the browsers that follow.
 pub fn read_browser_cookie_batches(query: &CookieQuery<'_>) -> Vec<BrowserCookieBatch> {
     let Some(home) = dirs::home_dir() else {
-        return vec![BrowserCookieBatch {
-            browser: "browser",
-            profile: String::new(),
-            cookies: Vec::new(),
-            note: "Could not locate the home directory".to_string(),
-            undecryptable: Vec::new(),
-        }];
+        return vec![note_batch(
+            "browser",
+            "",
+            "Could not locate the home directory",
+        )];
     };
     let support = home.join("Library/Application Support");
     let mut batches = Vec::new();
