@@ -336,7 +336,7 @@ test("settings page exposes provider management", () => {
 
 test("catalog rows expose drag handles for reordering", () => {
   expect(settingsSource).toContain("createCatalogDragHandle");
-  expect(settingsSource).toContain("codex-helper-catalog-drag-handle");
+  expect(settingsSource).toContain("codex-helper-provider-drag-handle");
   expect(settingsSource).toContain("startCatalogReorder");
   expect(settingsSource).toContain("persistProviderDraft");
   expect(settingsSource).toContain("refreshDefaultModelSelect");

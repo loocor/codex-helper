@@ -988,11 +988,19 @@ const CATALOG_REORDER_THRESHOLD = 4;
 let catalogReorderSession = null;
 
 function createCatalogDragHandle(row) {
-  const handle = document.createElement("span");
-  handle.className = "codex-helper-catalog-drag-handle";
-  handle.setAttribute("aria-hidden", "true");
+  const handle = document.createElement("button");
+  handle.type = "button";
+  handle.className = "codex-helper-provider-drag-handle";
+  handle.setAttribute("aria-label", "Drag to reorder");
   handle.setAttribute("title", "Drag to reorder");
   handle.innerHTML = nativeSettingsStandardIconSvg("grip-vertical");
+  handle.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  handle.addEventListener("dragstart", (event) => {
+    event.preventDefault();
+  });
   handle.addEventListener("pointerdown", (event) => {
     startCatalogReorder(event, row, handle);
   });
@@ -1322,6 +1330,17 @@ function openProviderDialog(mode, provider) {
           { apiOnly: true, attr: "data-codex-helper-provider-wire-label" },
         )}
         <div class="codex-helper-provider-mapping-block">
+          <div class="codex-helper-provider-catalog">
+            <div class="codex-helper-provider-catalog-columns">
+              <span></span>
+              <span>Menu Display Name</span>
+              <span>Actual Request Model</span>
+              <span>Context Window</span>
+              <span>Reasoning Levels</span>
+              <span></span>
+            </div>
+            <div data-codex-helper-catalog-list></div>
+          </div>
           <div class="codex-helper-provider-mapping-header">
             <span class="codex-helper-provider-field-label">Catalog</span>
             <div class="codex-helper-provider-mapping-actions">
@@ -1339,17 +1358,6 @@ function openProviderDialog(mode, provider) {
             </label>
             <div class="codex-helper-provider-fetch-error" data-codex-helper-provider-fetch-error></div>
             <div class="codex-helper-provider-fetched" data-codex-helper-fetched-list hidden></div>
-            <div class="codex-helper-provider-catalog">
-              <div class="codex-helper-provider-catalog-columns">
-                <span></span>
-                <span>Menu Display Name</span>
-                <span>Actual Request Model</span>
-                <span>Context Window</span>
-                <span>Reasoning Levels</span>
-                <span></span>
-              </div>
-              <div data-codex-helper-catalog-list></div>
-            </div>
           </div>
         </div>
         ${providerFieldRow(
