@@ -78,8 +78,27 @@ fn tray_provider_display_name(provider: &Provider) -> &str {
     }
 }
 
+fn tray_provider_default_model_label(provider: &Provider) -> Option<String> {
+    let model = provider.model.trim();
+    if model.is_empty() {
+        return None;
+    }
+    let display = provider
+        .catalog_models
+        .iter()
+        .find(|entry| entry.model == model)
+        .map(|entry| entry.display_name.trim())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(model);
+    Some(display.to_string())
+}
+
 fn tray_provider_label(provider: &Provider) -> String {
-    tray_provider_display_name(provider).replace('&', "&&")
+    let name = tray_provider_display_name(provider);
+    match tray_provider_default_model_label(provider) {
+        Some(model) => format!("{name} — {}", model.replace('&', "&&")),
+        None => name.replace('&', "&&"),
+    }
 }
 
 fn tray_provider_item_specs(store: &ProviderStore) -> Vec<TrayProviderItemSpec> {
@@ -88,7 +107,7 @@ fn tray_provider_item_specs(store: &ProviderStore) -> Vec<TrayProviderItemSpec> 
         .map(|provider| TrayProviderItemSpec {
             id: tray_activate_provider_id(&provider.id),
             label: tray_provider_label(provider),
-            checked: provider.id == store.active_id,
+            checked: store.selected_ids.contains(&provider.id),
         })
         .collect()
 }
@@ -647,17 +666,26 @@ mod tests {
             name: "Grok".to_string(),
             ..Provider::default()
         });
+        store.providers.push(Provider {
+            id: "mimo".to_string(),
+            name: "MiMo".to_string(),
+            ..Provider::default()
+        });
         store.active_id = "grok".to_string();
+        store.selected_ids = vec!["official".to_string(), "grok".to_string()];
 
         let items = tray_provider_item_specs(&store);
 
-        assert_eq!(items.len(), 2);
+        assert_eq!(items.len(), 3);
         assert_eq!(items[0].id, "activate-provider:official");
         assert_eq!(items[0].label, "Official");
-        assert!(!items[0].checked);
+        assert!(items[0].checked);
         assert_eq!(items[1].id, "activate-provider:grok");
         assert_eq!(items[1].label, "Grok");
         assert!(items[1].checked);
+        assert_eq!(items[2].id, "activate-provider:mimo");
+        assert_eq!(items[2].label, "MiMo");
+        assert!(!items[2].checked);
     }
 
     #[test]
