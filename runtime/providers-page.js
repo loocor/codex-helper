@@ -974,12 +974,122 @@ function addCatalogRow(entry = {}) {
   remove.setAttribute(helperCommandAttribute, "provider-catalog-remove");
   remove.setAttribute("aria-label", "Remove model");
   remove.innerHTML = nativeSettingsStandardIconSvg("x");
+  const handle = createCatalogDragHandle(row);
+  row.appendChild(handle);
   row.appendChild(display);
   row.appendChild(model);
   row.appendChild(context);
   row.appendChild(reasoning);
   row.appendChild(remove);
   host.appendChild(row);
+}
+
+const CATALOG_REORDER_THRESHOLD = 4;
+let catalogReorderSession = null;
+
+function createCatalogDragHandle(row) {
+  const handle = document.createElement("span");
+  handle.className = "codex-helper-catalog-drag-handle";
+  handle.setAttribute("aria-hidden", "true");
+  handle.setAttribute("title", "Drag to reorder");
+  handle.innerHTML = nativeSettingsStandardIconSvg("grip-vertical");
+  handle.addEventListener("pointerdown", (event) => {
+    startCatalogReorder(event, row, handle);
+  });
+  return handle;
+}
+
+function startCatalogReorder(event, row, handle) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  catalogReorderSession = {
+    row,
+    handle,
+    pointerId: event.pointerId,
+    startY: event.clientY,
+    active: false,
+  };
+  try {
+    handle.setPointerCapture(event.pointerId);
+  } catch (_error) {}
+  handle.addEventListener("pointermove", onCatalogReorderMove);
+  handle.addEventListener("pointerup", onCatalogReorderUp);
+  handle.addEventListener("pointercancel", onCatalogReorderUp);
+}
+
+function catalogRowRect(row) {
+  let top = Infinity;
+  let bottom = -Infinity;
+  for (const child of row.children) {
+    const rect = child.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) continue;
+    if (rect.top < top) top = rect.top;
+    if (rect.bottom > bottom) bottom = rect.bottom;
+  }
+  if (top === Infinity) return null;
+  return { top, bottom };
+}
+
+function onCatalogReorderMove(event) {
+  const session = catalogReorderSession;
+  if (!session || event.pointerId !== session.pointerId) return;
+  event.preventDefault();
+  if (!session.active) {
+    if (Math.abs(event.clientY - session.startY) < CATALOG_REORDER_THRESHOLD) return;
+    session.active = true;
+    session.row.setAttribute("data-catalog-dragging", "true");
+  }
+  const list = session.row.parentElement;
+  if (!(list instanceof HTMLElement)) return;
+  const rows = [...list.querySelectorAll("[data-codex-helper-catalog-row]")];
+  let target = null;
+  let before = false;
+  for (const row of rows) {
+    if (row === session.row) continue;
+    const rect = catalogRowRect(row);
+    if (!rect) continue;
+    if (event.clientY >= rect.top && event.clientY <= rect.bottom) {
+      target = row;
+      before = event.clientY < rect.top + (rect.bottom - rect.top) / 2;
+      break;
+    }
+  }
+  if (!target) {
+    const first = rows.find((row) => row !== session.row);
+    const last = [...rows].reverse().find((row) => row !== session.row);
+    const firstRect = first ? catalogRowRect(first) : null;
+    const lastRect = last ? catalogRowRect(last) : null;
+    if (firstRect && event.clientY < firstRect.top) {
+      target = first;
+      before = true;
+    } else if (lastRect && event.clientY > lastRect.bottom) {
+      target = last;
+      before = false;
+    }
+  }
+  if (!target) return;
+  if (before) {
+    list.insertBefore(session.row, target);
+  } else {
+    list.insertBefore(session.row, target.nextSibling);
+  }
+}
+
+function onCatalogReorderUp(event) {
+  const session = catalogReorderSession;
+  if (!session || event.pointerId !== session.pointerId) return;
+  catalogReorderSession = null;
+  session.handle.removeEventListener("pointermove", onCatalogReorderMove);
+  session.handle.removeEventListener("pointerup", onCatalogReorderUp);
+  session.handle.removeEventListener("pointercancel", onCatalogReorderUp);
+  try {
+    session.handle.releasePointerCapture(session.pointerId);
+  } catch (_error) {}
+  session.row.removeAttribute("data-catalog-dragging");
+  if (session.active) {
+    persistProviderDraft();
+    refreshDefaultModelSelect();
+  }
 }
 
 function seedCatalogRows(provider, draft) {
@@ -1231,6 +1341,7 @@ function openProviderDialog(mode, provider) {
             <div class="codex-helper-provider-fetched" data-codex-helper-fetched-list hidden></div>
             <div class="codex-helper-provider-catalog">
               <div class="codex-helper-provider-catalog-columns">
+                <span></span>
                 <span>Menu Display Name</span>
                 <span>Actual Request Model</span>
                 <span>Context Window</span>

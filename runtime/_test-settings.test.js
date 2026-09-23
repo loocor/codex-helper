@@ -334,6 +334,15 @@ test("settings page exposes provider management", () => {
   expect(settingsSource).not.toContain('link.textContent = "Usage"');
 });
 
+test("catalog rows expose drag handles for reordering", () => {
+  expect(settingsSource).toContain("createCatalogDragHandle");
+  expect(settingsSource).toContain("codex-helper-catalog-drag-handle");
+  expect(settingsSource).toContain("startCatalogReorder");
+  expect(settingsSource).toContain("persistProviderDraft");
+  expect(settingsSource).toContain("refreshDefaultModelSelect");
+  expect(settingsSource).toContain("CATALOG_REORDER_THRESHOLD");
+});
+
 test("usage pie marks quota exhausted at 100 percent", () => {
   expect(settingsSource).toContain("data-quota-exhausted");
   expect(settingsSource).toContain("percent >= 100");

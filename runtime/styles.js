@@ -1408,7 +1408,7 @@ function installHelperStyles() {
         display: grid;
         width: 100%;
         min-width: 0;
-        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 132px minmax(328px, max-content) 32px;
+        grid-template-columns: 20px minmax(0, 1fr) minmax(0, 1fr) 132px minmax(328px, max-content) 32px;
         column-gap: 8px;
         row-gap: 8px;
         align-items: start;
