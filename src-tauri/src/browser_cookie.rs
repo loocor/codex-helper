@@ -850,7 +850,7 @@ fn keychain_secret(services: &[&str]) -> Result<Vec<u8>, String> {
     for service in services {
         match keychain_secret_one(service) {
             Ok(secret) => return Ok(secret),
-            Err(error) if error.contains("not found") => last = error,
+            Err(error) if keychain_error_is_missing(&error) => last = error,
             Err(error) => return Err(error),
         }
     }
@@ -864,16 +864,10 @@ fn keychain_secret_one(service: &str) -> Result<Vec<u8>, String> {
         .map_err(|error| format!("failed to run security find-generic-password: {error}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if stderr.contains("could not be found") || stderr.contains("SecKeychainSearch") {
-            return Err(format!("Keychain item \"{service}\" not found"));
-        }
-        return Err(format!(
-            "Keychain rejected access to \"{service}\"{}",
-            if stderr.is_empty() {
-                String::new()
-            } else {
-                format!(" ({stderr})")
-            }
+        return Err(keychain_failure_message(
+            service,
+            output.status.code(),
+            &stderr,
         ));
     }
     let secret = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1021,6 +1015,26 @@ fn firefox_user_context_id(origin: &str) -> u32 {
         .find(|(key, _)| *key == "userContextId")
         .and_then(|(_, value)| value.parse().ok())
         .unwrap_or(0)
+}
+
+fn keychain_failure_message(service: &str, exit_code: Option<i32>, stderr: &str) -> String {
+    if keychain_item_missing(exit_code, stderr) {
+        return format!("Keychain item \"{service}\" not found");
+    }
+    let suffix = if stderr.is_empty() {
+        String::new()
+    } else {
+        format!(" ({stderr})")
+    };
+    format!("Keychain rejected access to \"{service}\"{suffix}")
+}
+
+fn keychain_item_missing(exit_code: Option<i32>, stderr: &str) -> bool {
+    exit_code == Some(44) || stderr.contains("could not be found")
+}
+
+fn keychain_error_is_missing(error: &str) -> bool {
+    error.starts_with("Keychain item \"") && error.ends_with("\" not found")
 }
 
 fn host_matches(host: &str, suffix: &str) -> bool {
@@ -1553,6 +1567,34 @@ mod tests {
             reads[0].read.note,
             "matching cookies expired or partitioned"
         );
+    }
+
+    #[test]
+    fn keychain_missing_item_is_not_an_access_rejection() {
+        assert!(keychain_item_missing(Some(44), "SecKeychainSearchCopyNext"));
+        assert!(keychain_item_missing(
+            Some(1),
+            "The specified item could not be found in the keychain."
+        ));
+        assert!(!keychain_item_missing(
+            Some(36),
+            "SecKeychainSearchCopyNext: User interaction is not allowed."
+        ));
+        assert!(!keychain_item_missing(
+            Some(36),
+            "SecKeychainSearchCopyNext: item not found"
+        ));
+
+        let missing = keychain_failure_message("Chrome Safe Storage", Some(44), "");
+        assert!(keychain_error_is_missing(&missing), "{missing}");
+        let rejected = keychain_failure_message(
+            "Chrome Safe Storage",
+            Some(36),
+            "security: SecKeychainSearchCopyNext: User interaction is not allowed.",
+        );
+        assert!(!keychain_error_is_missing(&rejected), "{rejected}");
+        assert!(rejected.contains("Keychain rejected"), "{rejected}");
+        assert!(rejected.contains("SecKeychainSearch"), "{rejected}");
     }
 
     fn mimo_query() -> CookieQuery<'static> {
