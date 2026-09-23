@@ -378,6 +378,7 @@ fn read_chromium_database(
     let mut cookies = Vec::new();
     let mut undecryptable = Vec::new();
     let mut matched = false;
+    let mut expired = false;
     for row in rows {
         let (host, name, encrypted, expires_utc, is_persistent) =
             row.map_err(|error| format!("failed to read cookie row: {error}"))?;
@@ -386,6 +387,7 @@ fn read_chromium_database(
         }
         matched = true;
         if cookie_is_expired_at(is_persistent, expires_utc, now) {
+            expired = true;
             continue;
         }
         if encrypted.is_empty() {
@@ -398,14 +400,7 @@ fn read_chromium_database(
         }
     }
     let note = if matched {
-        if undecryptable.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "skipped undecryptable cookies: {}",
-                undecryptable.join(", ")
-            )
-        }
+        chromium_match_note(&cookies, &undecryptable, expired)
     } else {
         diagnose_cookie_db(&connection, "host_key", query).unwrap_or_else(|error| error)
     };
@@ -723,10 +718,12 @@ fn find_cookie_databases(user_data_dir: &Path) -> Result<Vec<PathBuf>, String> {
         if !path.is_dir() {
             continue;
         }
-        for candidate in [path.join("Network/Cookies"), path.join("Cookies")] {
-            if candidate.is_file() {
-                found.push(candidate);
-            }
+        let network = path.join("Network/Cookies");
+        let legacy = path.join("Cookies");
+        if network.is_file() {
+            found.push(network);
+        } else if legacy.is_file() {
+            found.push(legacy);
         }
     }
     found.sort();
@@ -915,6 +912,32 @@ fn diagnosis_text(total: i64, hosts: &[String], suffix: &str) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         )
+    }
+}
+
+fn chromium_match_note(
+    cookies: &[ImportedCookie],
+    undecryptable: &[String],
+    expired: bool,
+) -> String {
+    if !undecryptable.is_empty() {
+        return format!(
+            "skipped undecryptable cookies: {}",
+            undecryptable.join(", ")
+        );
+    }
+    if cookies.is_empty() {
+        return unused_match_note(expired, false);
+    }
+    String::new()
+}
+
+fn unused_match_note(expired: bool, partitioned: bool) -> String {
+    match (expired, partitioned) {
+        (true, true) => "matching cookies expired or partitioned".to_string(),
+        (true, false) => "matching cookies expired".to_string(),
+        (false, true) => "matching cookies partitioned".to_string(),
+        (false, false) => "matching cookies were not usable".to_string(),
     }
 }
 
@@ -1287,5 +1310,130 @@ mod tests {
         file.extend_from_slice(&(page.len() as u32).to_be_bytes());
         file.extend(page);
         file
+    }
+
+    #[test]
+    fn network_cookie_database_replaces_legacy_profile_file() {
+        let keys = candidate_keys(b"peanuts");
+        let root = tempfile::tempdir().unwrap();
+        let host = ".platform.xiaomimimo.com";
+        write_chromium_db(
+            &root.path().join("Default/Cookies"),
+            &keys[0],
+            host,
+            &[
+                ("api-platform_serviceToken", b"old-token"),
+                ("userId", b"old-user"),
+            ],
+        );
+        write_chromium_db(
+            &root.path().join("Default/Network/Cookies"),
+            &keys[0],
+            host,
+            &[
+                ("api-platform_serviceToken", b"live-token"),
+                ("userId", b"live-user"),
+            ],
+        );
+        write_chromium_db(
+            &root.path().join("Profile 1/Cookies"),
+            &keys[0],
+            host,
+            &[
+                ("api-platform_serviceToken", b"legacy-only-token"),
+                ("userId", b"legacy-only-user"),
+            ],
+        );
+        let databases = find_cookie_databases(root.path()).unwrap();
+        let rendered = databases
+            .iter()
+            .map(|path| {
+                path.strip_prefix(root.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rendered,
+            vec![
+                "Default/Network/Cookies".to_string(),
+                "Profile 1/Cookies".to_string(),
+            ]
+        );
+        let query = mimo_query();
+        let live = read_chromium_database(&databases[0], &keys, &query).unwrap();
+        assert_eq!(
+            cookie_value(&live.cookies, "api-platform_serviceToken"),
+            b"live-token"
+        );
+        assert_eq!(cookie_value(&live.cookies, "userId"), b"live-user");
+        assert!(!live
+            .cookies
+            .iter()
+            .any(|cookie| cookie.value == b"old-token"));
+        let legacy = read_chromium_database(&databases[1], &keys, &query).unwrap();
+        assert_eq!(
+            cookie_value(&legacy.cookies, "api-platform_serviceToken"),
+            b"legacy-only-token"
+        );
+    }
+
+    #[test]
+    fn expired_chromium_matches_leave_a_note() {
+        let keys = candidate_keys(b"peanuts");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Cookies");
+        let host = ".platform.xiaomimimo.com";
+        write_chromium_db(&path, &keys[0], host, &[("userId", b"expired-user")]);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute("UPDATE cookies SET expires_utc = 1, is_persistent = 1", [])
+            .unwrap();
+        drop(connection);
+        let read = read_chromium_database(&path, &keys, &mimo_query()).unwrap();
+        assert!(read.cookies.is_empty());
+        assert_eq!(read.note, "matching cookies expired");
+    }
+
+    fn mimo_query() -> CookieQuery<'static> {
+        CookieQuery {
+            domain_suffix: "xiaomimimo.com",
+            diagnostic_needles: &["xiaomi", "mimo"],
+        }
+    }
+
+    fn cookie_value<'a>(cookies: &'a [ImportedCookie], name: &str) -> &'a [u8] {
+        cookies
+            .iter()
+            .find(|cookie| cookie.name == name)
+            .map(|cookie| cookie.value.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn write_chromium_db(path: &Path, key: &[u8; KEY_LEN], host: &str, rows: &[(&str, &[u8])]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let connection = rusqlite::Connection::open(path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+                 INSERT INTO meta (key, value) VALUES ('version', '24');
+                 CREATE TABLE cookies (
+                   host_key TEXT, name TEXT, encrypted_value BLOB,
+                   expires_utc INTEGER, is_persistent INTEGER
+                 );",
+            )
+            .unwrap();
+        for (name, value) in rows {
+            let encrypted = encrypt_cookie(key, &with_host_hash(host, value));
+            connection
+                .execute(
+                    "INSERT INTO cookies VALUES (?1, ?2, ?3, 0, 0)",
+                    rusqlite::params![host, name, encrypted],
+                )
+                .unwrap();
+        }
     }
 }
