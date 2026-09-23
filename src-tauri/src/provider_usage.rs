@@ -161,6 +161,9 @@ pub async fn query_provider_usage(state_root: &Path, provider_id: &str) -> Value
             if let Some(resets_at) = live.resets_at {
                 response["resetsAt"] = json!(resets_at);
             }
+            if !live.detail.is_empty() {
+                response["detail"] = json!(live.detail);
+            }
             response
         }
         Ok(None) => json!({
@@ -183,6 +186,7 @@ struct LiveUsage {
     used_percent: Option<f64>,
     resets_at: Option<String>,
     summary: String,
+    detail: String,
 }
 
 #[derive(Debug)]
@@ -329,6 +333,7 @@ fn live_usage_from_chatgpt(body: CodexUsageResponse) -> Option<LiveUsage> {
         summary: usage_summary(used_percent, resets_at.as_deref()),
         used_percent: Some(used_percent),
         resets_at,
+        detail: String::new(),
     })
 }
 
@@ -417,6 +422,7 @@ async fn query_xai_usage(access_token: &str) -> Result<LiveUsage, String> {
         summary: usage_summary(snapshot.used_percent, resets_at.as_deref()),
         used_percent: Some(snapshot.used_percent),
         resets_at,
+        detail: String::new(),
     })
 }
 
@@ -540,6 +546,7 @@ fn live_usage_from_deepseek(body: DeepSeekBalanceResponse) -> Result<LiveUsage, 
         used_percent: None,
         resets_at: None,
         summary,
+        detail: String::new(),
     })
 }
 
@@ -772,6 +779,7 @@ fn live_usage_from_bigmodel(body: BigModelUsageResponse) -> Result<LiveUsage, St
         ),
         used_percent: Some(used_percent.clamp(0.0, 100.0)),
         resets_at,
+        detail: String::new(),
     })
 }
 
@@ -927,6 +935,7 @@ fn live_usage_from_minimax(body: MiniMaxRemainsResponse) -> Result<LiveUsage, St
         summary,
         used_percent: Some(five_hour.clamp(0.0, 100.0)),
         resets_at,
+        detail: String::new(),
     })
 }
 
@@ -1026,6 +1035,7 @@ fn live_usage_from_kimi(body: KimiUsageResponse) -> Result<LiveUsage, String> {
         summary: usage_summary(used_percent, resets_at.as_deref()),
         used_percent: Some(used_percent),
         resets_at,
+        detail: String::new(),
     })
 }
 
@@ -1071,6 +1081,7 @@ fn live_usage_from_kimi_balance(body: KimiBalanceResponse) -> Result<LiveUsage, 
         summary,
         used_percent: None,
         resets_at: None,
+        detail: String::new(),
     })
 }
 
@@ -1094,12 +1105,17 @@ async fn query_mimo_usage(provider: &Provider) -> Result<LiveUsage, UsageFailure
     live_usage_from_mimo(balance, usage, detail).map_err(mimo_query_failure)
 }
 
+const MIMO_BROWSER_HINT: &str = "Safari, Chrome, Chrome Beta, Chrome Canary, Firefox, Edge, or Arc";
+const MIMO_SESSION_COOKIE_NAMES: &[&str] = &["api-platform_serviceToken", "userId"];
+
 fn mimo_query_failure(detail: String) -> UsageFailure {
     let signed_out = detail.to_ascii_lowercase().contains("not signed in");
     let message = if signed_out {
-        "MiMo console session is not signed in. Open the balance page or paste a fresh Cookie header."
+        format!(
+            "MiMo console session is not signed in; open the balance page in {MIMO_BROWSER_HINT}, or paste a fresh Cookie header."
+        )
     } else {
-        "MiMo usage query failed."
+        "MiMo usage query failed.".to_string()
     };
     UsageFailure::new(message, detail)
 }
@@ -1128,16 +1144,23 @@ fn manual_mimo_cookie_header(raw: &str) -> Result<Vec<u8>, UsageFailure> {
 }
 
 fn auto_mimo_cookie_header() -> Result<Vec<u8>, UsageFailure> {
-    use crate::browser_cookie::{cookie_header_bytes, read_browser_cookie_batches, CookieQuery};
+    use crate::browser_cookie::{read_browser_cookie_batches, CookieQuery};
     let batches = read_browser_cookie_batches(&CookieQuery {
         domain_suffix: "xiaomimimo.com",
         diagnostic_needles: &["xiaomi", "mimo"],
     });
+    select_mimo_cookie_header(&batches)
+}
+
+fn select_mimo_cookie_header(
+    batches: &[crate::browser_cookie::BrowserCookieBatch],
+) -> Result<Vec<u8>, UsageFailure> {
+    use crate::browser_cookie::cookie_header_bytes;
     let mut details = Vec::new();
     let mut saw_decrypt_fail = false;
     let mut saw_permission = false;
     let mut saw_readable = false;
-    for batch in &batches {
+    for batch in batches {
         let label = if batch.profile.is_empty() {
             batch.browser.to_string()
         } else {
@@ -1149,7 +1172,7 @@ fn auto_mimo_cookie_header() -> Result<Vec<u8>, UsageFailure> {
         if batch
             .undecryptable
             .iter()
-            .any(|name| name == "api-platform_serviceToken")
+            .any(|name| MIMO_SESSION_COOKIE_NAMES.contains(&name.as_str()))
         {
             saw_decrypt_fail = true;
         }
@@ -1171,11 +1194,13 @@ fn auto_mimo_cookie_header() -> Result<Vec<u8>, UsageFailure> {
         }
     }
     let message = if saw_decrypt_fail {
-        "Found a MiMo session cookie but could not decrypt it. Paste a Cookie header in the provider settings."
+        "Found a MiMo session cookie but could not decrypt it; paste a Cookie header in the provider settings.".to_string()
     } else if saw_permission && !saw_readable {
-        "Could not read browser cookies. Grant Keychain or Full Disk Access, or paste a Cookie header in the provider settings."
+        "Could not read browser cookies; grant Keychain or Full Disk Access, or paste a Cookie header in the provider settings.".to_string()
     } else {
-        "No MiMo console session found. Open the balance page in Safari, Chrome, Firefox, or Edge, or paste a Cookie header in the provider settings."
+        format!(
+            "No MiMo console session found; open the balance page in {MIMO_BROWSER_HINT}, or paste a Cookie header in the provider settings."
+        )
     };
     Err(UsageFailure::new(message, details.join("; ")))
 }
@@ -1192,8 +1217,9 @@ fn require_mimo_session(
 }
 
 fn missing_mimo_names(cookies: &[crate::browser_cookie::ImportedCookie]) -> Vec<&'static str> {
-    ["api-platform_serviceToken", "userId"]
-        .into_iter()
+    MIMO_SESSION_COOKIE_NAMES
+        .iter()
+        .copied()
         .filter(|name| {
             !cookies
                 .iter()
@@ -1233,7 +1259,7 @@ async fn mimo_get<T: serde::de::DeserializeOwned>(
         .map_err(|error| format!("Failed to read MiMo usage response: {error}"))?;
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
         return Err(format!(
-            "MiMo usage query failed (HTTP {status}): the console session is not signed in. Open the balance page or paste a fresh Cookie header"
+            "MiMo usage query failed (HTTP {status}): the console session is not signed in; open the balance page in {MIMO_BROWSER_HINT}, or paste a fresh Cookie header"
         ));
     }
     if !status.is_success() {
@@ -1244,10 +1270,9 @@ async fn mimo_get<T: serde::de::DeserializeOwned>(
     match parsed.code {
         Some(0) | Some(200) | None => {}
         Some(401) => {
-            return Err(
-                "MiMo usage query failed (code 401): the console session is not signed in. Open the balance page or paste a fresh Cookie header"
-                    .to_string(),
-            )
+            return Err(format!(
+                "MiMo usage query failed (code 401): the console session is not signed in; open the balance page in {MIMO_BROWSER_HINT}, or paste a fresh Cookie header"
+            ))
         }
         Some(code) => {
             return Err(format!(
@@ -1319,7 +1344,7 @@ fn live_usage_from_mimo(
     }
 
     let mut summaries: Vec<String> = Vec::new();
-    let mut failures: Vec<String> = Vec::new();
+    let mut details: Vec<String> = Vec::new();
     let mut used_percent: Option<f64> = None;
     let mut resets_at: Option<String> = None;
 
@@ -1340,7 +1365,10 @@ fn live_usage_from_mimo(
                 None => summaries.push("plan usage not available".to_string()),
             }
         }
-        Err(error) => failures.push(format!("token plan: {error}")),
+        Err(error) => {
+            summaries.push("token plan unavailable".to_string());
+            details.push(format!("token plan: {error}"));
+        }
     }
 
     match detail {
@@ -1356,7 +1384,10 @@ fn live_usage_from_mimo(
                 resets_at = Some(period_end.to_string());
             }
         }
-        Err(error) => failures.push(format!("plan detail: {error}")),
+        Err(error) => {
+            summaries.push("plan detail unavailable".to_string());
+            details.push(format!("plan detail: {error}"));
+        }
     }
 
     match balance {
@@ -1369,17 +1400,17 @@ fn live_usage_from_mimo(
                 summaries.push(balance_summary);
             }
         }
-        Err(error) => failures.push(format!("balance: {error}")),
+        Err(error) => {
+            summaries.push("balance unavailable".to_string());
+            details.push(format!("balance: {error}"));
+        }
     }
 
-    let mut summary = summaries.join(" · ");
-    if !failures.is_empty() {
-        summary.push_str(&format!(" ({})", failures.join("; ")));
-    }
     Ok(LiveUsage {
         used_percent,
         resets_at,
-        summary,
+        summary: summaries.join(" · "),
+        detail: details.join("; "),
     })
 }
 
@@ -1505,6 +1536,7 @@ fn live_usage_from_copilot(body: CopilotUsageResponse) -> LiveUsage {
         },
         used_percent,
         resets_at: None,
+        detail: String::new(),
     }
 }
 
@@ -2388,7 +2420,22 @@ mod tests {
         assert_eq!(live.used_percent, None);
         assert!(live.summary.contains("¥12.35 balance"), "{}", live.summary);
         assert!(live.summary.contains("gift ¥5.00"), "{}", live.summary);
-        assert!(live.summary.contains("token plan:"), "{}", live.summary);
+        assert!(
+            live.summary.contains("token plan unavailable"),
+            "{}",
+            live.summary
+        );
+        assert!(
+            live.summary.contains("plan detail unavailable"),
+            "{}",
+            live.summary
+        );
+        assert!(
+            !live.summary.contains("no subscription"),
+            "{}",
+            live.summary
+        );
+        assert!(live.detail.contains("no subscription"), "{}", live.detail);
     }
 
     #[test]
@@ -2476,6 +2523,76 @@ mod tests {
             "{}",
             live.summary
         );
+        assert!(
+            live.summary.contains("plan detail unavailable"),
+            "{}",
+            live.summary
+        );
+        assert!(!live.summary.contains("skipped"), "{}", live.summary);
+        assert!(live.detail.contains("skipped"), "{}", live.detail);
+    }
+
+    #[test]
+    fn undecryptable_user_id_is_a_decrypt_failure() {
+        use crate::browser_cookie::BrowserCookieBatch;
+        let failure = select_mimo_cookie_header(&[BrowserCookieBatch {
+            browser: "Chrome",
+            profile: "Default".to_string(),
+            cookies: Vec::new(),
+            note: "skipped undecryptable cookies: userId".to_string(),
+            undecryptable: vec!["userId".to_string()],
+        }])
+        .unwrap_err();
+        assert!(
+            failure.message.contains("could not decrypt"),
+            "{}",
+            failure.message
+        );
+        assert!(!failure.message.contains(". "), "{}", failure.message);
+    }
+
+    #[test]
+    fn missing_mimo_session_names_every_scanned_browser() {
+        let failure = select_mimo_cookie_header(&[]).unwrap_err();
+        assert!(
+            failure.message.contains("Chrome Beta"),
+            "{}",
+            failure.message
+        );
+        assert!(
+            failure.message.contains("Chrome Canary"),
+            "{}",
+            failure.message
+        );
+        assert!(failure.message.contains("Arc"), "{}", failure.message);
+        assert!(!failure.message.contains(". "), "{}", failure.message);
+    }
+
+    #[test]
+    fn partial_mimo_failure_keeps_response_body_out_of_summary() {
+        let secret = "session-token-should-not-leak";
+        let live = live_usage_from_mimo(
+            Ok(MimoBalanceData {
+                balance: Some(1.0),
+                gift_balance: None,
+                currency: None,
+            }),
+            Err(format!(
+                "MiMo usage query failed (HTTP 500): api-platform_serviceToken={secret}"
+            )),
+            Ok(MimoPlanDetailData {
+                plan_name: None,
+                current_period_end: None,
+            }),
+        )
+        .expect("usage");
+        assert!(
+            live.summary.contains("token plan unavailable"),
+            "{}",
+            live.summary
+        );
+        assert!(!live.summary.contains(secret), "{}", live.summary);
+        assert!(live.detail.contains(secret), "{}", live.detail);
     }
 
     #[test]

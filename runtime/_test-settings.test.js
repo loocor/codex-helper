@@ -207,6 +207,9 @@ test("settings page exposes provider management", () => {
   expect(settingsSource).toContain("Usage URL");
   expect(settingsSource).toContain('data-codex-helper-provider-field="usagePageUrl"');
   expect(settingsSource).toContain('data-codex-helper-provider-field="usageCookieSource"');
+  expect(settingsSource).toContain("Chrome Beta");
+  expect(settingsSource).toContain("Chrome Canary");
+  expect(settingsSource).toContain("Arc");
   expect(settingsSource).toContain("api-platform_serviceToken");
   expect(settingsSource).toContain("https://api.deepseek.com");
   expect(settingsSource).toContain("https://platform.deepseek.com/usage");

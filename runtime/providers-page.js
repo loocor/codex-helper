@@ -1160,7 +1160,7 @@ function openProviderDialog(mode, provider) {
           </span>`,
           { attr: "data-codex-helper-provider-cookie-header", hidden: true },
         )}
-        <p class="codex-helper-provider-auth-hint" data-codex-helper-provider-cookie-hint hidden>Auto reads Safari, Chrome, Firefox, and Edge. Manual: open the balance page, copy the Cookie header from the /api/v1/balance request. It must include api-platform_serviceToken and userId.</p>
+        <p class="codex-helper-provider-auth-hint" data-codex-helper-provider-cookie-hint hidden>Auto reads Safari, Chrome, Chrome Beta, Chrome Canary, Firefox, Edge, and Arc. Manual: open the balance page, copy the Cookie header from the /api/v1/balance request. It must include api-platform_serviceToken and userId.</p>
         ${providerFieldRow(
           "API key",
           `<span class="codex-helper-provider-secret-row">

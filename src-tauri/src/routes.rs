@@ -419,7 +419,7 @@ fn log_bridge_request(
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    if !should_log_bridge_request(path, status) {
+    if !should_log_bridge_request(path, status) && response_detail(response).is_none() {
         return;
     }
     let _ = logger.append(
@@ -430,6 +430,13 @@ fn log_bridge_request(
 
 fn should_log_bridge_request(_path: &str, status: &str) -> bool {
     status != "ok"
+}
+
+fn response_detail(response: &Value) -> Option<&str> {
+    response
+        .get("detail")
+        .and_then(Value::as_str)
+        .filter(|detail| !detail.is_empty())
 }
 
 fn compact_diagnostic_detail(detail: Value) -> Value {
@@ -1000,6 +1007,7 @@ fn log_provider_event(logger: &crate::logging::DiagnosticLogger, event: &str, re
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     let keep = status != "ok"
+        || response_detail(response).is_some()
         || matches!(
             event,
             "providers.saved"
@@ -1464,6 +1472,38 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("userId=********"));
+    }
+
+    #[test]
+    fn partial_usage_success_logs_redacted_detail() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let logger = crate::logging::DiagnosticLogger::new(temp.path().join("logs"));
+        let secret = "session-token-should-not-leak";
+        log_provider_event(
+            &logger,
+            "providers.usage",
+            &json!({
+                "status": "ok",
+                "summary": "¥1.00 balance · token plan unavailable",
+                "detail": format!("token plan: api-platform_serviceToken={secret}; userId=42"),
+            }),
+        );
+        let contents = std::fs::read_to_string(logger.log_path()).expect("log");
+        assert!(contents.contains("providers.usage"), "{contents}");
+        assert!(
+            contents.contains("api-platform_serviceToken=********"),
+            "{contents}"
+        );
+        assert!(contents.contains("userId=********"), "{contents}");
+        assert!(!contents.contains(secret), "{contents}");
+
+        log_provider_event(
+            &logger,
+            "providers.usage",
+            &json!({ "status": "ok", "summary": "¥1.00 balance" }),
+        );
+        let after = std::fs::read_to_string(logger.log_path()).expect("log");
+        assert_eq!(contents.lines().count(), after.lines().count());
     }
 
     #[test]
