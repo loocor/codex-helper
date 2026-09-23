@@ -991,6 +991,7 @@ function seedCatalogRows(provider, draft) {
   }
   if (catalog.length > 0) {
     catalog.forEach((entry) => addCatalogRow(entry));
+    refreshDefaultModelSelect();
     return;
   }
   const slugs = [];
@@ -1002,6 +1003,33 @@ function seedCatalogRows(provider, draft) {
     slugs.push(value);
   }
   slugs.forEach((model) => addCatalogRow({ model, displayName: model }));
+  refreshDefaultModelSelect();
+}
+
+function refreshDefaultModelSelect() {
+  const select = dialogField("model");
+  if (!(select instanceof HTMLSelectElement)) return;
+  const previous = select.value;
+  const models = collectCatalogModels();
+  select.textContent = "";
+  if (models.length === 0) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "Add models above first";
+    select.appendChild(option);
+    return;
+  }
+  for (const entry of models) {
+    const option = document.createElement("option");
+    option.value = entry.model;
+    option.textContent = entry.displayName !== entry.model
+      ? `${entry.displayName} (${entry.model})`
+      : entry.model;
+    select.appendChild(option);
+  }
+  if (previous && models.some((entry) => entry.model === previous)) {
+    select.value = previous;
+  }
 }
 
 function autoFillableNames() {
@@ -1183,11 +1211,6 @@ function openProviderDialog(mode, provider) {
           </select>`,
           { apiOnly: true, attr: "data-codex-helper-provider-wire-label" },
         )}
-        ${providerFieldRow(
-          "Default model",
-          `<input data-codex-helper-provider-field="model" list="codex-helper-fetched-models" placeholder="Select after fetching models">`,
-          { attr: "data-codex-helper-provider-model-label" },
-        )}
         <div class="codex-helper-provider-mapping-block">
           <div class="codex-helper-provider-mapping-header">
             <span class="codex-helper-provider-field-label">Catalog</span>
@@ -1218,6 +1241,11 @@ function openProviderDialog(mode, provider) {
             </div>
           </div>
         </div>
+        ${providerFieldRow(
+          "Default model",
+          `<select data-codex-helper-provider-field="model"><option value="">Add models above first</option></select>`,
+          { attr: "data-codex-helper-provider-model-label" },
+        )}
         <datalist id="codex-helper-fetched-models"></datalist>
         <div class="codex-helper-provider-dialog-error" data-codex-helper-provider-dialog-error></div>
       </div>
@@ -1280,7 +1308,13 @@ function openProviderDialog(mode, provider) {
   updateProviderAuthHint({ applyDefaults: mode === "new" && !draft });
   applyAutoName();
   refreshProviderOauthStatus();
-  dialog.addEventListener("input", persistProviderDraft);
+  dialog.addEventListener("input", (event) => {
+    persistProviderDraft();
+    const target = event.target;
+    if (target instanceof HTMLElement && target.closest("[data-codex-helper-catalog-row]")) {
+      refreshDefaultModelSelect();
+    }
+  });
   dialog.addEventListener("change", (event) => {
     const field = event.target?.getAttribute?.("data-codex-helper-provider-field");
     if (field === "authMode") {
@@ -1391,7 +1425,13 @@ function setProviderFetchError(message) {
 
 function selectFetchedModel(id) {
   const node = dialogField("model");
-  if (node) node.value = id;
+  if (node instanceof HTMLSelectElement) {
+    if ([...node.options].some((option) => option.value === id)) {
+      node.value = id;
+    }
+  } else if (node) {
+    node.value = id;
+  }
   const rows = [...(providerDialogRoot?.querySelectorAll("[data-codex-helper-catalog-row]") || [])];
   const empty = rows.find((row) => !(row.querySelector("[data-codex-helper-catalog-model]")?.value || "").trim());
   if (empty) {
@@ -1404,6 +1444,7 @@ function selectFetchedModel(id) {
   }
   persistProviderDraft();
   renderFetchedModelOptions();
+  refreshDefaultModelSelect();
 }
 
 function updateProviderAuthHint(options = {}) {
@@ -1693,11 +1734,13 @@ async function handleProviderCommand(command, source) {
   if (command === "provider-catalog-add") {
     addCatalogRow();
     persistProviderDraft();
+    refreshDefaultModelSelect();
     return;
   }
   if (command === "provider-catalog-remove") {
     source.closest("[data-codex-helper-catalog-row]")?.remove();
     persistProviderDraft();
+    refreshDefaultModelSelect();
     return;
   }
   if (source?.getAttribute("data-codex-helper-provider-field") === "authMode") {

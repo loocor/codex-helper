@@ -668,6 +668,14 @@ test("provider save omits models until fetch and requires a default model", () =
   expect(settingsSource).toContain("payload.models = providerFetchedModels");
   expect(settingsSource).not.toContain("catalogModels[0]?.model");
   expect(settingsSource).toContain('setProviderDialogError("Default model is required")');
+  expect(settingsSource).toContain('data-codex-helper-provider-field="model"');
+  expect(settingsSource).toContain("refreshDefaultModelSelect");
+  expect(settingsSource).toContain("Add models above first");
+  expect(settingsSource).toContain("entry.displayName");
+  // Default model lives below the catalog block
+  const modelIdx = settingsSource.indexOf('data-codex-helper-provider-field="model"');
+  const catalogIdx = settingsSource.indexOf("data-codex-helper-catalog-list");
+  expect(modelIdx).toBeGreaterThan(catalogIdx);
   expect(settingsSource).toContain("modelsFetched: providerModelsFetchedThisSession");
   expect(settingsSource).toContain("catch (_error)");
 });
