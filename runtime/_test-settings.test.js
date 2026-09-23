@@ -376,6 +376,16 @@ test("provider list shows each default model display name", () => {
   expect(settingsSource).not.toContain("provider?.model || provider?.baseUrl");
 });
 
+test("providers page exposes automatic fallback switch", () => {
+  expect(settingsSource).toContain("Automatic fallback");
+  expect(settingsSource).toContain(
+    "If the current provider is out of quota or cannot be reached, try the next enabled provider's default model, in the list order above.",
+  );
+  expect(settingsSource).toContain("Official login is not used as a fallback.");
+  expect(settingsSource).toContain('"providerFailoverEnabled"');
+  expect(source).toContain("providerFailoverEnabled: true");
+});
+
 test("settings page exposes API provider LLM traffic logging switch", () => {
   expect(settingsSource).toContain('nativeSettingsGroupSection("Diagnostics"');
   expect(settingsSource).toContain("Log API provider LLM traffic");

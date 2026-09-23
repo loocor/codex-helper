@@ -33,8 +33,8 @@ use crate::provider_oauth::{
     copilot_request_headers, oauth_bearer_token, oauth_kind_from_provider, OAuthKind,
 };
 use crate::providers::{
-    apply_provider_effort_aliases, apply_provider_model_mappings, provider_allowed_models,
-    provider_device_oauth_kind, provider_effort_aliases,
+    apply_provider_effort_aliases, apply_provider_model_mappings, force_request_model,
+    provider_allowed_models, provider_device_oauth_kind, provider_effort_aliases,
     provider_needs_deepseek_responses_sanitize, provider_needs_xai_compat, read_store,
     resolve_model_route, rewrite_unmatched_request_model, selected_api_providers, Provider,
     ProviderKind, ProviderStore,
@@ -122,6 +122,21 @@ fn remember_downgraded_tools(restore: &mut NativeRestore, names: HashSet<String>
     }
 }
 
+fn quota_exhausted_body(bytes: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    let head: String = text.chars().take(800).collect();
+    crate::failover::is_quota_exhausted_excerpt(&head)
+}
+
+fn is_transport_failover_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|reqwest_error| reqwest_error.is_connect() || reqwest_error.is_timeout())
+            || crate::failover::is_transport_failover_message(&cause.to_string())
+    })
+}
+
 fn upstream_error_excerpt(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     let message = serde_json::from_slice::<Value>(bytes)
@@ -140,7 +155,6 @@ fn upstream_error_excerpt(bytes: &[u8]) -> String {
     }
     excerpt
 }
-
 
 struct ForwardAttempt {
     provider: Provider,
@@ -329,9 +343,17 @@ impl ProviderProxy {
         }
         self.authorize_request(&headers, &provider, &store)?;
 
-        let candidates =
-            crate::failover::failover_candidates(&store, &provider.id);
+        let failover_enabled = self.failover_enabled();
+        let candidates = if failover_enabled {
+            crate::failover::failover_candidates(&store, &provider.id)
+        } else {
+            vec![crate::failover::FailoverCandidate {
+                provider_id: provider.id.clone(),
+                model: provider.model.trim().to_string(),
+            }]
+        };
         let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
             .no_proxy()
             .build()
             .context("Failed to build provider proxy client")?;
@@ -353,32 +375,56 @@ impl ProviderProxy {
                 Some(item) => item.clone(),
                 None => continue,
             };
-            if index > 0 {
-                if !health.is_available(&candidate.provider_id, &candidate.model) {
-                    continue;
-                }
-                if quota.is_exhausted(&candidate.provider_id) {
+            let has_more = index + 1 < candidates.len();
+            if failover_enabled && has_more {
+                let exhausted = quota.is_exhausted(&candidate.provider_id);
+                let unhealthy = !health.is_available(&candidate.provider_id, &candidate.model);
+                if exhausted || unhealthy {
+                    self.log_failover(
+                        &candidate.provider_id,
+                        &candidate.model,
+                        None,
+                        if exhausted {
+                            "quota_exhausted"
+                        } else {
+                            "unhealthy"
+                        },
+                    );
                     continue;
                 }
             }
-            let candidate_routed = if index == 0 { routed_upstream.as_deref() } else { None };
+            let candidate_routed = if index == 0 {
+                routed_upstream.as_deref()
+            } else {
+                None
+            };
 
-            let upstream = candidate_provider.base_url.trim().trim_end_matches('/');
-            if upstream.is_empty() {
-                if index == 0 {
-                    anyhow::bail!("Active provider has no base URL");
-                }
-                continue;
-            }
             let oauth_kind = provider_device_oauth_kind(&candidate_provider);
             let upstream = oauth_kind
-                .map(|kind| kind.default_base_url().to_string())
-                .unwrap_or_else(|| upstream.to_string());
+                .map(|kind| kind.default_base_url().trim_end_matches('/').to_string())
+                .unwrap_or_else(|| {
+                    candidate_provider
+                        .base_url
+                        .trim()
+                        .trim_end_matches('/')
+                        .to_string()
+                });
+            if upstream.is_empty() {
+                if failover_enabled && has_more {
+                    self.log_failover(
+                        &candidate.provider_id,
+                        &candidate.model,
+                        None,
+                        "missing_base_url",
+                    );
+                    continue;
+                }
+                anyhow::bail!("Active provider has no base URL");
+            }
             let url = join_provider_upstream_url_for(oauth_kind, &upstream, &path);
             let mut body = raw_body.to_vec();
             let xai_compat = provider_needs_xai_compat(&candidate_provider);
-            let deepseek_sanitize =
-                provider_needs_deepseek_responses_sanitize(&candidate_provider);
+            let deepseek_sanitize = provider_needs_deepseek_responses_sanitize(&candidate_provider);
             let xai_request = xai_compat && responses_path;
             let deepseek_request = deepseek_sanitize && responses_path;
             let mut restore = NativeRestore::None;
@@ -386,11 +432,14 @@ impl ProviderProxy {
             if rewrite {
                 let mut json_body = serde_json::from_slice::<Value>(&body)
                     .context("Provider request is not valid JSON")?;
+                if index > 0 {
+                    force_request_model(&mut json_body, &candidate.model);
+                }
                 let mapped = apply_provider_model_mappings(
                     &mut json_body,
                     &candidate_provider.model_mappings,
                 );
-                if !mapped {
+                if !mapped && index == 0 {
                     if let Some(upstream_model) = candidate_routed {
                         if let Some(object) = json_body.as_object_mut() {
                             object.insert(
@@ -413,8 +462,7 @@ impl ProviderProxy {
                 if xai_request {
                     restore = NativeRestore::Xai(apply_xai_native_responses_request_compat(
                         &mut json_body,
-                        Some(candidate_provider.model.as_str())
-                            .filter(|model| !model.is_empty()),
+                        Some(candidate_provider.model.as_str()).filter(|model| !model.is_empty()),
                         &provider_allowed_models(&candidate_provider),
                     ));
                 }
@@ -442,31 +490,40 @@ impl ProviderProxy {
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
-                    if index == 0 {
-                        return Err(error);
+                    if failover_enabled && has_more && is_transport_failover_error(&error) {
+                        health.record_failure(&candidate.provider_id, &candidate.model);
+                        self.log_failover(
+                            &candidate.provider_id,
+                            &candidate.model,
+                            None,
+                            "network",
+                        );
+                        continue;
                     }
-                    health.record_failure(&candidate.provider_id, &candidate.model);
-                    continue;
+                    return Err(error);
                 }
             };
             let status = response.status();
-            let has_more = index + 1 < candidates.len();
-            if has_more && crate::failover::is_failover_status(status.as_u16()) {
+            if failover_enabled && has_more && crate::failover::is_failover_status(status.as_u16())
+            {
+                let status_code = status.as_u16();
+                let bytes = response.bytes().await.unwrap_or_default();
+                let quota_hit = crate::failover::is_quota_exhausted_status(status_code)
+                    || quota_exhausted_body(&bytes);
                 health.record_failure(&candidate.provider_id, &candidate.model);
-                if crate::failover::is_quota_exhausted_status(status.as_u16()) {
+                if quota_hit {
                     quota.mark_exhausted(&candidate.provider_id);
                 }
-                if let Some(logger) = self.logger() {
-                    let _ = logger.append(
-                        "providers.failover",
-                        serde_json::json!({
-                            "fromProvider": candidate.provider_id,
-                            "fromModel": candidate.model,
-                            "status": status.as_u16(),
-                        }),
-                    );
-                }
-                let _ = response.bytes().await;
+                self.log_failover(
+                    &candidate.provider_id,
+                    &candidate.model,
+                    Some(status_code),
+                    if quota_hit {
+                        "quota_exhausted"
+                    } else {
+                        "upstream_status"
+                    },
+                );
                 last_response = None;
                 continue;
             }
@@ -491,7 +548,14 @@ impl ProviderProxy {
             Some(attempt) => attempt,
             None => {
                 if let Some(response) = last_response {
-                    return self.serve_response(response, NativeRestore::None, None).await;
+                    return self
+                        .serve_response(response, NativeRestore::None, None)
+                        .await;
+                }
+                if failover_enabled {
+                    anyhow::bail!(
+                        "No enabled provider responded. Automatic fallback skipped unreachable or quota-exhausted providers."
+                    );
                 }
                 anyhow::bail!("No failover candidate produced a response");
             }
@@ -523,13 +587,8 @@ impl ProviderProxy {
                     }
                     remember_downgraded_tools(&mut attempt.restore, names);
                     let body = serde_json::to_vec(&*json_body)?;
-                    attempt.pending_log = self.pending_llm_log(
-                        &path,
-                        &method,
-                        &attempt.provider.id,
-                        &headers,
-                        &body,
-                    );
+                    attempt.pending_log =
+                        self.pending_llm_log(&path, &method, &attempt.provider.id, &headers, &body);
                     let retry = match self
                         .send_upstream(
                             &client,
@@ -699,7 +758,6 @@ impl ProviderProxy {
             inspect_stream,
         ))?)
     }
-
 }
 
 fn bytes_body(bytes: impl Into<Bytes>) -> ProxyBody {
@@ -1103,6 +1161,28 @@ impl ProviderProxy {
                 "shapeAfter": "function",
                 "retryStatus": retry_status,
                 "errorExcerpt": excerpt,
+            }),
+        );
+    }
+
+    fn failover_enabled(&self) -> bool {
+        match self.state_root() {
+            Ok(root) => crate::settings::provider_failover_enabled(&root),
+            Err(_) => true,
+        }
+    }
+
+    fn log_failover(&self, provider_id: &str, model: &str, status: Option<u16>, reason: &str) {
+        let Some(logger) = self.logger() else {
+            return;
+        };
+        let _ = logger.append(
+            "providers.failover",
+            serde_json::json!({
+                "fromProvider": provider_id,
+                "fromModel": model,
+                "status": status,
+                "reason": reason,
             }),
         );
     }

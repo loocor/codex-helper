@@ -14,6 +14,10 @@ pub struct HelperSettings {
     pub hide_usage_limit_banner_enabled: bool,
     pub launch_at_login_enabled: bool,
     pub log_llm_traffic_enabled: bool,
+    /// When enabled, an unreachable or quota-exhausted API provider yields to
+    /// the next enabled provider's default model. Official login is never a
+    /// fallback target.
+    pub provider_failover_enabled: bool,
 }
 
 impl Default for HelperSettings {
@@ -25,6 +29,7 @@ impl Default for HelperSettings {
             hide_usage_limit_banner_enabled: false,
             launch_at_login_enabled: false,
             log_llm_traffic_enabled: false,
+            provider_failover_enabled: true,
         }
     }
 }
@@ -104,6 +109,7 @@ fn apply_setting_value(
         }
         "launchAtLoginEnabled" => settings.launch_at_login_enabled = bool_setting(key, value)?,
         "logLlmTrafficEnabled" => settings.log_llm_traffic_enabled = bool_setting(key, value)?,
+        "providerFailoverEnabled" => settings.provider_failover_enabled = bool_setting(key, value)?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -113,6 +119,12 @@ fn bool_setting(key: &str, value: &Value) -> anyhow::Result<bool> {
     value
         .as_bool()
         .ok_or_else(|| anyhow::anyhow!("Settings value for {key} must be a boolean"))
+}
+
+pub fn provider_failover_enabled(state_root: &Path) -> bool {
+    read_settings(&state_root.join("config.json"))
+        .map(|settings| settings.provider_failover_enabled)
+        .unwrap_or(true)
 }
 
 pub fn write_settings(path: &Path, settings: &HelperSettings) -> anyhow::Result<()> {
@@ -138,6 +150,7 @@ mod tests {
         assert!(!settings.hide_usage_limit_banner_enabled);
         assert!(!settings.launch_at_login_enabled);
         assert!(!settings.log_llm_traffic_enabled);
+        assert!(settings.provider_failover_enabled);
     }
 
     #[test]
@@ -312,5 +325,35 @@ mod tests {
             .expect_err("removed setting should fail on update");
 
         assert!(error.to_string().contains("Unknown settings key"));
+    }
+
+    #[test]
+    fn update_settings_can_disable_provider_failover() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("config.json");
+        ensure_settings_file(&path).expect("initial settings");
+
+        let settings = update_settings(
+            &path,
+            &serde_json::json!({
+                "providerFailoverEnabled": false
+            }),
+        )
+        .expect("updated settings");
+        let persisted = read_settings(&path).expect("persisted settings");
+
+        assert!(!settings.provider_failover_enabled);
+        assert_eq!(settings, persisted);
+    }
+
+    #[test]
+    fn missing_provider_failover_key_stays_enabled() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("config.json");
+        fs::write(&path, "{}\n").expect("settings");
+
+        let settings = read_settings(&path).expect("settings");
+
+        assert!(settings.provider_failover_enabled);
     }
 }

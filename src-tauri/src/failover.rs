@@ -1,6 +1,7 @@
-//! Provider-level failover: walk the enabled provider list top to bottom
-//! when the current provider returns an upstream error. Quota-exhausted
-//! providers are skipped automatically.
+//! Provider-level failover: when enabled, walk enabled API providers in
+//! list order after the current provider fails because it is out of quota
+//! or cannot be reached. Each fallback uses that provider's default model.
+//! Official login is never a fallback target.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -19,12 +20,65 @@ pub const QUOTA_EXHAUSTED_COOLDOWN: Duration = Duration::from_secs(300);
 /// failover. Other 4xx statuses describe the request itself, so they are
 /// forwarded to Codex unchanged.
 pub fn is_failover_status(status: u16) -> bool {
-    matches!(status, 401 | 403 | 404 | 408 | 429) || status >= 500
+    matches!(status, 401 | 402 | 403 | 404 | 408 | 429) || status >= 500
 }
 
 /// HTTP status that indicates quota exhaustion (rate or plan limit hit).
 pub fn is_quota_exhausted_status(status: u16) -> bool {
-    status == 429
+    matches!(status, 402 | 429)
+}
+
+/// Body text that means the provider refused the call for quota or balance,
+/// even when the status is not 429. Matching is intentionally narrow so a
+/// normal request error is not treated as exhaustion.
+pub fn is_quota_exhausted_excerpt(excerpt: &str) -> bool {
+    let lower = excerpt.to_ascii_lowercase();
+    const NEEDLES: &[&str] = &[
+        "insufficient_quota",
+        "insufficient quota",
+        "quota_exceeded",
+        "quota exceeded",
+        "exceeded your current quota",
+        "exceeded_current_quota",
+        "billing_hard_limit",
+        "insufficient_balance",
+        "insufficient balance",
+        "credit balance is too low",
+        "credit balance too low",
+        "out of credits",
+        "余额不足",
+        "额度不足",
+        "额度已用完",
+        "配额不足",
+        "配额已用完",
+    ];
+    NEEDLES.iter().any(|needle| lower.contains(needle))
+}
+
+/// Transport failures that mean this provider cannot be reached. Local
+/// configuration errors are not included; those should surface as-is.
+pub fn is_transport_failover_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    const NEEDLES: &[&str] = &[
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection refused",
+        "connection aborted",
+        "connection closed",
+        "broken pipe",
+        "network is unreachable",
+        "network unreachable",
+        "dns error",
+        "failed to lookup",
+        "nodename nor servname",
+        "no such host",
+        "tcp connect",
+        "tls handshake",
+        "certificate",
+        "error trying to connect",
+    ];
+    NEEDLES.iter().any(|needle| lower.contains(needle))
 }
 
 /// One upstream stop in the failover walk.
@@ -121,10 +175,7 @@ impl QuotaState {
 
     pub fn mark_exhausted(&self, provider_id: &str) {
         let mut map = self.exhausted.lock().expect("quota state lock");
-        map.insert(
-            provider_id.trim().to_ascii_lowercase(),
-            Instant::now(),
-        );
+        map.insert(provider_id.trim().to_ascii_lowercase(), Instant::now());
     }
 
     /// Called from usage queries. `percent >= 100` marks exhausted,
@@ -153,49 +204,52 @@ impl QuotaState {
     }
 }
 
-/// Candidate order for a request: the primary provider first, then the
-/// remaining enabled providers in `selected_ids` order using their default
-/// `model`. Official / OAuth providers and providers without a default
-/// model are skipped. Duplicates of the primary are dropped.
+fn usable_failover_provider(provider: &crate::providers::Provider) -> bool {
+    provider.id != OFFICIAL_PROVIDER_ID
+        && provider.kind == ProviderKind::ApiKey
+        && !provider.model.trim().is_empty()
+}
+
+/// Candidate order: the provider that was supposed to serve this request,
+/// then enabled providers after it in the settings list, then providers
+/// before it. Each stop uses that provider's default model. Official login
+/// and providers without a default model are skipped.
 pub fn failover_candidates(
     store: &ProviderStore,
     primary_provider_id: &str,
 ) -> Vec<FailoverCandidate> {
-    let mut candidates = Vec::new();
+    let selected = crate::providers::effective_selected_ids(store);
+    let enabled: Vec<&crate::providers::Provider> =
+        crate::providers::providers_in_display_order(store)
+            .into_iter()
+            .filter(|provider| {
+                usable_failover_provider(provider) && selected.iter().any(|id| id == &provider.id)
+            })
+            .collect();
     let primary = primary_provider_id.trim();
-    if !primary.is_empty() {
-        if let Some(provider) = store.providers.iter().find(|p| p.id == primary) {
-            if provider.kind == ProviderKind::ApiKey && !provider.model.trim().is_empty() {
-                candidates.push(FailoverCandidate {
-                    provider_id: provider.id.clone(),
-                    model: provider.model.trim().to_string(),
-                });
+    let mut ordered = Vec::new();
+    if let Some(index) = enabled.iter().position(|provider| provider.id == primary) {
+        ordered.extend(enabled.iter().skip(index).copied());
+        ordered.extend(enabled.iter().take(index).copied());
+    } else {
+        if let Some(provider) = store
+            .providers
+            .iter()
+            .find(|provider| provider.id == primary)
+        {
+            if usable_failover_provider(provider) {
+                ordered.push(provider);
             }
         }
+        ordered.extend(enabled);
     }
-    for provider in crate::providers::selected_api_providers(store) {
-        if provider.id.eq_ignore_ascii_case(primary) {
-            continue;
-        }
-        if provider.id == OFFICIAL_PROVIDER_ID || provider.kind != ProviderKind::ApiKey {
-            continue;
-        }
-        let model = provider.model.trim();
-        if model.is_empty() {
-            continue;
-        }
-        if candidates
-            .iter()
-            .any(|c| c.provider_id.eq_ignore_ascii_case(&provider.id))
-        {
-            continue;
-        }
-        candidates.push(FailoverCandidate {
+    ordered
+        .into_iter()
+        .map(|provider| FailoverCandidate {
             provider_id: provider.id.clone(),
-            model: model.to_string(),
-        });
-    }
-    candidates
+            model: provider.model.trim().to_string(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -232,6 +286,7 @@ mod tests {
         assert!(is_failover_status(403));
         assert!(is_failover_status(404));
         assert!(is_failover_status(408));
+        assert!(is_failover_status(402));
         assert!(is_failover_status(429));
         assert!(is_failover_status(500));
         assert!(is_failover_status(503));
@@ -243,7 +298,35 @@ mod tests {
     #[test]
     fn quota_exhausted_status() {
         assert!(is_quota_exhausted_status(429));
+        assert!(is_quota_exhausted_status(402));
         assert!(!is_quota_exhausted_status(500));
+        assert!(!is_quota_exhausted_status(400));
+    }
+
+    #[test]
+    fn quota_excerpt_is_narrow() {
+        assert!(is_quota_exhausted_excerpt(
+            "You exceeded your current quota"
+        ));
+        assert!(is_quota_exhausted_excerpt("error code insufficient_quota"));
+        assert!(is_quota_exhausted_excerpt("余额不足"));
+        assert!(!is_quota_exhausted_excerpt("model_not_found"));
+        assert!(!is_quota_exhausted_excerpt("quota remaining: 40%"));
+    }
+
+    #[test]
+    fn transport_message_matches_network_failures_only() {
+        assert!(is_transport_failover_message(
+            "Provider upstream request failed: connection refused"
+        ));
+        assert!(is_transport_failover_message("dns error: no such host"));
+        assert!(is_transport_failover_message("operation timed out"));
+        assert!(!is_transport_failover_message(
+            "Provider API key is required"
+        ));
+        assert!(!is_transport_failover_message(
+            "Provider request is not valid JSON"
+        ));
     }
 
     #[test]
@@ -267,6 +350,34 @@ mod tests {
     }
 
     #[test]
+    fn candidates_continue_down_the_list_then_wrap() {
+        let store = store(&["a", "b", "c"], &["model-a", "model-b", "model-c"]);
+        let candidates = failover_candidates(&store, "b");
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "c", "a"]
+        );
+        assert_eq!(candidates[1].model, "model-c");
+    }
+
+    #[test]
+    fn candidates_follow_display_order_not_selection_insertion_order() {
+        let mut store = store(&["a", "b", "c"], &["model-a", "model-b", "model-c"]);
+        store.selected_ids = vec!["c".to_string(), "a".to_string(), "b".to_string()];
+        let candidates = failover_candidates(&store, "a");
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
     fn candidates_skip_empty_model() {
         let store = store(&["a", "b", "c"], &["model-a", "", "model-c"]);
         let candidates = failover_candidates(&store, "a");
@@ -287,7 +398,9 @@ mod tests {
         s.selected_ids.push(OFFICIAL_PROVIDER_ID.to_string());
         let candidates = failover_candidates(&s, "a");
         assert_eq!(candidates.len(), 2);
-        assert!(!candidates.iter().any(|c| c.provider_id == OFFICIAL_PROVIDER_ID));
+        assert!(!candidates
+            .iter()
+            .any(|c| c.provider_id == OFFICIAL_PROVIDER_ID));
     }
 
     #[test]

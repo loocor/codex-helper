@@ -161,6 +161,9 @@ function renderNativeHelperSettingsPage(host, pageId) {
   helperNativeSettingsContentHost = host;
   helperNativeSettingsActivePage = pageId;
   updateNativeSettingsActiveEntry(pageId);
+  if (typeof applySettings === "function" && featureSettingsLoaded) {
+    applySettings({ status: "ok", settings: featureSettings });
+  }
   return page;
 }
 
@@ -275,6 +278,9 @@ function nativeSettingsProvidersPageContent() {
       ${nativeSettingsPanel(`
         <div class="codex-helper-settings-scroll" data-codex-helper-providers-list></div>
         ${nativeSettingsListFooter("data-codex-helper-providers-status")}
+      `)}
+      ${nativeSettingsPanel(`
+        ${nativeSettingsSwitchRow("Automatic fallback", "If the current provider is out of quota or cannot be reached, try the next enabled provider's default model, in the list order above. Official login is not used as a fallback.", "providerFailoverEnabled", "providerFailoverEnabled", "Automatic fallback")}
       `)}
     </section>
   `;

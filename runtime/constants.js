@@ -64,5 +64,6 @@ let featureSettings = {
   hideUsageLimitBannerEnabled: false,
   launchAtLoginEnabled: false,
   logLlmTrafficEnabled: false,
+  providerFailoverEnabled: true,
 };
 let featureSettingsLoaded = false;

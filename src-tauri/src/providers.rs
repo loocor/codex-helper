@@ -1244,6 +1244,27 @@ pub fn apply_provider_model_mappings(body: &mut Value, mappings: &[ModelMapping]
     true
 }
 
+/// Replace the request model with a failover provider's default model.
+pub fn force_request_model(body: &mut Value, model: &str) -> bool {
+    let model = model.trim();
+    if model.is_empty() {
+        return false;
+    }
+    let Some(object) = body.as_object_mut() else {
+        return false;
+    };
+    let current = object
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if current == model {
+        return false;
+    }
+    object.insert("model".to_string(), Value::String(model.to_string()));
+    true
+}
+
 pub fn rewrite_unmatched_request_model(
     body: &mut Value,
     default_model: &str,
@@ -2347,5 +2368,13 @@ mod tests {
             .expect("catalog");
         assert!(catalog.contains("grok"));
         assert!(!catalog.contains("deepseek"));
+    }
+
+    #[test]
+    fn force_request_model_replaces_the_original_model() {
+        let mut body = serde_json::json!({ "model": "gpt-5.4" });
+        assert!(force_request_model(&mut body, "deepseek-v4-flash"));
+        assert_eq!(body["model"], "deepseek-v4-flash");
+        assert!(!force_request_model(&mut body, "deepseek-v4-flash"));
     }
 }
