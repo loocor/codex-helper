@@ -1,4 +1,7 @@
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::bridge::{BridgeCaller, BridgeRequest};
 use crate::codex_control::CodexController;
@@ -28,7 +31,7 @@ struct HelperState {
 }
 
 const TRAY_ICON_ID: &str = "codex-helper";
-const TRAY_PROVIDERS_SUBMENU_ID: &str = "providers";
+const TRAY_FAILOVER_ID: &str = "toggle-provider-failover";
 const TRAY_ACTIVATE_PROVIDER_PREFIX: &str = "activate-provider:";
 
 struct TrayMenuItemSpec {
@@ -40,6 +43,34 @@ struct TrayProviderItemSpec {
     id: String,
     label: String,
     checked: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrayMenuSection {
+    Settings,
+    Providers,
+    Separator,
+    Failover,
+    Restart,
+    Quit,
+}
+
+/// Top to bottom: Settings, optional provider group, Automatic fallback,
+/// Restart ChatGPT, then Quit alone. Separators sit between those groups.
+fn tray_menu_sections(has_providers: bool) -> Vec<TrayMenuSection> {
+    let mut sections = vec![TrayMenuSection::Settings];
+    if has_providers {
+        sections.push(TrayMenuSection::Separator);
+        sections.push(TrayMenuSection::Providers);
+    }
+    sections.extend([
+        TrayMenuSection::Separator,
+        TrayMenuSection::Failover,
+        TrayMenuSection::Restart,
+        TrayMenuSection::Separator,
+        TrayMenuSection::Quit,
+    ]);
+    sections
 }
 
 fn tray_menu_item_specs() -> [TrayMenuItemSpec; 3] {
@@ -69,6 +100,12 @@ fn parse_tray_activate_provider_id(event_id: &str) -> Option<&str> {
         .filter(|provider_id| !provider_id.is_empty())
 }
 
+fn provider_failover_enabled_for_tray(app: &tauri::AppHandle) -> bool {
+    app.try_state::<HelperState>()
+        .map(|state| crate::settings::provider_failover_enabled(&state.state_dir.root))
+        .unwrap_or(true)
+}
+
 fn tray_provider_display_name(provider: &Provider) -> &str {
     let name = provider.name.trim();
     if name.is_empty() {
@@ -78,36 +115,368 @@ fn tray_provider_display_name(provider: &Provider) -> &str {
     }
 }
 
-fn tray_provider_default_model_label(provider: &Provider) -> Option<String> {
-    let model = provider.model.trim();
-    if model.is_empty() {
-        return None;
-    }
-    let display = provider
-        .catalog_models
-        .iter()
-        .find(|entry| entry.model == model)
-        .map(|entry| entry.display_name.trim())
-        .filter(|name| !name.is_empty())
-        .unwrap_or(model);
-    Some(display.to_string())
+fn escape_menu_mnemonic(text: &str) -> String {
+    text.replace('&', "&&")
 }
 
-fn tray_provider_label(provider: &Provider) -> String {
-    let name = tray_provider_display_name(provider);
-    match tray_provider_default_model_label(provider) {
-        Some(model) => format!("{name} — {}", model.replace('&', "&&")),
-        None => name.replace('&', "&&"),
+struct TrayUsageWindow {
+    label: String,
+    percent: String,
+}
+
+fn tray_usage_text(snapshot: &crate::provider_usage::UsageSnapshot) -> Option<String> {
+    let summary = snapshot.summary.trim();
+    if !summary.is_empty() {
+        if let Some(text) = compact_tray_usage(summary) {
+            if !text.is_empty() && !looks_like_usage_meter(&text) {
+                return Some(text);
+            }
+        }
     }
+    // `used_percent` stays consumed so quota exhaustion still means 100% used.
+    // The tray shows what is left, matching a remaining balance.
+    snapshot
+        .used_percent
+        .filter(|value| value.is_finite())
+        .map(|used| format_tray_percent(remaining_percent(used)))
+}
+
+fn compact_tray_usage(summary: &str) -> Option<String> {
+    let mut windows = Vec::new();
+    let mut balances = Vec::new();
+    let mut unlimited = false;
+    for part in summary.split('·') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(window) = parse_tray_window(part) {
+            windows.push(window);
+            continue;
+        }
+        if let Some(amount) = parse_tray_balance(part) {
+            balances.push(amount);
+            continue;
+        }
+        if part.to_ascii_lowercase().contains("unlimited") {
+            unlimited = true;
+        }
+    }
+    windows.sort_by_key(|window| tray_window_rank(&window.label));
+    let mut pieces: Vec<String> = windows
+        .into_iter()
+        .map(|window| {
+            if window.label.is_empty() {
+                window.percent
+            } else {
+                format!("{} {}", window.label, window.percent)
+            }
+        })
+        .collect();
+    if pieces.is_empty() && unlimited {
+        pieces.push("unlimited".to_string());
+    }
+    pieces.extend(balances);
+    if !pieces.is_empty() {
+        return Some(pieces.join(" / "));
+    }
+    let stripped = collapse_ws(&strip_usage_meter_bars(summary));
+    if looks_like_usage_meter(summary) {
+        if let Some(percent) = trailing_percent(&stripped) {
+            return Some(invert_percent_text(&percent));
+        }
+    }
+    if let Some(percent) = trailing_percent(&stripped) {
+        return Some(percent);
+    }
+    if stripped.is_empty() || looks_like_usage_meter(&stripped) {
+        return None;
+    }
+    Some(stripped.chars().take(42).collect())
+}
+
+fn parse_tray_window(part: &str) -> Option<TrayUsageWindow> {
+    if part.to_ascii_lowercase().contains("% used") {
+        return parse_used_window(part);
+    }
+    parse_remaining_window(part)
+}
+
+/// `5h 89%` and `1w 70%` are remaining. A bare `89%` is remaining too.
+fn parse_remaining_window(part: &str) -> Option<TrayUsageWindow> {
+    let (raw_label, value) = split_label_percent(part)?;
+    if !is_tray_window_label(&raw_label) {
+        return None;
+    }
+    Some(TrayUsageWindow {
+        label: format_tray_window_label(&raw_label),
+        percent: format_tray_percent(value),
+    })
+}
+
+/// Cached summaries still say `80% used (5h)`. Show the remainder, not the spend.
+fn parse_used_window(part: &str) -> Option<TrayUsageWindow> {
+    let lower = part.to_ascii_lowercase();
+    let index = lower.find("% used")?;
+    let before = part[..index].trim();
+    let number = before.split_whitespace().last()?;
+    let value = number.parse::<f64>().ok()?;
+    if !value.is_finite() {
+        return None;
+    }
+    let label = part[index + "% used".len()..]
+        .trim()
+        .strip_prefix('(')
+        .and_then(|rest| rest.split(')').next())
+        .map(str::trim)
+        .filter(|label| is_tray_window_label(label))
+        .map(format_tray_window_label)
+        .unwrap_or_default();
+    Some(TrayUsageWindow {
+        label,
+        percent: format_tray_percent(remaining_percent(value)),
+    })
+}
+
+fn split_label_percent(part: &str) -> Option<(String, f64)> {
+    let trimmed = part.trim();
+    if trimmed.is_empty() || trimmed.contains('(') {
+        return None;
+    }
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    if tokens.is_empty() || tokens.len() > 2 {
+        return None;
+    }
+    let number = tokens.last()?.trim_end_matches('%');
+    if !tokens.last()?.ends_with('%') {
+        return None;
+    }
+    let value = number.parse::<f64>().ok()?;
+    if !value.is_finite() {
+        return None;
+    }
+    let label = if tokens.len() == 1 {
+        String::new()
+    } else {
+        tokens[0].to_string()
+    };
+    Some((label, value))
+}
+
+fn is_tray_window_label(label: &str) -> bool {
+    let label = label.trim();
+    if label.is_empty() {
+        return true;
+    }
+    if label.len() > 8 || label.contains('/') || label.contains('%') {
+        return false;
+    }
+    matches!(
+        label.to_ascii_lowercase().as_str(),
+        "5h" | "1w" | "1m" | "week" | "weekly" | "day" | "daily" | "month" | "monthly"
+    )
+}
+
+fn format_tray_window_label(label: &str) -> String {
+    match label.trim().to_ascii_lowercase().as_str() {
+        "week" | "weekly" | "1w" => "1w".to_string(),
+        "5h" => "5h".to_string(),
+        "month" | "monthly" | "1m" => "1m".to_string(),
+        "day" | "daily" => "Day".to_string(),
+        _ => String::new(),
+    }
+}
+
+fn tray_window_rank(label: &str) -> u8 {
+    match label {
+        "5h" => 0,
+        "1w" => 1,
+        "Day" => 2,
+        "1m" => 3,
+        "" => 5,
+        _ => 4,
+    }
+}
+
+fn remaining_percent(used: f64) -> f64 {
+    (100.0 - used.clamp(0.0, 100.0)).clamp(0.0, 100.0)
+}
+
+fn parse_tray_balance(part: &str) -> Option<String> {
+    let lower = part.to_ascii_lowercase();
+    if !lower.contains("remaining") && !lower.contains("balance") {
+        return None;
+    }
+    let head = part.split('(').next()?.trim();
+    if let Some(amount) = find_symbol_amount(head) {
+        return Some(amount);
+    }
+    let tokens: Vec<&str> = head.split_whitespace().collect();
+    for pair in tokens.windows(2) {
+        if let Some(symbol) = currency_symbol(pair[0]) {
+            if let Some(amount) = parse_money_amount(pair[1]) {
+                return Some(format!("{symbol}{amount}"));
+            }
+        }
+    }
+    for token in &tokens {
+        if token.eq_ignore_ascii_case("remaining") || token.eq_ignore_ascii_case("balance") {
+            break;
+        }
+        if let Some(amount) = parse_money_amount(token) {
+            return Some(amount);
+        }
+    }
+    None
+}
+
+fn find_symbol_amount(text: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    for (index, ch) in chars.iter().enumerate() {
+        let symbol = match ch {
+            '¥' | '￥' => "¥",
+            '$' => "$",
+            '€' => "€",
+            '£' => "£",
+            _ => continue,
+        };
+        let rest: String = chars[index + 1..].iter().collect();
+        let token = rest.split_whitespace().next().unwrap_or("");
+        if let Some(amount) = parse_money_amount(token) {
+            return Some(format!("{symbol}{amount}"));
+        }
+    }
+    None
+}
+
+fn currency_symbol(code: &str) -> Option<&'static str> {
+    match code.trim().to_ascii_uppercase().as_str() {
+        "CNY" | "RMB" => Some("¥"),
+        "USD" => Some("$"),
+        "EUR" => Some("€"),
+        "GBP" => Some("£"),
+        _ => None,
+    }
+}
+
+fn parse_money_amount(token: &str) -> Option<String> {
+    let cleaned: String = token
+        .chars()
+        .filter(|ch| ch.is_ascii_digit() || *ch == '.' || *ch == '-')
+        .collect();
+    if cleaned.is_empty() || cleaned == "-" || cleaned == "." {
+        return None;
+    }
+    let value: f64 = cleaned.parse().ok()?;
+    if !value.is_finite() {
+        return None;
+    }
+    Some(format!("{value:.2}"))
+}
+
+fn invert_percent_text(text: &str) -> String {
+    let number = text.trim().trim_end_matches('%');
+    let value = number.parse::<f64>().unwrap_or(0.0);
+    format_tray_percent(remaining_percent(value))
+}
+
+fn format_tray_percent(value: f64) -> String {
+    let value = value.clamp(0.0, 100.0);
+    if (value - value.round()).abs() < 0.05 {
+        format!("{value:.0}%")
+    } else {
+        format!("{value:.1}%")
+    }
+}
+
+fn trailing_percent(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut last = None;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index].is_ascii_digit() {
+            let start = index;
+            while index < bytes.len() && (bytes[index].is_ascii_digit() || bytes[index] == b'.') {
+                index += 1;
+            }
+            if index < bytes.len() && bytes[index] == b'%' {
+                if let Ok(value) = text[start..index].parse::<f64>() {
+                    if value.is_finite() {
+                        last = Some(format_tray_percent(value));
+                    }
+                }
+                index += 1;
+                continue;
+            }
+            continue;
+        }
+        index += 1;
+    }
+    last
+}
+
+fn strip_usage_meter_bars(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '[' {
+            if let Some(end) = chars[index + 1..].iter().position(|ch| *ch == ']') {
+                let inner: String = chars[index + 1..index + 1 + end].iter().collect();
+                if !inner.is_empty() && inner.chars().all(|ch| ch == '#' || ch == '-' || ch == '=')
+                {
+                    index += end + 2;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn collapse_ws(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn looks_like_usage_meter(text: &str) -> bool {
+    text.contains("----") || text.contains("####") || text.contains("[#")
+}
+
+fn tray_provider_label(
+    provider: &Provider,
+    usage: Option<&crate::provider_usage::UsageSnapshot>,
+) -> String {
+    let name = escape_menu_mnemonic(tray_provider_display_name(provider));
+    let Some(text) = usage.and_then(tray_usage_text) else {
+        return name;
+    };
+    if text.is_empty() {
+        return name;
+    }
+    format!("{name} - {}", escape_menu_mnemonic(&text))
+}
+
+fn tray_provider_is_selected(store: &ProviderStore, provider_id: &str) -> bool {
+    // Same membership as Settings "Include in the model list". Empty legacy
+    // stores mean the active provider. Official stays out of this menu.
+    crate::providers::effective_selected_ids(store)
+        .iter()
+        .any(|id| id == provider_id)
 }
 
 fn tray_provider_item_specs(store: &ProviderStore) -> Vec<TrayProviderItemSpec> {
     providers_in_display_order(store)
         .into_iter()
+        .filter(|provider| provider.id != "official")
         .map(|provider| TrayProviderItemSpec {
             id: tray_activate_provider_id(&provider.id),
-            label: tray_provider_label(provider),
-            checked: store.selected_ids.contains(&provider.id),
+            label: tray_provider_label(
+                provider,
+                crate::provider_usage::usage_snapshot(&provider.id).as_ref(),
+            ),
+            checked: tray_provider_is_selected(store, &provider.id),
         })
         .collect()
 }
@@ -171,17 +540,21 @@ async fn helper_bridge(
         },
     };
     let result = handle_bridge_request(ctx, request).await;
-    if matches!(
-        path.as_str(),
-        "/providers/save"
-            | "/providers/delete"
-            | "/providers/activate"
-            | "/providers/select"
-            | "/providers/reorder"
-    ) && result.get("status").and_then(Value::as_str) == Some("ok")
-    {
-        if let Err(error) = rebuild_tray_menu(&app) {
-            eprintln!("failed to rebuild tray menu: {error}");
+    if result.get("status").and_then(Value::as_str) == Some("ok") {
+        if matches!(
+            path.as_str(),
+            "/providers/save"
+                | "/providers/delete"
+                | "/providers/activate"
+                | "/providers/select"
+                | "/providers/reorder"
+                | "/settings/set"
+        ) {
+            if let Err(error) = rebuild_tray_menu(&app) {
+                eprintln!("failed to rebuild tray menu: {error}");
+            }
+        } else if path == "/providers/usage" {
+            schedule_tray_menu_rebuild(app.clone());
         }
     }
     Ok(result)
@@ -335,6 +708,7 @@ pub fn run() {
                 eprintln!("failed to sync launch at login: {error}");
             }
             install_menu_bar_item(app.handle(), controller.clone(), port_manager.clone())?;
+            spawn_usage_refresh_loop(app.handle().clone(), state_dir.root.clone());
             let startup_app = app.handle().clone();
             let proxy = global_provider_proxy();
             proxy.set_state_root(state_dir.root.clone());
@@ -432,13 +806,20 @@ fn provider_store_for_tray(app: &tauri::AppHandle) -> anyhow::Result<ProviderSto
 }
 
 fn build_tray_menu(app: &tauri::AppHandle) -> anyhow::Result<tauri::menu::Menu<tauri::Wry>> {
-    use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+    use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
 
     let specs = tray_menu_item_specs();
     let open_settings = MenuItem::with_id(app, specs[0].id, specs[0].label, true, None::<&str>)?;
     let restart_chatgpt = MenuItem::with_id(app, specs[1].id, specs[1].label, true, None::<&str>)?;
-    let separator = PredefinedMenuItem::separator(app)?;
     let quit_helper = MenuItem::with_id(app, specs[2].id, specs[2].label, true, None::<&str>)?;
+    let failover_item = CheckMenuItem::with_id(
+        app,
+        TRAY_FAILOVER_ID,
+        "Automatic fallback",
+        true,
+        provider_failover_enabled_for_tray(app),
+        None::<&str>,
+    )?;
     let store = provider_store_for_tray(app)?;
     let provider_items = tray_provider_item_specs(&store)
         .into_iter()
@@ -446,27 +827,35 @@ fn build_tray_menu(app: &tauri::AppHandle) -> anyhow::Result<tauri::menu::Menu<t
             CheckMenuItem::with_id(app, item.id, item.label, true, item.checked, None::<&str>)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let provider_refs: Vec<&dyn IsMenuItem<_>> = provider_items
+    let sections = tray_menu_sections(!provider_items.is_empty());
+    let separators = sections
         .iter()
-        .map(|item| item as &dyn IsMenuItem<_>)
-        .collect();
-    let providers_menu = Submenu::with_id_and_items(
-        app,
-        TRAY_PROVIDERS_SUBMENU_ID,
-        "Providers",
-        true,
-        &provider_refs,
-    )?;
-    Ok(Menu::with_items(
-        app,
-        &[
-            &open_settings,
-            &providers_menu,
-            &restart_chatgpt,
-            &separator,
-            &quit_helper,
-        ],
-    )?)
+        .filter(|section| **section == TrayMenuSection::Separator)
+        .map(|_| PredefinedMenuItem::separator(app))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut separators = separators.iter();
+    let mut items: Vec<&dyn IsMenuItem<_>> = Vec::new();
+    for section in &sections {
+        match section {
+            TrayMenuSection::Settings => items.push(&open_settings),
+            TrayMenuSection::Providers => {
+                for item in &provider_items {
+                    items.push(item);
+                }
+            }
+            TrayMenuSection::Separator => {
+                items.push(
+                    separators
+                        .next()
+                        .expect("tray separator count matches sections"),
+                );
+            }
+            TrayMenuSection::Failover => items.push(&failover_item),
+            TrayMenuSection::Restart => items.push(&restart_chatgpt),
+            TrayMenuSection::Quit => items.push(&quit_helper),
+        }
+    }
+    Ok(Menu::with_items(app, &items)?)
 }
 
 fn rebuild_tray_menu(app: &tauri::AppHandle) -> anyhow::Result<()> {
@@ -534,6 +923,57 @@ fn show_provider_switch_message(app: &tauri::AppHandle, message: &str, failed: b
     dialog.show(|_| {});
 }
 
+fn toggle_provider_failover(app: &tauri::AppHandle) -> anyhow::Result<()> {
+    let state = app
+        .try_state::<HelperState>()
+        .ok_or_else(|| anyhow::anyhow!("Helper state is unavailable"))?;
+    let current = crate::settings::read_settings(&state.state_dir.config_path)?;
+    crate::settings::update_settings(
+        &state.state_dir.config_path,
+        &json!({ "providerFailoverEnabled": !current.provider_failover_enabled }),
+    )?;
+    Ok(())
+}
+
+fn schedule_tray_menu_rebuild(app: tauri::AppHandle) {
+    static PENDING: AtomicBool = AtomicBool::new(false);
+    if PENDING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        sleep(Duration::from_millis(900)).await;
+        PENDING.store(false, Ordering::SeqCst);
+        let rebuild_app = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Err(error) = rebuild_tray_menu(&rebuild_app) {
+                eprintln!("failed to rebuild tray menu: {error}");
+            }
+        });
+    });
+}
+
+fn spawn_usage_refresh_loop(app: tauri::AppHandle, state_root: PathBuf) {
+    tauri::async_runtime::spawn(async move {
+        let mut first = true;
+        loop {
+            let delay = if first {
+                first = false;
+                Duration::from_secs(2)
+            } else {
+                Duration::from_secs(180)
+            };
+            sleep(delay).await;
+            crate::provider_usage::refresh_usage_cache(&state_root).await;
+            let rebuild_app = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                if let Err(error) = rebuild_tray_menu(&rebuild_app) {
+                    eprintln!("failed to rebuild tray menu after usage refresh: {error}");
+                }
+            });
+        }
+    });
+}
+
 fn install_menu_bar_item(
     app: &tauri::AppHandle,
     controller: Arc<CodexController>,
@@ -553,6 +993,14 @@ fn install_menu_bar_item(
         tray = tray.icon_as_template(true);
     }
     tray.on_menu_event(move |app, event| match event.id().as_ref() {
+        "toggle-provider-failover" => {
+            if let Err(error) = toggle_provider_failover(app) {
+                eprintln!("failed to toggle automatic fallback: {error}");
+            }
+            if let Err(error) = rebuild_tray_menu(app) {
+                eprintln!("failed to rebuild tray menu: {error}");
+            }
+        }
         "open-settings" => {
             if let Err(error) = request_show_settings_window(app, "general") {
                 eprintln!("failed to open Helper Settings: {error}");
@@ -646,6 +1094,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tray_menu_groups_providers_then_controls_then_quit() {
+        assert_eq!(
+            tray_menu_sections(true),
+            vec![
+                TrayMenuSection::Settings,
+                TrayMenuSection::Separator,
+                TrayMenuSection::Providers,
+                TrayMenuSection::Separator,
+                TrayMenuSection::Failover,
+                TrayMenuSection::Restart,
+                TrayMenuSection::Separator,
+                TrayMenuSection::Quit,
+            ]
+        );
+        assert_eq!(
+            tray_menu_sections(false),
+            vec![
+                TrayMenuSection::Settings,
+                TrayMenuSection::Separator,
+                TrayMenuSection::Failover,
+                TrayMenuSection::Restart,
+                TrayMenuSection::Separator,
+                TrayMenuSection::Quit,
+            ]
+        );
+    }
+
+    #[test]
     fn tray_menu_exposes_settings_restart_and_quit() {
         let items = tray_menu_item_specs();
 
@@ -659,11 +1135,12 @@ mod tests {
     }
 
     #[test]
-    fn tray_provider_menu_lists_configured_providers_with_active_checkmark() {
+    fn tray_provider_menu_lists_configured_providers_by_name() {
         let mut store = ProviderStore::default();
         store.providers.push(Provider {
             id: "grok".to_string(),
             name: "Grok".to_string(),
+            model: "grok-4".to_string(),
             ..Provider::default()
         });
         store.providers.push(Provider {
@@ -676,20 +1153,19 @@ mod tests {
 
         let items = tray_provider_item_specs(&store);
 
-        assert_eq!(items.len(), 3);
-        assert_eq!(items[0].id, "activate-provider:official");
-        assert_eq!(items[0].label, "Official");
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|item| item.id != "activate-provider:official"));
+        assert_eq!(items[0].id, "activate-provider:grok");
+        assert_eq!(items[0].label, "Grok");
         assert!(items[0].checked);
-        assert_eq!(items[1].id, "activate-provider:grok");
-        assert_eq!(items[1].label, "Grok");
-        assert!(items[1].checked);
-        assert_eq!(items[2].id, "activate-provider:mimo");
-        assert_eq!(items[2].label, "MiMo");
-        assert!(!items[2].checked);
+        assert!(!items[0].label.contains("grok-4"));
+        assert_eq!(items[1].id, "activate-provider:mimo");
+        assert_eq!(items[1].label, "MiMo");
+        assert!(!items[1].checked);
     }
 
     #[test]
-    fn tray_provider_menu_keeps_official_first() {
+    fn tray_provider_menu_omits_official() {
         let mut store = ProviderStore::default();
         store.providers.insert(
             0,
@@ -702,10 +1178,101 @@ mod tests {
 
         let items = tray_provider_item_specs(&store);
 
-        assert_eq!(items[0].id, "activate-provider:official");
-        assert_eq!(items[0].label, "Official");
-        assert_eq!(items[1].id, "activate-provider:grok");
-        assert_eq!(items[1].label, "Grok");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "activate-provider:grok");
+        assert_eq!(items[0].label, "Grok");
+        assert!(!items[0].checked);
+    }
+
+    #[test]
+    fn tray_provider_checkmark_follows_model_list_membership() {
+        let mut store = ProviderStore::default();
+        store.providers.push(Provider {
+            id: "grok".to_string(),
+            name: "Grok".to_string(),
+            ..Provider::default()
+        });
+        store.providers.push(Provider {
+            id: "deepseek".to_string(),
+            name: "DeepSeek".to_string(),
+            ..Provider::default()
+        });
+        store.active_id = "grok".to_string();
+        store.selected_ids = vec!["grok".to_string(), "deepseek".to_string()];
+
+        let items = tray_provider_item_specs(&store);
+
+        assert!(items.iter().all(|item| item.checked));
+
+        store.selected_ids.clear();
+        let legacy = tray_provider_item_specs(&store);
+        assert!(legacy[0].checked);
+        assert!(!legacy[1].checked);
+    }
+
+    #[test]
+    fn tray_provider_label_uses_real_usage_without_model_or_meter() {
+        let provider = Provider {
+            id: "grok".to_string(),
+            name: "Grok".to_string(),
+            model: "grok-4".to_string(),
+            ..Provider::default()
+        };
+        let windows = crate::provider_usage::UsageSnapshot {
+            used_percent: Some(75.0),
+            summary: "75% used (day) · resets in 4h · 15% used (week)".to_string(),
+        };
+        assert_eq!(
+            tray_provider_label(&provider, Some(&windows)),
+            "Grok - 1w 85% / Day 25%"
+        );
+        let balance = crate::provider_usage::UsageSnapshot {
+            used_percent: None,
+            summary: "CNY 13.08 remaining (granted 1.00)".to_string(),
+        };
+        let deepseek = Provider {
+            id: "deepseek".to_string(),
+            name: "DeepSeek".to_string(),
+            model: "deepseek-v4".to_string(),
+            ..Provider::default()
+        };
+        assert_eq!(
+            tray_provider_label(&deepseek, Some(&balance)),
+            "DeepSeek - ¥13.08"
+        );
+        assert!(!tray_provider_label(&provider, Some(&windows)).contains("grok-4"));
+        assert!(!tray_provider_label(&provider, Some(&windows)).contains("----"));
+        assert!(!tray_provider_label(&provider, Some(&windows)).contains('#'));
+    }
+
+    #[test]
+    fn tray_usage_text_compacts_known_summaries() {
+        let five_hour = crate::provider_usage::UsageSnapshot {
+            used_percent: Some(80.0),
+            summary: "80% used (5h) · 19,173/60,000 credits · 31% used (week)".to_string(),
+        };
+        assert_eq!(
+            tray_usage_text(&five_hour).as_deref(),
+            Some("5h 20% / 1w 69%")
+        );
+        let remaining = crate::provider_usage::UsageSnapshot {
+            used_percent: Some(20.0),
+            summary: "5h 80% · 1w 69%".to_string(),
+        };
+        assert_eq!(
+            tray_usage_text(&remaining).as_deref(),
+            Some("5h 80% / 1w 69%")
+        );
+        let meter = crate::provider_usage::UsageSnapshot {
+            used_percent: Some(52.0),
+            summary: "[#####-----] 52%".to_string(),
+        };
+        assert_eq!(tray_usage_text(&meter).as_deref(), Some("48%"));
+        let missing = crate::provider_usage::UsageSnapshot {
+            used_percent: None,
+            summary: String::new(),
+        };
+        assert_eq!(tray_usage_text(&missing), None);
     }
 
     #[test]
@@ -717,7 +1284,7 @@ mod tests {
         };
 
         assert_eq!(tray_provider_display_name(&provider), "Foo & Bar");
-        assert_eq!(tray_provider_label(&provider), "Foo && Bar");
+        assert_eq!(tray_provider_label(&provider, None), "Foo && Bar");
     }
 
     #[test]
