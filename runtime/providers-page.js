@@ -551,7 +551,16 @@ function usagePercentFromResult(result) {
   return Math.min(100, Math.max(0, value));
 }
 
-function setProviderUsagePie(node, { percent, tooltip, checking = false }) {
+function remainingPercentFromUsed(usedPercent) {
+  if (usedPercent == null || !Number.isFinite(usedPercent)) return null;
+  return Math.min(100, Math.max(0, 100 - usedPercent));
+}
+
+function quotaIsExhausted(usedPercent) {
+  return Number.isFinite(usedPercent) && usedPercent >= 100;
+}
+
+function setProviderUsagePie(node, { percent, tooltip, checking = false, exhausted = false }) {
   if (percent == null) {
     node.style.removeProperty("--usage-percent");
     node.removeAttribute("data-has-usage");
@@ -559,7 +568,7 @@ function setProviderUsagePie(node, { percent, tooltip, checking = false }) {
   } else {
     node.style.setProperty("--usage-percent", String(percent));
     node.setAttribute("data-has-usage", "true");
-    if (percent >= 100) {
+    if (exhausted) {
       node.setAttribute("data-quota-exhausted", "");
     } else {
       node.removeAttribute("data-quota-exhausted");
@@ -618,11 +627,16 @@ async function refreshProviderUsages() {
           });
           continue;
         }
-        const percent = usagePercentFromResult(result);
+        const used = usagePercentFromResult(result);
+        const percent = remainingPercentFromUsed(used);
         const tooltip =
           result?.summary ||
           (clickable ? "Open usage page" : "Usage unavailable");
-        setProviderUsagePie(node, { percent, tooltip });
+        setProviderUsagePie(node, {
+          percent,
+          exhausted: quotaIsExhausted(used),
+          tooltip,
+        });
       }
     }),
   );

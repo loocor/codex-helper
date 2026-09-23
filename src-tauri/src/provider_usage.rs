@@ -8,6 +8,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
@@ -44,6 +46,76 @@ const KIMI_PLATFORM_BALANCE_API: &str = "https://api.moonshot.cn/v1/users/me/bal
 const COPILOT_USAGE_API: &str = "https://api.github.com/copilot_internal/user";
 const GROK_BILLING_ENDPOINT: &str =
     "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig";
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageSnapshot {
+    pub used_percent: Option<f64>,
+    pub summary: String,
+}
+
+fn usage_cache() -> &'static Mutex<HashMap<String, UsageSnapshot>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, UsageSnapshot>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn usage_snapshot(provider_id: &str) -> Option<UsageSnapshot> {
+    let key = provider_id.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return None;
+    }
+    usage_cache()
+        .lock()
+        .expect("usage cache lock")
+        .get(&key)
+        .cloned()
+}
+
+fn remember_usage_snapshot(provider_id: &str, result: &Value) -> Value {
+    if result.get("status").and_then(Value::as_str) == Some("ok") {
+        let percent = result.get("usedPercent").and_then(Value::as_f64);
+        let summary = result
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if percent.is_some() || !summary.is_empty() {
+            let key = provider_id.trim().to_ascii_lowercase();
+            if !key.is_empty() {
+                usage_cache().lock().expect("usage cache lock").insert(
+                    key,
+                    UsageSnapshot {
+                        used_percent: percent,
+                        summary,
+                    },
+                );
+            }
+        }
+    }
+    result.clone()
+}
+
+pub async fn refresh_usage_cache(state_root: &Path) {
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    if RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let ids = match read_store(state_root) {
+        Ok(store) => store
+            .providers
+            .iter()
+            .map(|provider| provider.id.clone())
+            .collect::<Vec<_>>(),
+        Err(_) => {
+            RUNNING.store(false, Ordering::SeqCst);
+            return;
+        }
+    };
+    for id in ids {
+        let _ = query_provider_usage(state_root, &id).await;
+    }
+    RUNNING.store(false, Ordering::SeqCst);
+}
 
 pub fn usage_page_url(provider: &Provider) -> Option<String> {
     let stored = provider.usage_page_url.trim();
@@ -147,7 +219,7 @@ pub async fn query_provider_usage(state_root: &Path, provider_id: &str) -> Value
         return json!({ "status": "failed", "message": format!("Unknown provider: {id}") });
     };
     let page_url = usage_page_url(provider);
-    match query_live_usage(state_root, provider).await {
+    let result = match query_live_usage(state_root, provider).await {
         Ok(Some(live)) => {
             let mut response = json!({
                 "status": "ok",
@@ -178,7 +250,8 @@ pub async fn query_provider_usage(state_root: &Path, provider_id: &str) -> Value
             "message": error.message,
             "detail": error.detail,
         }),
-    }
+    };
+    remember_usage_snapshot(&id, &result)
 }
 
 #[derive(Debug)]
@@ -418,19 +491,38 @@ async fn query_xai_usage(access_token: &str) -> Result<LiveUsage, String> {
     let now_secs = now_secs();
     let snapshot = parse_billing_payload(&raw, now_secs)?;
     let resets_at = snapshot.resets_at.and_then(unix_ts_to_rfc3339);
+    let summary = if snapshot.window_label.is_empty() {
+        usage_summary(snapshot.used_percent, resets_at.as_deref())
+    } else {
+        labeled_remaining_summary(snapshot.window_label, snapshot.used_percent, resets_at.as_deref())
+    };
     Ok(LiveUsage {
-        summary: usage_summary(snapshot.used_percent, resets_at.as_deref()),
+        summary,
         used_percent: Some(snapshot.used_percent),
         resets_at,
         detail: String::new(),
     })
 }
 
+fn remaining_percent(used_percent: f64) -> f64 {
+    (100.0 - used_percent.clamp(0.0, 100.0)).clamp(0.0, 100.0)
+}
+
+/// Tray and settings copy show what is left. `used_percent` on the snapshot
+/// stays consumed so a full pie and failover still mean the quota is gone.
 fn usage_summary(used_percent: f64, resets_at: Option<&str>) -> String {
-    let used = format!("{:.0}% used", used_percent.clamp(0.0, 100.0));
+    let text = format!("{:.0}%", remaining_percent(used_percent));
     match resets_at.and_then(reset_label) {
-        Some(label) => format!("{used} · {label}"),
-        None => used,
+        Some(label) => format!("{text} · {label}"),
+        None => text,
+    }
+}
+
+fn labeled_remaining_summary(label: &str, used_percent: f64, resets_at: Option<&str>) -> String {
+    let text = format!("{label} {:.0}%", remaining_percent(used_percent));
+    match resets_at.and_then(reset_label) {
+        Some(reset) => format!("{text} · {reset}"),
+        None => text,
     }
 }
 
@@ -783,52 +875,20 @@ fn live_usage_from_bigmodel(body: BigModelUsageResponse) -> Result<LiveUsage, St
     })
 }
 
-fn format_credits(current: f64, total: f64) -> String {
-    fn count(value: f64) -> String {
-        if value.fract() == 0.0 && value.abs() < 1e15 {
-            let n = value as i64;
-            let digits = n.abs().to_string();
-            let mut out = String::new();
-            for (index, ch) in digits.chars().enumerate() {
-                if index > 0 && (digits.len() - index) % 3 == 0 {
-                    out.push(',');
-                }
-                out.push(ch);
-            }
-            if n < 0 {
-                format!("-{out}")
-            } else {
-                out
-            }
-        } else {
-            format!("{value}")
-        }
-    }
-    format!("{}/{} credits", count(current), count(total))
-}
-
 fn bigmodel_usage_summary(
     five_hour: (f64, Option<(f64, f64)>),
     resets_at: Option<&str>,
     weekly: Option<(f64, Option<(f64, f64)>)>,
 ) -> String {
-    let mut text = format!("{:.0}% used (5h)", five_hour.0.clamp(0.0, 100.0));
-    if let Some((current, total)) = five_hour.1 {
-        text.push_str(" · ");
-        text.push_str(&format_credits(current, total));
-    }
+    let _ = five_hour.1;
+    let mut parts = vec![format!("5h {:.0}%", remaining_percent(five_hour.0))];
     if let Some(label) = resets_at.and_then(reset_label) {
-        text.push_str(" · ");
-        text.push_str(&label);
+        parts.push(label);
     }
-    if let Some((percent, credits)) = weekly {
-        text.push_str(&format!(" · {:.0}% used (week)", percent.clamp(0.0, 100.0)));
-        if let Some((current, total)) = credits {
-            text.push_str(" · ");
-            text.push_str(&format_credits(current, total));
-        }
+    if let Some((percent, _credits)) = weekly {
+        parts.push(format!("1w {:.0}%", remaining_percent(percent)));
     }
-    text
+    parts.join(" · ")
 }
 
 async fn query_minimax_usage(provider: &Provider) -> Result<LiveUsage, String> {
@@ -1199,7 +1259,7 @@ fn select_mimo_cookie_header(
         "Could not read browser cookies; grant Keychain or Full Disk Access, or paste a Cookie header in the provider settings.".to_string()
     } else {
         format!(
-            "No MiMo console session found; open the balance page in {MIMO_BROWSER_HINT}, or paste a Cookie header in the provider settings."
+            "No MiMo console session found; the Token Plan API key cannot query quota, so open the balance page in {MIMO_BROWSER_HINT}, or paste a Cookie header in the provider settings."
         )
     };
     Err(UsageFailure::new(message, details.join("; ")))
@@ -1352,15 +1412,10 @@ fn live_usage_from_mimo(
         Ok(data) => {
             let plan = mimo_plan_percent(&data);
             match plan {
-                Some((percent, used, limit)) => {
+                Some((percent, _used, _limit)) => {
                     used_percent = Some(percent);
-                    let tokens = match (used, limit) {
-                        (Some(used), Some(limit)) if limit > 0.0 => {
-                            format!(" ({}/{} tokens)", format_number(used), format_number(limit))
-                        }
-                        _ => String::new(),
-                    };
-                    summaries.push(format!("plan {percent:.1}% used{tokens}"));
+                    let left = remaining_percent(percent);
+                    summaries.push(format!("{left:.1}%"));
                 }
                 None => summaries.push("plan usage not available".to_string()),
             }
@@ -1373,9 +1428,7 @@ fn live_usage_from_mimo(
 
     match detail {
         Ok(data) => {
-            if let Some(name) = data.plan_name.as_deref().filter(|name| !name.is_empty()) {
-                summaries.insert(0, format!("plan {name}"));
-            }
+            let _ = data.plan_name;
             if let Some(period_end) = data
                 .current_period_end
                 .as_deref()
@@ -1449,16 +1502,6 @@ fn mimo_plan_percent(data: &MimoPlanUsageData) -> Option<(f64, Option<f64>, Opti
         })
 }
 
-fn format_number(value: f64) -> String {
-    if value >= 1_000_000.0 {
-        format!("{:.1}M", value / 1_000_000.0)
-    } else if value >= 1_000.0 {
-        format!("{:.1}k", value / 1_000.0)
-    } else {
-        format!("{value:.0}")
-    }
-}
-
 async fn query_copilot_usage(github_token: &str) -> Result<LiveUsage, String> {
     // api.github.com is often unreachable without a proxy, so this client
     // honors the system proxy configuration instead of forcing direct
@@ -1527,17 +1570,15 @@ fn live_usage_from_copilot(body: CopilotUsageResponse) -> LiveUsage {
         let entitlement = snapshot.entitlement.unwrap_or(0.0);
         let unlimited = snapshot.unlimited.unwrap_or(false);
         if unlimited || entitlement <= 0.0 {
-            parts.push("premium unlimited".to_string());
+            parts.push("unlimited".to_string());
         } else {
-            let remaining = snapshot.remaining.unwrap_or(0.0);
+            let remaining = snapshot.remaining.unwrap_or(0.0).clamp(0.0, entitlement);
             let percent = (((entitlement - remaining) / entitlement) * 100.0).clamp(0.0, 100.0);
             used_percent = Some(percent);
-            parts.push(format!("{:.0}% used (premium)", percent));
+            parts.push(format!("{:.0}%", remaining_percent(percent)));
         }
     }
-    if let Some(plan) = plan {
-        parts.push(plan.to_string());
-    }
+    let _ = plan;
     if let Some(reset) = body
         .quota_reset_date
         .as_deref()
@@ -1782,6 +1823,9 @@ fn percent_decode(input: &str) -> String {
 struct GrokBillingSnapshot {
     used_percent: f64,
     resets_at: Option<i64>,
+    /// `5h`, `1w`, or `1m` when the billing period length says so. Empty when
+    /// the payload has no period bounds — a second window is never invented.
+    window_label: &'static str,
 }
 
 fn parse_billing_payload(data: &[u8], now_secs: i64) -> Result<GrokBillingSnapshot, String> {
@@ -1804,19 +1848,29 @@ fn parse_billing_payload(data: &[u8], now_secs: i64) -> Result<GrokBillingSnapsh
         })
         .min_by_key(|(path, _, order)| (path.len(), *order))
         .map(|(_, value, _)| f64::from(*value));
-    let reset_candidates: Vec<(&[u64], i64)> = scan
+    let timestamps: Vec<(&[u64], i64)> = scan
         .varint_fields
         .iter()
         .filter(|(_, value)| (1_700_000_000..=2_100_000_000).contains(value))
         .map(|(path, value)| (path.as_slice(), *value as i64))
-        .filter(|(_, ts)| *ts > now_secs)
         .collect();
-    let reset = reset_candidates
+    let period_start = timestamps
         .iter()
-        .filter(|(path, _)| *path == [1, 5, 1])
+        .filter(|(path, _)| *path == [1, 4, 1])
+        .map(|(_, ts)| *ts)
+        .min();
+    let reset = timestamps
+        .iter()
+        .filter(|(path, ts)| *path == [1, 5, 1] && *ts > now_secs)
         .map(|(_, ts)| *ts)
         .min()
-        .or_else(|| reset_candidates.iter().map(|(_, ts)| *ts).min());
+        .or_else(|| {
+            timestamps
+                .iter()
+                .filter(|(_, ts)| *ts > now_secs)
+                .map(|(_, ts)| *ts)
+                .min()
+        });
     let has_usage_period = scan.varint_fields.iter().any(|(path, value)| {
         path.starts_with(&[1, 6]) || (path.as_slice() == [1, 8, 1] && (*value == 1 || *value == 2))
     });
@@ -1830,12 +1884,57 @@ fn parse_billing_payload(data: &[u8], now_secs: i64) -> Result<GrokBillingSnapsh
     Ok(GrokBillingSnapshot {
         used_percent,
         resets_at: reset,
+        window_label: grok_window_label(period_start, reset),
     })
+}
+
+/// Labels the single credits window from its period length. Grok's credits
+/// config is one pool; product slices are not a second quota window.
+fn grok_window_label(start: Option<i64>, end: Option<i64>) -> &'static str {
+    let (Some(start), Some(end)) = (start, end) else {
+        return "";
+    };
+    if end <= start {
+        return "";
+    }
+    let span = end - start;
+    if (4 * 3600..=8 * 3600).contains(&span) {
+        "5h"
+    } else if (5 * 86400..=9 * 86400).contains(&span) {
+        "1w"
+    } else if (25 * 86400..=35 * 86400).contains(&span) {
+        "1m"
+    } else {
+        ""
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_snapshot_keeps_the_latest_successful_query_shape() {
+        let result = json!({
+            "status": "ok",
+            "usedPercent": 80.0,
+            "summary": "80% used"
+        });
+        let remembered = remember_usage_snapshot("usage-cache-test", &result);
+        assert_eq!(remembered["usedPercent"], 80.0);
+        let snapshot = usage_snapshot("usage-cache-test").expect("snapshot");
+        assert_eq!(snapshot.used_percent, Some(80.0));
+        assert_eq!(snapshot.summary, "80% used");
+        remember_usage_snapshot(
+            "usage-cache-test",
+            &json!({ "status": "failed", "message": "nope" }),
+        );
+        assert_eq!(
+            usage_snapshot("usage-cache-test").expect("kept").summary,
+            "80% used"
+        );
+    }
+
     use crate::providers::ProviderKind;
 
     fn provider(id: &str, compat: &str, base_url: &str) -> Provider {
@@ -1931,7 +2030,7 @@ mod tests {
         })
         .expect("usage");
         assert_eq!(live.used_percent, Some(42.4));
-        assert!(live.summary.starts_with("42% used"), "{}", live.summary);
+        assert!(live.summary.starts_with("58%"), "{}", live.summary);
     }
 
     fn varint(mut value: u64) -> Vec<u8> {
@@ -1975,6 +2074,42 @@ mod tests {
     }
 
     const NOW: i64 = 1_750_000_000;
+
+    #[test]
+    fn weekly_credit_span_is_labeled_without_inventing_five_hour() {
+        let start = NOW as u64;
+        let end = (NOW + 7 * 86400) as u64;
+        let product = [field_varint(1, 2), field_float(2, 20.0)].concat();
+        let inner = [
+            field_float(1, 20.0),
+            field_message(4, &field_varint(1, start)),
+            field_message(5, &field_varint(1, end)),
+            field_message(7, &product),
+        ]
+        .concat();
+        let payload = field_message(1, &inner);
+        let data = grpc_web_frame(0, &payload);
+        let snapshot = parse_billing_payload(&data, NOW).expect("parse ok");
+        assert_eq!(snapshot.used_percent, 20.0);
+        assert_eq!(snapshot.window_label, "1w");
+        assert_eq!(snapshot.resets_at, Some(end as i64));
+    }
+
+    #[test]
+    fn five_hour_credit_span_is_labeled_when_present() {
+        let start = NOW as u64;
+        let end = (NOW + 5 * 3600) as u64;
+        let inner = [
+            field_float(1, 10.0),
+            field_message(4, &field_varint(1, start)),
+            field_message(5, &field_varint(1, end)),
+        ]
+        .concat();
+        let payload = field_message(1, &inner);
+        let data = grpc_web_frame(0, &payload);
+        let snapshot = parse_billing_payload(&data, NOW).expect("parse ok");
+        assert_eq!(snapshot.window_label, "5h");
+    }
 
     #[test]
     fn parses_percent_and_reset_from_framed_payload() {
@@ -2115,14 +2250,12 @@ mod tests {
         .expect("usage");
         assert_eq!(live.used_percent, Some(11.0));
         assert!(
-            live.summary
-                .contains("11% used (5h) · 1,354/12,000 credits"),
+            live.summary.contains("5h 89%"),
             "{}",
             live.summary
         );
         assert!(
-            live.summary
-                .contains("31% used (week) · 19,173/60,000 credits"),
+            live.summary.contains("1w 69%"),
             "{}",
             live.summary
         );
@@ -2158,8 +2291,8 @@ mod tests {
         .expect("usage");
         assert_eq!(live.used_percent, Some(44.0));
         assert_eq!(live.resets_at.as_deref(), Some("2026-10-08T22:53:20+00:00"));
-        assert!(live.summary.contains("44% used (5h)"), "{}", live.summary);
-        assert!(live.summary.contains("53% used (week)"), "{}", live.summary);
+        assert!(live.summary.contains("5h 56%"), "{}", live.summary);
+        assert!(live.summary.contains("1w 47%"), "{}", live.summary);
     }
 
     #[test]
@@ -2182,9 +2315,13 @@ mod tests {
     }
 
     fn weekly_percent(summary: &str) -> Option<f64> {
-        let marker = summary.find("% used (week)")?;
-        let start = summary[..marker].rfind(' ')? + 1;
-        summary[start..marker].trim().parse().ok()
+        let rest = summary.split("1w ").nth(1)?;
+        let number: String = rest
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
+            .collect();
+        let remaining = number.parse::<f64>().ok()?;
+        Some(100.0 - remaining)
     }
 
     #[test]
@@ -2284,8 +2421,8 @@ mod tests {
         let live =
             live_usage_from_minimax(minimax_remains(88.0, Some(1), Some(80.0))).expect("usage");
         assert_eq!(live.used_percent, Some(12.0));
-        assert!(live.summary.contains("12% used (5h)"), "{}", live.summary);
-        assert!(live.summary.contains("20% used (week)"), "{}", live.summary);
+        assert!(live.summary.contains("5h 88%"), "{}", live.summary);
+        assert!(live.summary.contains("1w 80%"), "{}", live.summary);
     }
 
     #[test]
@@ -2293,7 +2430,7 @@ mod tests {
         let live =
             live_usage_from_minimax(minimax_remains(50.0, Some(3), Some(100.0))).expect("usage");
         assert_eq!(live.used_percent, Some(50.0));
-        assert!(!live.summary.contains("(week)"), "{}", live.summary);
+        assert!(!live.summary.contains("1w "), "{}", live.summary);
     }
 
     #[test]
@@ -2323,7 +2460,7 @@ mod tests {
         })
         .expect("usage");
         assert_eq!(live.used_percent, Some(75.0));
-        assert!(live.summary.starts_with("75% used"), "{}", live.summary);
+        assert!(live.summary.starts_with("25%"), "{}", live.summary);
         assert_eq!(live.resets_at.as_deref(), Some("2026-09-25T13:38:00+00:00"));
     }
 
@@ -2348,7 +2485,9 @@ mod tests {
             }),
         });
         assert_eq!(live.used_percent, Some(60.0));
-        assert_eq!(live.summary, "60% used (premium) · pro · resets 2026-10-01");
+        assert_eq!(live.summary, "40% · resets 2026-10-01");
+        assert!(!live.summary.to_ascii_lowercase().contains("pro"));
+        assert!(!live.summary.to_ascii_lowercase().contains("premium"));
     }
 
     #[test]
@@ -2365,7 +2504,9 @@ mod tests {
             }),
         });
         assert_eq!(live.used_percent, None);
-        assert_eq!(live.summary, "premium unlimited · free");
+        assert_eq!(live.summary, "unlimited");
+        assert!(!live.summary.to_ascii_lowercase().contains("free"));
+        assert!(!live.summary.to_ascii_lowercase().contains("premium"));
     }
 
     #[test]
@@ -2413,13 +2554,9 @@ mod tests {
         )
         .expect("usage");
         assert_eq!(live.used_percent, Some(37.5));
-        assert!(live.summary.contains("plan Lite"), "{}", live.summary);
-        assert!(live.summary.contains("37.5% used"), "{}", live.summary);
-        assert!(
-            live.summary.contains("(3.8M/10.0M tokens)"),
-            "{}",
-            live.summary
-        );
+        assert!(!live.summary.contains("Lite"), "{}", live.summary);
+        assert!(live.summary.contains("62.5%"), "{}", live.summary);
+        assert!(!live.summary.contains("tokens"), "{}", live.summary);
         assert_eq!(live.resets_at.as_deref(), Some("2026-10-01T00:00:00Z"));
     }
 
@@ -2445,24 +2582,15 @@ mod tests {
         )
         .expect("usage");
         assert_eq!(live.used_percent, Some(9.677272727272727));
-        assert!(live.summary.contains("9.7% used"), "{}", live.summary);
-        assert!(
-            live.summary.contains("(1064.5M/11000.0M tokens)"),
-            "{}",
-            live.summary
-        );
+        assert!(live.summary.contains("90.3%"), "{}", live.summary);
+        assert!(!live.summary.contains("Standard"), "{}", live.summary);
     }
 
     #[test]
     fn mimo_plan_percent_scales_fraction_without_used_and_limit() {
         let usage = MimoPlanUsageData {
             usage: Some(MimoPlanUsage {
-                items: Some(vec![mimo_usage_item(
-                    "total_token",
-                    0.0,
-                    0.0,
-                    0.25,
-                )]),
+                items: Some(vec![mimo_usage_item("total_token", 0.0, 0.0, 0.25)]),
             }),
         };
         let (percent, _, _) = mimo_plan_percent(&usage).expect("percent");

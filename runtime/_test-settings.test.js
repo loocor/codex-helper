@@ -343,9 +343,12 @@ test("catalog rows expose drag handles for reordering", () => {
   expect(settingsSource).toContain("CATALOG_REORDER_THRESHOLD");
 });
 
-test("usage pie marks quota exhausted at 100 percent", () => {
+test("usage pie marks quota exhausted at 100 percent used", () => {
   expect(settingsSource).toContain("data-quota-exhausted");
-  expect(settingsSource).toContain("percent >= 100");
+  expect(settingsSource).toContain("function quotaIsExhausted(");
+  expect(settingsSource).toContain("usedPercent >= 100");
+  expect(settingsSource).toContain("function remainingPercentFromUsed(");
+  expect(settingsSource).not.toContain("if (percent >= 100)");
 });
 
 test("settings page exposes usage-limit overlay hide switch", () => {
