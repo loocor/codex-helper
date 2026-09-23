@@ -1421,12 +1421,30 @@ fn mimo_plan_percent(data: &MimoPlanUsageData) -> Option<(f64, Option<f64>, Opti
         .iter()
         .filter(|item| item.name.as_deref() != Some("compensation_total_token"))
         .find_map(|item| {
-            let percent = item.percent?;
+            let used = item.used.filter(|value| value.is_finite());
+            let limit = item.limit.filter(|value| value.is_finite());
+            // MiMo reports `percent` as a 0-1 fraction, not a percentage
+            // (observed 0.1 for 1064.5M/11000.0M tokens = 9.7%). Prefer the
+            // exact ratio computed from used/limit; otherwise scale the
+            // fraction, and pass through values already above 1.0 in case
+            // MiMo ever switches to a 0-100 scale.
+            let percent = match (used, limit) {
+                (Some(used), Some(limit)) if limit > 0.0 => used / limit * 100.0,
+                _ => {
+                    let reported = item.percent?;
+                    if !reported.is_finite() {
+                        return None;
+                    }
+                    if reported <= 1.0 {
+                        reported * 100.0
+                    } else {
+                        reported
+                    }
+                }
+            };
             if !percent.is_finite() {
                 return None;
             }
-            let used = item.used.filter(|value| value.is_finite());
-            let limit = item.limit.filter(|value| value.is_finite());
             Some((percent.clamp(0.0, 100.0), used, limit))
         })
 }
@@ -2380,7 +2398,7 @@ mod tests {
         let usage = MimoPlanUsageData {
             usage: Some(MimoPlanUsage {
                 items: Some(vec![
-                    mimo_usage_item("total_token", 3_750_000.0, 10_000_000.0, 37.5),
+                    mimo_usage_item("total_token", 3_750_000.0, 10_000_000.0, 0.375),
                     mimo_usage_item("compensation_total_token", 1_000.0, 0.0, 0.0),
                 ]),
             }),
@@ -2403,6 +2421,52 @@ mod tests {
             live.summary
         );
         assert_eq!(live.resets_at.as_deref(), Some("2026-10-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn mimo_plan_percent_scales_reported_fraction() {
+        let usage = MimoPlanUsageData {
+            usage: Some(MimoPlanUsage {
+                items: Some(vec![mimo_usage_item(
+                    "total_token",
+                    1_064_500_000.0,
+                    11_000_000_000.0,
+                    0.1,
+                )]),
+            }),
+        };
+        let live = live_usage_from_mimo(
+            Err("skipped".to_string()),
+            Ok(usage),
+            Ok(MimoPlanDetailData {
+                plan_name: Some("Standard".to_string()),
+                current_period_end: None,
+            }),
+        )
+        .expect("usage");
+        assert_eq!(live.used_percent, Some(9.677272727272727));
+        assert!(live.summary.contains("9.7% used"), "{}", live.summary);
+        assert!(
+            live.summary.contains("(1064.5M/11000.0M tokens)"),
+            "{}",
+            live.summary
+        );
+    }
+
+    #[test]
+    fn mimo_plan_percent_scales_fraction_without_used_and_limit() {
+        let usage = MimoPlanUsageData {
+            usage: Some(MimoPlanUsage {
+                items: Some(vec![mimo_usage_item(
+                    "total_token",
+                    0.0,
+                    0.0,
+                    0.25,
+                )]),
+            }),
+        };
+        let (percent, _, _) = mimo_plan_percent(&usage).expect("percent");
+        assert!((percent - 25.0).abs() < 1e-9);
     }
 
     #[test]
