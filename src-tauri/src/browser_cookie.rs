@@ -5,6 +5,7 @@
 //! choose the user-facing error. Undecryptable Chromium cookies are skipped
 //! so one bad row does not reject the browser.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -264,7 +265,7 @@ fn read_firefox(support: &Path, query: &CookieQuery<'_>) -> Vec<BrowserCookieBat
     }
     databases
         .into_iter()
-        .map(|path| {
+        .flat_map(|path| {
             let profile = path
                 .parent()
                 .and_then(|parent| parent.file_name())
@@ -272,8 +273,8 @@ fn read_firefox(support: &Path, query: &CookieQuery<'_>) -> Vec<BrowserCookieBat
                 .unwrap_or("profile")
                 .to_string();
             match read_firefox_database(&path, query) {
-                Ok(read) => batch_from_read("Firefox", profile, read),
-                Err(error) => note_batch("Firefox", &profile, &error),
+                Ok(reads) => firefox_batches(&profile, reads),
+                Err(error) => vec![note_batch("Firefox", &profile, &error)],
             }
         })
         .collect()
@@ -314,6 +315,32 @@ struct ProfileRead {
     cookies: Vec<ImportedCookie>,
     note: String,
     undecryptable: Vec<String>,
+}
+
+struct FirefoxContainerRead {
+    context_id: u32,
+    read: ProfileRead,
+}
+
+fn firefox_batches(profile: &str, reads: Vec<FirefoxContainerRead>) -> Vec<BrowserCookieBatch> {
+    reads
+        .into_iter()
+        .map(|read| {
+            batch_from_read(
+                "Firefox",
+                firefox_profile_label(profile, read.context_id),
+                read.read,
+            )
+        })
+        .collect()
+}
+
+fn firefox_profile_label(profile: &str, context_id: u32) -> String {
+    if context_id == 0 {
+        profile.to_string()
+    } else {
+        format!("{profile} container {context_id}")
+    }
 }
 
 fn batch_from_read(
@@ -411,7 +438,10 @@ fn read_chromium_database(
     })
 }
 
-fn read_firefox_database(db_path: &Path, query: &CookieQuery<'_>) -> Result<ProfileRead, String> {
+fn read_firefox_database(
+    db_path: &Path,
+    query: &CookieQuery<'_>,
+) -> Result<Vec<FirefoxContainerRead>, String> {
     let temp = tempfile::Builder::new()
         .prefix("codex-helper-cookies-")
         .tempdir()
@@ -444,8 +474,10 @@ fn read_firefox_database(db_path: &Path, query: &CookieQuery<'_>) -> Result<Prof
         })
         .map_err(|error| format!("failed to query cookies db: {error}"))?;
     let now = unix_time_seconds();
-    let mut cookies = Vec::new();
+    let mut groups: BTreeMap<u32, Vec<ImportedCookie>> = BTreeMap::new();
     let mut matched = false;
+    let mut expired = false;
+    let mut partitioned = false;
     for row in rows {
         let (host, name, value, expiry, origin) =
             row.map_err(|error| format!("failed to read cookie row: {error}"))?;
@@ -453,28 +485,49 @@ fn read_firefox_database(db_path: &Path, query: &CookieQuery<'_>) -> Result<Prof
             continue;
         }
         matched = true;
-        if origin.contains("partitionKey") {
+        if firefox_is_partitioned(&origin) {
+            partitioned = true;
             continue;
         }
         if expiry > 0 && expiry < now {
+            expired = true;
             continue;
         }
         let value = value.into_bytes();
         if value.is_empty() || !is_valid_cookie_value(&value) {
             continue;
         }
-        cookies.push(ImportedCookie { name, value });
+        groups
+            .entry(firefox_user_context_id(&origin))
+            .or_default()
+            .push(ImportedCookie { name, value });
+    }
+    if !groups.is_empty() {
+        return Ok(groups
+            .into_iter()
+            .map(|(context_id, cookies)| FirefoxContainerRead {
+                context_id,
+                read: ProfileRead {
+                    cookies,
+                    note: String::new(),
+                    undecryptable: Vec::new(),
+                },
+            })
+            .collect());
     }
     let note = if matched {
-        String::new()
+        unused_match_note(expired, partitioned)
     } else {
         diagnose_cookie_db(&connection, "host", query).unwrap_or_else(|error| error)
     };
-    Ok(ProfileRead {
-        cookies,
-        note,
-        undecryptable: Vec::new(),
-    })
+    Ok(vec![FirefoxContainerRead {
+        context_id: 0,
+        read: ProfileRead {
+            cookies: Vec::new(),
+            note,
+            undecryptable: Vec::new(),
+        },
+    }])
 }
 
 fn parse_safari_cookies(
@@ -941,6 +994,35 @@ fn unused_match_note(expired: bool, partitioned: bool) -> String {
     }
 }
 
+fn firefox_origin_parts(origin: &str) -> impl Iterator<Item = (&str, &str)> {
+    origin
+        .trim()
+        .trim_start_matches('^')
+        .split('&')
+        .filter_map(|part| {
+            let part = part.trim();
+            if part.is_empty() {
+                return None;
+            }
+            let (key, value) = part.split_once('=').unwrap_or((part, ""));
+            if key.is_empty() {
+                return None;
+            }
+            Some((key, value))
+        })
+}
+
+fn firefox_is_partitioned(origin: &str) -> bool {
+    firefox_origin_parts(origin).any(|(key, _)| key == "partitionKey")
+}
+
+fn firefox_user_context_id(origin: &str) -> u32 {
+    firefox_origin_parts(origin)
+        .find(|(key, _)| *key == "userContextId")
+        .and_then(|(_, value)| value.parse().ok())
+        .unwrap_or(0)
+}
+
 fn host_matches(host: &str, suffix: &str) -> bool {
     let host = host.trim_start_matches('.').to_ascii_lowercase();
     let suffix = suffix.trim_start_matches('.').to_ascii_lowercase();
@@ -1396,6 +1478,83 @@ mod tests {
         assert_eq!(read.note, "matching cookies expired");
     }
 
+    #[test]
+    fn firefox_containers_stay_separate_and_default_is_first() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root
+            .path()
+            .join("Firefox/Profiles/abc.default/cookies.sqlite");
+        write_firefox_db(
+            &database,
+            &[
+                ("userId", "container-user", "^userContextId=1", 0),
+                (
+                    "api-platform_serviceToken",
+                    "container-token",
+                    "^firstPartyDomain=platform.xiaomimimo.com&userContextId=1",
+                    0,
+                ),
+                ("userId", "default-user", "", 0),
+                (
+                    "api-platform_serviceToken",
+                    "default-token",
+                    "^firstPartyDomain=platform.xiaomimimo.com",
+                    0,
+                ),
+                (
+                    "userId",
+                    "partition-user",
+                    "^userContextId=1&partitionKey=%28https%2Cexample.com%29",
+                    0,
+                ),
+            ],
+        );
+        let batches = read_firefox(root.path(), &mimo_query());
+        assert_eq!(batches.len(), 2, "{batches:?}");
+        assert_eq!(batches[0].profile, "abc.default");
+        assert_eq!(cookie_value(&batches[0].cookies, "userId"), b"default-user");
+        assert_eq!(
+            cookie_value(&batches[0].cookies, "api-platform_serviceToken"),
+            b"default-token"
+        );
+        assert_eq!(batches[1].profile, "abc.default container 1");
+        assert_eq!(
+            cookie_value(&batches[1].cookies, "userId"),
+            b"container-user"
+        );
+        assert_eq!(
+            cookie_value(&batches[1].cookies, "api-platform_serviceToken"),
+            b"container-token"
+        );
+        let serialized = format!("{batches:?}");
+        assert!(!serialized.contains("partition-user"), "{serialized}");
+    }
+
+    #[test]
+    fn firefox_expired_or_partitioned_matches_leave_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cookies.sqlite");
+        write_firefox_db(
+            &path,
+            &[
+                ("userId", "expired-user", "", 1),
+                (
+                    "api-platform_serviceToken",
+                    "partition-token",
+                    "^partitionKey=%28https%2Cexample.com%29",
+                    0,
+                ),
+            ],
+        );
+        let reads = read_firefox_database(&path, &mimo_query()).unwrap();
+        assert_eq!(reads.len(), 1);
+        assert!(reads[0].read.cookies.is_empty());
+        assert_eq!(
+            reads[0].read.note,
+            "matching cookies expired or partitioned"
+        );
+    }
+
     fn mimo_query() -> CookieQuery<'static> {
         CookieQuery {
             domain_suffix: "xiaomimimo.com",
@@ -1432,6 +1591,28 @@ mod tests {
                 .execute(
                     "INSERT INTO cookies VALUES (?1, ?2, ?3, 0, 0)",
                     rusqlite::params![host, name, encrypted],
+                )
+                .unwrap();
+        }
+    }
+
+    fn write_firefox_db(path: &Path, rows: &[(&str, &str, &str, i64)]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let connection = rusqlite::Connection::open(path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE moz_cookies (
+                   host TEXT, name TEXT, value TEXT, expiry INTEGER, originAttributes TEXT
+                 );",
+            )
+            .unwrap();
+        for (name, value, origin, expiry) in rows {
+            connection
+                .execute(
+                    "INSERT INTO moz_cookies VALUES ('.platform.xiaomimimo.com', ?1, ?2, ?3, ?4)",
+                    rusqlite::params![name, value, expiry, origin],
                 )
                 .unwrap();
         }
