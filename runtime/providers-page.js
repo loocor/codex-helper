@@ -710,7 +710,7 @@ function providerDialogPayload() {
     wireApi: isDeviceOauthMode(authMode)
       ? defaults.wireApi
       : dialogFieldValue("wireApi") || defaults.wireApi || "responses",
-    model: dialogFieldValue("model"),
+    model: catalogDefaultModel(),
     apiKey: dialogFieldValue("apiKey"),
     preset: dialogFieldValue("preset") || "custom",
     template: dialogFieldValue("preset") || "custom",
@@ -975,7 +975,18 @@ function addCatalogRow(entry = {}) {
   remove.setAttribute("aria-label", "Remove model");
   remove.innerHTML = nativeSettingsStandardIconSvg("x");
   const handle = createCatalogDragHandle(row);
+  const isDefault = row.getAttribute("data-codex-helper-catalog-default") === "true";
+  const radio = document.createElement("button");
+  radio.type = "button";
+  radio.className = "codex-helper-provider-catalog-radio";
+  radio.setAttribute("data-codex-helper-catalog-radio", "true");
+  radio.setAttribute("aria-label", isDefault ? "Default model" : "Set as default model");
+  radio.setAttribute("aria-pressed", isDefault ? "true" : "false");
+  radio.addEventListener("click", () => {
+    markCatalogDefaultRow(row);
+  });
   row.appendChild(handle);
+  row.appendChild(radio);
   row.appendChild(display);
   row.appendChild(model);
   row.appendChild(context);
@@ -1096,7 +1107,7 @@ function onCatalogReorderUp(event) {
   session.row.removeAttribute("data-catalog-dragging");
   if (session.active) {
     persistProviderDraft();
-    refreshDefaultModelSelect();
+    refreshDefaultModelRadios(catalogDefaultModel());
   }
 }
 
@@ -1107,9 +1118,10 @@ function seedCatalogRows(provider, draft) {
   } else if (Array.isArray(provider?.catalogModels)) {
     catalog = provider.catalogModels;
   }
+  const savedModel = draft?.model || provider?.model || "";
   if (catalog.length > 0) {
     catalog.forEach((entry) => addCatalogRow(entry));
-    refreshDefaultModelSelect();
+    refreshDefaultModelRadios(savedModel);
     return;
   }
   const slugs = [];
@@ -1121,32 +1133,51 @@ function seedCatalogRows(provider, draft) {
     slugs.push(value);
   }
   slugs.forEach((model) => addCatalogRow({ model, displayName: model }));
-  refreshDefaultModelSelect();
+  refreshDefaultModelRadios(savedModel);
 }
 
-function refreshDefaultModelSelect() {
-  const select = dialogField("model");
-  if (!(select instanceof HTMLSelectElement)) return;
-  const previous = select.value;
-  const models = collectCatalogModels();
-  select.textContent = "";
-  if (models.length === 0) {
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = "Add models above first";
-    select.appendChild(option);
-    return;
+function setCatalogDefaultState(row, isDefault) {
+  row.setAttribute("data-codex-helper-catalog-default", isDefault ? "true" : "false");
+  const radio = row.querySelector("[data-codex-helper-catalog-radio]");
+  if (radio instanceof HTMLElement) {
+    radio.setAttribute("aria-pressed", isDefault ? "true" : "false");
+    radio.setAttribute("aria-label", isDefault ? "Default model" : "Set as default model");
   }
-  for (const entry of models) {
-    const option = document.createElement("option");
-    option.value = entry.model;
-    option.textContent = entry.displayName !== entry.model
-      ? `${entry.displayName} (${entry.model})`
-      : entry.model;
-    select.appendChild(option);
+}
+
+function catalogRowModel(row) {
+  return (row.querySelector("[data-codex-helper-catalog-model]")?.value || "").trim();
+}
+
+function catalogRows() {
+  return providerDialogRoot?.querySelectorAll("[data-codex-helper-catalog-row]") || [];
+}
+
+function markCatalogDefaultRow(target) {
+  for (const row of catalogRows()) {
+    setCatalogDefaultState(row, row === target);
   }
-  if (previous && models.some((entry) => entry.model === previous)) {
-    select.value = previous;
+  persistProviderDraft();
+}
+
+function catalogDefaultModel() {
+  for (const row of catalogRows()) {
+    if (row.getAttribute("data-codex-helper-catalog-default") !== "true") continue;
+    return catalogRowModel(row);
+  }
+  return "";
+}
+
+function refreshDefaultModelRadios(currentModel) {
+  const rows = [...catalogRows()];
+  let marked = false;
+  for (const row of rows) {
+    const match = !marked && currentModel && catalogRowModel(row) === currentModel;
+    setCatalogDefaultState(row, match);
+    if (match) marked = true;
+  }
+  if (!marked && rows.length > 0) {
+    setCatalogDefaultState(rows[0], true);
   }
 }
 
@@ -1330,41 +1361,35 @@ function openProviderDialog(mode, provider) {
           { apiOnly: true, attr: "data-codex-helper-provider-wire-label" },
         )}
         <div class="codex-helper-provider-mapping-block">
-          <div class="codex-helper-provider-catalog">
-            <div class="codex-helper-provider-catalog-columns">
-              <span></span>
-              <span>Menu Display Name</span>
-              <span>Actual Request Model</span>
-              <span>Context Window</span>
-              <span>Reasoning Levels</span>
-              <span></span>
-            </div>
-            <div data-codex-helper-catalog-list></div>
-          </div>
-          <div class="codex-helper-provider-mapping-header">
+          <div class="codex-helper-provider-mapping-catalog-row">
             <span class="codex-helper-provider-field-label">Catalog</span>
-            <div class="codex-helper-provider-mapping-actions">
-              <button type="button" class="codex-helper-provider-mapping-fetch" ${helperCommandAttribute}="provider-fetch-models">Fetch Models</button>
-              <button type="button" class="codex-helper-provider-mapping-add" ${helperCommandAttribute}="provider-catalog-add">+ Add Model</button>
+            <div class="codex-helper-provider-catalog">
+              <div class="codex-helper-provider-catalog-columns">
+                <span></span>
+                <span></span>
+                <span>Menu Display Name</span>
+                <span>Actual Request Model</span>
+                <span>Context Window</span>
+                <span>Reasoning Levels</span>
+                <span></span>
+              </div>
+              <div data-codex-helper-catalog-list></div>
             </div>
           </div>
-          <div class="codex-helper-provider-mapping-body">
-            <label class="codex-helper-provider-catalog-prefix">
-              <span>Prefix with provider name</span>
-              <span class="codex-helper-switch">
-                <input type="checkbox" data-codex-helper-provider-field="prefixModelNames" aria-label="Prefix model names with the provider name">
-                <span class="codex-helper-switch-track" aria-hidden="true"><span class="codex-helper-switch-thumb"></span></span>
-              </span>
-            </label>
-            <div class="codex-helper-provider-fetch-error" data-codex-helper-provider-fetch-error></div>
-            <div class="codex-helper-provider-fetched" data-codex-helper-fetched-list hidden></div>
+          <label class="codex-helper-provider-catalog-prefix">
+            <span>Prefix with provider name</span>
+            <span class="codex-helper-switch">
+              <input type="checkbox" data-codex-helper-provider-field="prefixModelNames" aria-label="Prefix model names with the provider name">
+              <span class="codex-helper-switch-track" aria-hidden="true"><span class="codex-helper-switch-thumb"></span></span>
+            </span>
+          </label>
+          <div class="codex-helper-provider-mapping-actions">
+            <button type="button" class="codex-helper-provider-mapping-fetch" ${helperCommandAttribute}="provider-fetch-models">Fetch Models</button>
+            <button type="button" class="codex-helper-provider-mapping-add" ${helperCommandAttribute}="provider-catalog-add">+ Add Model</button>
           </div>
+          <div class="codex-helper-provider-fetch-error" data-codex-helper-provider-fetch-error></div>
+          <div class="codex-helper-provider-fetched" data-codex-helper-fetched-list hidden></div>
         </div>
-        ${providerFieldRow(
-          "Default model",
-          `<select data-codex-helper-provider-field="model"><option value="">Add models above first</option></select>`,
-          { attr: "data-codex-helper-provider-model-label" },
-        )}
         <datalist id="codex-helper-fetched-models"></datalist>
         <div class="codex-helper-provider-dialog-error" data-codex-helper-provider-dialog-error></div>
       </div>
@@ -1431,7 +1456,7 @@ function openProviderDialog(mode, provider) {
     persistProviderDraft();
     const target = event.target;
     if (target instanceof HTMLElement && target.closest("[data-codex-helper-catalog-row]")) {
-      refreshDefaultModelSelect();
+      refreshDefaultModelRadios(catalogDefaultModel());
     }
   });
   dialog.addEventListener("change", (event) => {
@@ -1543,27 +1568,24 @@ function setProviderFetchError(message) {
 }
 
 function selectFetchedModel(id) {
-  const node = dialogField("model");
-  if (node instanceof HTMLSelectElement) {
-    if ([...node.options].some((option) => option.value === id)) {
-      node.value = id;
+  const allRows = [...catalogRows()];
+  let target = allRows.find((row) => catalogRowModel(row) === id);
+  if (!target) {
+    const empty = allRows.find((row) => !catalogRowModel(row));
+    if (empty) {
+      const model = empty.querySelector("[data-codex-helper-catalog-model]");
+      const display = empty.querySelector("[data-codex-helper-catalog-display]");
+      if (model) model.value = id;
+      if (display && !display.value.trim()) display.value = id;
+      target = empty;
+    } else {
+      addCatalogRow({ model: id, displayName: id });
+      target = catalogRows()[catalogRows().length - 1];
     }
-  } else if (node) {
-    node.value = id;
   }
-  const rows = [...(providerDialogRoot?.querySelectorAll("[data-codex-helper-catalog-row]") || [])];
-  const empty = rows.find((row) => !(row.querySelector("[data-codex-helper-catalog-model]")?.value || "").trim());
-  if (empty) {
-    const model = empty.querySelector("[data-codex-helper-catalog-model]");
-    const display = empty.querySelector("[data-codex-helper-catalog-display]");
-    if (model) model.value = id;
-    if (display && !display.value.trim()) display.value = id;
-  } else if (!rows.some((row) => (row.querySelector("[data-codex-helper-catalog-model]")?.value || "").trim() === id)) {
-    addCatalogRow({ model: id, displayName: id });
-  }
+  if (target) markCatalogDefaultRow(target);
   persistProviderDraft();
   renderFetchedModelOptions();
-  refreshDefaultModelSelect();
 }
 
 function updateProviderAuthHint(options = {}) {
@@ -1853,13 +1875,13 @@ async function handleProviderCommand(command, source) {
   if (command === "provider-catalog-add") {
     addCatalogRow();
     persistProviderDraft();
-    refreshDefaultModelSelect();
+    refreshDefaultModelRadios(catalogDefaultModel());
     return;
   }
   if (command === "provider-catalog-remove") {
     source.closest("[data-codex-helper-catalog-row]")?.remove();
     persistProviderDraft();
-    refreshDefaultModelSelect();
+    refreshDefaultModelRadios(catalogDefaultModel());
     return;
   }
   if (source?.getAttribute("data-codex-helper-provider-field") === "authMode") {
@@ -1916,10 +1938,16 @@ async function handleProviderCommand(command, source) {
     }
     providerFetchedModels = Array.isArray(result.models) ? result.models : [];
     providerModelsFetchedThisSession = true;
-    const currentModel = dialogFieldValue("model");
+    const currentModel = catalogDefaultModel();
     if (!currentModel && providerFetchedModels[0]) {
-      const node = dialogField("model");
-      if (node) node.value = providerFetchedModels[0];
+      const rows = providerDialogRoot?.querySelectorAll("[data-codex-helper-catalog-row]") || [];
+      for (const row of rows) {
+        const model = (row.querySelector("[data-codex-helper-catalog-model]")?.value || "").trim();
+        if (model === providerFetchedModels[0]) {
+          markCatalogDefaultRow(row);
+          break;
+        }
+      }
     }
     renderFetchedModelOptions();
     persistProviderDraft();
@@ -1982,7 +2010,7 @@ async function handleProviderCommand(command, source) {
       return;
     }
     if (!isDeviceOauthMode(payload.authMode) && !String(payload.model || "").trim()) {
-      setProviderDialogError("Default model is required");
+      setProviderDialogError("Select a default model from the catalog");
       return;
     }
     const result = await bridge("/providers/save", payload);

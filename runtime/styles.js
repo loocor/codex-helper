@@ -1371,23 +1371,45 @@ function installHelperStyles() {
         gap: 8px;
         min-width: 0;
       }
-      [data-codex-helper-provider-dialog] .codex-helper-provider-mapping-header {
+      [data-codex-helper-provider-dialog] .codex-helper-provider-mapping-catalog-row {
         display: grid;
         grid-template-columns: 132px minmax(0, 1fr);
         column-gap: 16px;
-        align-items: center;
-        font-size: 13px;
-        font-weight: 400;
+        align-items: start;
       }
-      [data-codex-helper-provider-dialog] .codex-helper-provider-mapping-header .codex-helper-provider-field-label {
-        font-weight: 400;
-        color: inherit;
+      [data-codex-helper-provider-dialog] .codex-helper-provider-mapping-catalog-row .codex-helper-provider-field-label {
+        line-height: 32px;
       }
       [data-codex-helper-provider-dialog] .codex-helper-provider-mapping-actions {
         display: flex;
         align-items: center;
         justify-content: flex-end;
         gap: 8px;
+      }
+      [data-codex-helper-provider-dialog] .codex-helper-provider-mapping-block > .codex-helper-provider-catalog-prefix,
+      [data-codex-helper-provider-dialog] .codex-helper-provider-mapping-block > .codex-helper-provider-mapping-actions,
+      [data-codex-helper-provider-dialog] .codex-helper-provider-mapping-block > .codex-helper-provider-fetch-error,
+      [data-codex-helper-provider-dialog] .codex-helper-provider-mapping-block > .codex-helper-provider-fetched {
+        margin-left: 148px;
+      }
+      [data-codex-helper-provider-dialog] .codex-helper-provider-catalog-radio {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        margin-top: 8px;
+        border: 1.5px solid color-mix(in srgb, currentColor 35%, transparent);
+        border-radius: 50%;
+        cursor: pointer;
+        background: transparent;
+        padding: 0;
+        flex-shrink: 0;
+      }
+      [data-codex-helper-provider-dialog] .codex-helper-provider-catalog-radio[aria-pressed="true"] {
+        border-color: currentColor;
+        background: color-mix(in srgb, currentColor 80%, transparent);
+        box-shadow: inset 0 0 0 2.5px Canvas;
       }
       [data-codex-helper-provider-dialog] .codex-helper-provider-catalog-prefix {
         display: flex;
@@ -1397,18 +1419,11 @@ function installHelperStyles() {
         min-height: 30px;
         font-size: 13px;
       }
-      [data-codex-helper-provider-dialog] .codex-helper-provider-mapping-body {
-        margin-left: 148px;
-        min-width: 0;
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-      }
       [data-codex-helper-provider-dialog] .codex-helper-provider-catalog {
         display: grid;
         width: 100%;
         min-width: 0;
-        grid-template-columns: 20px minmax(0, 1fr) minmax(0, 1fr) 132px minmax(328px, max-content) 32px;
+        grid-template-columns: 20px 24px minmax(0, 1fr) minmax(0, 1fr) 132px minmax(328px, max-content) 32px;
         column-gap: 8px;
         row-gap: 8px;
         align-items: start;

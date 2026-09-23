@@ -251,7 +251,7 @@ test("settings page exposes provider management", () => {
   expect(settingsSource).toContain("provider-toggle-api-key");
   expect(settingsSource).toContain("provider-open-usage-url");
   expect(settingsSource).toContain("/providers/secret");
-  expect(settingsSource.indexOf("Wire API")).toBeLessThan(settingsSource.indexOf("Default model"));
+
   expect(settingsSource).toContain("codex-helper-provider-field-row");
   expect(settingsSource).toContain("codex-helper-provider-field-label");
   expect(settingsSource).toContain("codex-helper-provider-reasoning-chip");
@@ -267,7 +267,7 @@ test("settings page exposes provider management", () => {
   expect(settingsSource).toContain(
     '[data-codex-helper-provider-dialog][data-auth-mode="xai_oauth"] .codex-helper-provider-api-only',
   );
-  expect(settingsSource).toContain("codex-helper-provider-mapping-body");
+  expect(settingsSource).toContain("codex-helper-provider-mapping-block");
   expect(settingsSource).toContain("margin-left: 148px");
   expect(settingsSource).toContain("flex-wrap: nowrap");
   expect(settingsSource).toContain("min-width: 328px");
@@ -339,7 +339,7 @@ test("catalog rows expose drag handles for reordering", () => {
   expect(settingsSource).toContain("codex-helper-provider-drag-handle");
   expect(settingsSource).toContain("startCatalogReorder");
   expect(settingsSource).toContain("persistProviderDraft");
-  expect(settingsSource).toContain("refreshDefaultModelSelect");
+  expect(settingsSource).toContain("refreshDefaultModelRadios");
   expect(settingsSource).toContain("CATALOG_REORDER_THRESHOLD");
 });
 
@@ -676,15 +676,13 @@ test("provider save omits models until fetch and requires a default model", () =
   expect(settingsSource).toContain("if (providerModelsFetchedThisSession)");
   expect(settingsSource).toContain("payload.models = providerFetchedModels");
   expect(settingsSource).not.toContain("catalogModels[0]?.model");
-  expect(settingsSource).toContain('setProviderDialogError("Default model is required")');
-  expect(settingsSource).toContain('data-codex-helper-provider-field="model"');
-  expect(settingsSource).toContain("refreshDefaultModelSelect");
-  expect(settingsSource).toContain("Add models above first");
+  expect(settingsSource).toContain('setProviderDialogError("Select a default model from the catalog")');
+  expect(settingsSource).toContain("catalogDefaultModel");
   expect(settingsSource).toContain("entry.displayName");
-  // Default model lives below the catalog block
-  const modelIdx = settingsSource.indexOf('data-codex-helper-provider-field="model"');
+  // Default model is selected via radio in the catalog rows
+  const radioIdx = settingsSource.indexOf("markCatalogDefaultRow");
   const catalogIdx = settingsSource.indexOf("data-codex-helper-catalog-list");
-  expect(modelIdx).toBeGreaterThan(catalogIdx);
+  expect(radioIdx).toBeGreaterThan(catalogIdx);
   expect(settingsSource).toContain("modelsFetched: providerModelsFetchedThisSession");
   expect(settingsSource).toContain("catch (_error)");
 });
