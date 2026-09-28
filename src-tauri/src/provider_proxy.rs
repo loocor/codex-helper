@@ -36,8 +36,8 @@ use crate::providers::{
     apply_provider_effort_aliases, apply_provider_model_mappings, force_request_model,
     provider_allowed_models, provider_device_oauth_kind, provider_effort_aliases,
     provider_needs_deepseek_responses_sanitize, provider_needs_xai_compat, read_store,
-    resolve_model_route, rewrite_unmatched_request_model, selected_api_providers, Provider,
-    ProviderKind, ProviderStore,
+    resolve_model_route, rewrite_unmatched_request_model, selected_api_providers,
+    selected_catalog_models, Provider, ProviderKind, ProviderStore,
 };
 use crate::xai_sanitize::{
     append_utf8_safe, apply_xai_native_responses_request_compat, rewrite_xai_native_json_bytes,
@@ -321,6 +321,9 @@ impl ProviderProxy {
         let headers = request.headers().clone();
         let raw_body = request.collect().await?.to_bytes();
         let store = self.current_store()?;
+        if method == hyper::Method::GET && is_models_path(&path) {
+            return self.serve_model_list(&headers, &store);
+        }
         let mut provider = store
             .providers
             .iter()
@@ -1124,6 +1127,43 @@ impl ProviderProxy {
         anyhow::bail!("Unauthorized: {message}");
     }
 
+    /// `GET /v1/models` answers locally with every model the shared catalog
+    /// can route to, so Endpoint clients see the whole selected provider mix
+    /// instead of only the active provider's upstream model list.
+    fn serve_model_list(
+        &self,
+        headers: &hyper::header::HeaderMap,
+        store: &ProviderStore,
+    ) -> anyhow::Result<Response<ProxyBody>> {
+        // `authorize_request` already accepts every selected provider's API
+        // key; the active provider is only its entry point.
+        let fallback = Provider::default();
+        let auth_provider = store
+            .providers
+            .iter()
+            .find(|provider| provider.id == store.active_id)
+            .unwrap_or(&fallback);
+        self.authorize_request(headers, auth_provider, store)?;
+        let data: Vec<Value> = selected_catalog_models(store)
+            .into_iter()
+            .map(|(slug, provider_id)| {
+                serde_json::json!({
+                    "id": slug,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": provider_id,
+                })
+            })
+            .collect();
+        let body = serde_json::json!({ "object": "list", "data": data }).to_string();
+        Ok(Response::builder()
+            .status(200)
+            .header(hyper::header::CONTENT_TYPE, "application/json")
+            .body(bytes_body(body))?)
+    }
+
+    /// Current provider store: read from the state dir when available, with
+    /// the in-memory store as the test/dev fallback.
     fn current_store(&self) -> anyhow::Result<ProviderStore> {
         let (state_root, fallback) = {
             let state = self.inner.lock().expect("provider proxy lock");
@@ -1319,6 +1359,11 @@ fn is_responses_path(path: &str) -> bool {
         path,
         "/responses" | "/v1/responses" | "/responses/compact" | "/v1/responses/compact"
     )
+}
+
+fn is_models_path(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    matches!(path, "/models" | "/v1/models")
 }
 
 fn is_llm_path(path: &str) -> bool {
@@ -1556,6 +1601,7 @@ mod tests {
         collect_model_ids, is_llm_path, is_responses_path, join_provider_upstream_url,
         join_provider_upstream_url_for, provider_error_detail, ProviderProxy,
     };
+    use crate::endpoint;
     use crate::provider_oauth::OAuthKind;
     use crate::providers::{Provider, ProviderKind, ProviderStore};
     use serde_json::json;
@@ -2563,6 +2609,96 @@ mod tests {
             !text.contains("mimo::mimo-v2.6-pro"),
             "namespace leaked: {text}"
         );
+    }
+
+    #[tokio::test]
+    async fn proxy_serves_selected_model_mix_on_models_path() {
+        // Both upstreams point at an unused port: a forwarded /models request
+        // would fail instead of returning the local list.
+        let proxy = ProviderProxy::new();
+        proxy.set_store(ProviderStore {
+            active_id: "mimo".to_string(),
+            selected_ids: vec!["grok".to_string(), "mimo".to_string()],
+            providers: vec![
+                routed_provider("grok", "grok-4.7", "sk-grok", "http://127.0.0.1:9"),
+                routed_provider("mimo", "mimo-v2.6-pro", "sk-mimo", "http://127.0.0.1:9"),
+            ],
+        });
+        let port = proxy.bind_on(0).await.expect("proxy bind");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client");
+        for path in ["/v1/models", "/models"] {
+            let response = client
+                .get(format!("http://127.0.0.1:{port}{path}"))
+                .send()
+                .await
+                .expect("proxy request");
+            assert_eq!(response.status(), 200, "{path}");
+            let body: serde_json::Value = response.json().await.expect("models json");
+            assert_eq!(body["object"], "list", "{path}");
+            let ids: Vec<&str> = body["data"]
+                .as_array()
+                .expect("data")
+                .iter()
+                .map(|item| item["id"].as_str().expect("id"))
+                .collect();
+            assert_eq!(ids, vec!["grok-4.7", "mimo-v2.6-pro"], "{path}");
+            assert_eq!(body["data"][0]["owned_by"], "grok", "{path}");
+            assert_eq!(body["data"][1]["owned_by"], "mimo", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_model_list_honors_endpoint_keys() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        endpoint::write_store(
+            temp_dir.path(),
+            &endpoint::EndpointStore {
+                keys: vec![endpoint::EndpointKey {
+                    id: "one".to_string(),
+                    name: "Coser".to_string(),
+                    secret: "inbound-secret".to_string(),
+                    created_at: String::new(),
+                }],
+            },
+        )
+        .expect("endpoint store");
+        let proxy = ProviderProxy::new();
+        proxy.set_state_root(temp_dir.path().to_path_buf());
+        let store = ProviderStore {
+            active_id: "mimo".to_string(),
+            selected_ids: vec!["mimo".to_string()],
+            providers: vec![routed_provider(
+                "mimo",
+                "mimo-v2.6-pro",
+                "sk-mimo",
+                "http://127.0.0.1:9",
+            )],
+        };
+        crate::providers::write_store(temp_dir.path(), &store).expect("providers store");
+        proxy.set_store(store);
+        let port = proxy.bind_on(0).await.expect("proxy bind");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client");
+        let anonymous = client
+            .get(format!("http://127.0.0.1:{port}/v1/models"))
+            .send()
+            .await
+            .expect("anonymous request");
+        assert_eq!(anonymous.status(), 401);
+        let authorized = client
+            .get(format!("http://127.0.0.1:{port}/v1/models"))
+            .header("Authorization", "Bearer inbound-secret")
+            .send()
+            .await
+            .expect("authorized request");
+        assert_eq!(authorized.status(), 200);
+        let body: serde_json::Value = authorized.json().await.expect("models json");
+        assert_eq!(body["data"][0]["id"], "mimo-v2.6-pro");
     }
 
     #[tokio::test]
