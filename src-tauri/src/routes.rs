@@ -687,25 +687,11 @@ fn endpoint_delete_key_response(state_root: &std::path::Path, payload: &Value) -
 }
 
 fn endpoint_store_response(state_root: &std::path::Path, store: endpoint::EndpointStore) -> Value {
-    let provider = global_provider_proxy()
-        .active_provider()
-        .ok()
-        .flatten()
-        .or_else(|| {
-            crate::providers::read_store(state_root)
-                .ok()
-                .and_then(|store| {
-                    let active_id = store.active_id.clone();
-                    store
-                        .providers
-                        .into_iter()
-                        .find(|item| item.id == active_id)
-                })
-        });
+    let providers = read_store(state_root).unwrap_or_default();
     match global_provider_proxy().base_url() {
-        Ok(url) => endpoint::list_response(&store, &url, provider.as_ref()),
+        Ok(url) => endpoint::list_response(&store, &url, &providers),
         Err(error) => {
-            let mut response = endpoint::list_response(&store, "", provider.as_ref());
+            let mut response = endpoint::list_response(&store, "", &providers);
             response["proxyError"] = json!(error.to_string());
             response
         }

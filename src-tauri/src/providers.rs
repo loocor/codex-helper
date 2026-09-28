@@ -221,6 +221,24 @@ pub fn catalog_model_slug(providers: &[&Provider], provider_id: &str, model: &st
     }
 }
 
+/// Catalog slugs for every model routable through the current selection, in
+/// selection order, each paired with the provider it routes to. Colliding
+/// slugs are namespaced exactly like the shared Codex catalog.
+pub fn selected_catalog_models(store: &ProviderStore) -> Vec<(String, String)> {
+    let providers = selected_api_providers(store);
+    let mut models: Vec<(String, String)> = Vec::new();
+    let mut seen = HashSet::new();
+    for provider in &providers {
+        for model in provider_available_models(provider) {
+            let slug = catalog_model_slug(&providers, &provider.id, &model);
+            if seen.insert(slug.to_ascii_lowercase()) {
+                models.push((slug, provider.id.clone()));
+            }
+        }
+    }
+    models
+}
+
 fn canonical_provider_model(provider: &Provider, model: &str) -> Option<String> {
     provider_available_models(provider)
         .into_iter()

@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 use crate::codex_live::write_secret_file_atomic;
 use crate::provider_oauth::HELPER_OAUTH_LIVE_TOKEN;
-use crate::providers::{provider_available_models, Provider, ProviderKind};
+use crate::providers::{provider_is_official, selected_catalog_models, Provider, ProviderStore};
 
 const KEY_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -59,10 +59,19 @@ pub fn write_store(state_root: &Path, store: &EndpointStore) -> anyhow::Result<(
     write_secret_file_atomic(&path, contents)
 }
 
-pub fn list_response(store: &EndpointStore, base_url: &str, provider: Option<&Provider>) -> Value {
-    let official =
-        provider.is_some_and(|item| item.id == "official" || item.kind == ProviderKind::Oauth);
-    let models = provider.map(provider_available_models).unwrap_or_default();
+/// Models listed here are the whole selected provider mix, not just the
+/// active provider: the proxy routes each request by model across every
+/// selected provider, so Endpoint clients must see the same set.
+pub fn list_response(store: &EndpointStore, base_url: &str, providers: &ProviderStore) -> Value {
+    let models: Vec<String> = selected_catalog_models(providers)
+        .into_iter()
+        .map(|(slug, _)| slug)
+        .collect();
+    let active = providers
+        .providers
+        .iter()
+        .find(|provider| provider.id == providers.active_id);
+    let official = models.is_empty() && active.is_some_and(provider_is_official);
     json!({
         "status": "ok",
         "baseUrl": base_url,
@@ -239,22 +248,77 @@ mod tests {
 
     #[test]
     fn list_response_keeps_empty_base_url() {
-        let response = list_response(&EndpointStore::default(), "", None);
+        let response = list_response(&EndpointStore::default(), "", &ProviderStore::default());
         assert_eq!(response["status"], "ok");
         assert_eq!(response["baseUrl"], "");
     }
 
     #[test]
-    fn list_response_includes_active_provider_models() {
+    fn list_response_marks_official_selection() {
+        let response = list_response(&EndpointStore::default(), "", &ProviderStore::default());
+        assert_eq!(response["officialActive"], json!(true));
+        assert_eq!(response["models"], json!([]));
+    }
+
+    #[test]
+    fn list_response_includes_models_of_every_selected_provider() {
         let store = EndpointStore::default();
-        let provider = Provider {
-            model: "grok-4.6".to_string(),
-            models: vec!["grok-4.5".to_string()],
-            ..Provider::default()
+        let providers = ProviderStore {
+            active_id: "mimo".to_string(),
+            selected_ids: vec!["grok".to_string(), "mimo".to_string()],
+            providers: vec![
+                Provider {
+                    id: "grok".to_string(),
+                    model: "grok-4.6".to_string(),
+                    models: vec!["grok-4.5".to_string()],
+                    ..Provider::default()
+                },
+                Provider {
+                    id: "mimo".to_string(),
+                    model: "mimo-v2.6-pro".to_string(),
+                    models: vec!["mimo-v2.6-flash".to_string()],
+                    ..Provider::default()
+                },
+                Provider {
+                    id: "kimi".to_string(),
+                    model: "kimi-k3".to_string(),
+                    ..Provider::default()
+                },
+            ],
         };
-        let response = list_response(&store, "http://127.0.0.1:3721/v1", Some(&provider));
+        let response = list_response(&store, "http://127.0.0.1:3721/v1", &providers);
         assert_eq!(response["status"], "ok");
-        assert_eq!(response["models"], json!(["grok-4.6", "grok-4.5"]));
+        assert_eq!(response["officialActive"], json!(false));
+        assert_eq!(
+            response["models"],
+            json!(["grok-4.6", "grok-4.5", "mimo-v2.6-pro", "mimo-v2.6-flash"])
+        );
+    }
+
+    #[test]
+    fn list_response_namespaces_models_shared_by_selected_providers() {
+        let store = EndpointStore::default();
+        let providers = ProviderStore {
+            active_id: "grok".to_string(),
+            selected_ids: vec!["grok".to_string(), "mimo".to_string()],
+            providers: vec![
+                Provider {
+                    id: "grok".to_string(),
+                    model: "shared-model".to_string(),
+                    ..Provider::default()
+                },
+                Provider {
+                    id: "mimo".to_string(),
+                    model: "shared-model".to_string(),
+                    ..Provider::default()
+                },
+            ],
+        };
+        let response = list_response(&store, "http://127.0.0.1:3721/v1", &providers);
+        assert_eq!(
+            response["models"],
+            json!(["grok::shared-model", "mimo::shared-model"])
+        );
     }
 
     #[test]

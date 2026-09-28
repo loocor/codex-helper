@@ -40,7 +40,7 @@ function renderEndpoint(result) {
     ? result.proxyError
     : result?.officialActive
       ? "Official ChatGPT is active, so this endpoint is not serving requests."
-      : "Other agents should set this Base URL and one of the keys below. Helper uses the active provider.";
+      : "Other agents should set this Base URL and one of the keys below. Helper routes each model to its provider across the selected mix.";
   setHelperText("[data-codex-helper-endpoint-note]", note);
   renderEndpointModels(result);
   const keys = Array.isArray(result?.keys) ? result.keys : [];
